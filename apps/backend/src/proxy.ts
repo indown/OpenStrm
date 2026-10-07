@@ -9,6 +9,7 @@ import Fastify from "fastify";
 import { sqlite } from "./db/client.js";
 import { logger } from "./lib/logger.js";
 import { readAppSettings } from "./db/repositories/settings.js";
+import { trustProxyOption } from "./lib/trust-proxy.js";
 import proxyPlugin from "./routes/proxy/index.js";
 
 const PROXY_PORT = Number(process.env.PROXY_PORT) || 8091;
@@ -17,6 +18,11 @@ const HOST = process.env.BACKEND_HOST || "0.0.0.0";
 const app = Fastify({
   loggerInstance: logger,
   forceCloseConnections: true,
+  /**
+   * 和 API 进程同一个 TRUST_PROXY：放在反代后面时 request.ip 才是客户端地址——
+   * 路由规则里的「来源：内网 / 外网」靠它，回源给 Emby 的 X-Real-IP 也靠它。
+   */
+  trustProxy: trustProxyOption(process.env.TRUST_PROXY),
   /**
    * Fastify 默认把 requestTimeout 设成 0，连 Node 自带的 300s 也一并关掉了，
    * 直接对外暴露时没有慢速请求防护。这里把 Node 的默认值补回来。

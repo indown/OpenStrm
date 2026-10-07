@@ -201,6 +201,38 @@ export const settingsPatchSchema = z.looseObject({
       url: z.string().optional(),
       apiKey: z.string().optional(),
       allowAnonymousRedirect: z.boolean().optional(),
+      pathMappings: z
+        .array(
+          z.object({
+            from: z
+              .string()
+              .trim()
+              .min(1, "路径映射：Emby 路径前缀不能为空")
+              .max(500, "路径映射：Emby 路径前缀太长")
+              .refine((v) => /^(\/|https?:\/\/)/i.test(v), "路径映射：Emby 路径前缀要以 / 或 http(s):// 开头"),
+            account: z.string().trim().min(1, "路径映射：要选网盘账号").max(100),
+            to: z.string().trim().max(500, "路径映射：网盘目录太长").optional(),
+          }),
+        )
+        .max(100, "路径映射最多 100 条")
+        // 同一个前缀两条：解析时只会认第一条，第二条形同虚设，不如在这里就说清楚
+        .refine((list) => new Set(list.map((m) => m.from.replace(/\/+$/, ""))).size === list.length, "路径映射里有重复的 Emby 路径前缀")
+        .optional(),
+      routeRules: z
+        .array(
+          z.object({
+            action: z.enum(["redirect", "relay"], "路由规则：处理方式只能是 redirect 或 relay"),
+            note: z.string().trim().max(100, "路由规则：备注太长").optional(),
+            userAgent: z.string().trim().max(200).optional(),
+            client: z.string().trim().max(200).optional(),
+            deviceName: z.string().trim().max(200).optional(),
+            deviceId: z.string().trim().max(200).optional(),
+            path: z.string().trim().max(500).optional(),
+            remote: z.enum(["lan", "wan"]).optional(),
+          }),
+        )
+        .max(100, "路由规则最多 100 条")
+        .optional(),
     })
     .optional(),
   telegram: z

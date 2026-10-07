@@ -82,6 +82,14 @@ export type AppSettings = {
      * 只有那种连请求头里都不带令牌的客户端才需要打开，代价是放弃这道校验。
      */
     allowAnonymousRedirect?: boolean;
+    /**
+     * 302 代理的路径映射：Emby 看到的路径前缀 → 哪个网盘账号的哪个目录。
+     * 开了 302 的任务推得出来的不用填（strmPrefix + originPath 就是映射）；这里是给任务推不出来的：
+     * 别的工具生成的 strm、挂载结构不是「一个前缀对一个目录」的。手填的优先于任务推出来的。
+     */
+    pathMappings?: ProxyPathMapping[];
+    /** 302 代理的路由规则：按客户端 / 来源 / 路径决定走直链还是交给 Emby，从上到下第一条命中的生效 */
+    routeRules?: ProxyRouteRule[];
   };
   telegram?: TelegramSettings;
   tmdb?: {
@@ -107,6 +115,41 @@ export type AppSettings = {
   /** 影库：收藏的分享抄目录树建索引 */
   library?: LibrarySettings;
 } & Record<string, unknown>;
+
+/** 302 代理的一条路径映射 */
+export type ProxyPathMapping = {
+  /** Emby 看到的路径前缀（strm 里写的路径开头）：本地挂载路径（/mnt/115/主号）或 http(s) 地址 */
+  from: string;
+  /** 这段路径下的文件在哪个网盘账号里（账号名；只有 115 能 302） */
+  account: string;
+  /** 前缀对应网盘上的哪个目录，不填是根目录 */
+  to?: string;
+};
+
+/** 命中路由规则后怎么播：redirect = 302 到直链（没命中任何规则时的默认）；relay = 不动，交给 Emby 自己处理（中转或转码） */
+export type ProxyRouteAction = "redirect" | "relay";
+
+/**
+ * 302 代理的一条路由规则。填了的条件都满足才算命中（与关系）；一个条件都不填 = 全部命中。
+ * 规则从上到下看，第一条命中的决定怎么播；一条都没命中按 redirect。
+ */
+export type ProxyRouteRule = {
+  action: ProxyRouteAction;
+  /** 备注，只给人看 */
+  note?: string;
+  /** User-Agent 包含这段（不分大小写） */
+  userAgent?: string;
+  /** 客户端名（X-Emby-Client）包含这段，如 Emby Web、Infuse、Emby for Android TV */
+  client?: string;
+  /** 设备名（X-Emby-Device-Name）包含这段 */
+  deviceName?: string;
+  /** 设备 id（X-Emby-Device-Id）正好等于；设备 id 不跟着切换用户变 */
+  deviceId?: string;
+  /** Emby 看到的路径以这段开头（按目录边界） */
+  path?: string;
+  /** 来源：lan = 本机和内网地址，wan = 其它。放在反代后面要设 TRUST_PROXY 才认得出 */
+  remote?: "lan" | "wan";
+};
 
 /**
  * 网盘限流。默认值和上下限只在后端有一份（db/defaults.ts），GET /api/settings 回的总是补齐的三个值。

@@ -33,9 +33,11 @@ function fingerprint(): string {
   ]);
   // enable302 决定这个任务的 strmPrefix 算不算挂载点，翻转它就该让旧直链失效
   const tasks = listTasks().map((t) => [t.account, t.strmPrefix ?? "", t.originPath ?? "", t.enable302 ? 1 : 0]);
+  // 路径映射改了，同一条目可能换盘换目录；路由规则改了，缓存着直链的条目可能该交给 Emby 了
+  const rules = { mappings: settings.emby?.pathMappings ?? [], routes: settings.emby?.routeRules ?? [] };
 
   return createHash("sha1")
-    .update(JSON.stringify({ mount: settings.mediaMountPath ?? [], accounts, tasks }))
+    .update(JSON.stringify({ mount: settings.mediaMountPath ?? [], accounts, tasks, rules }))
     .digest("base64url")
     .slice(0, 12);
 }

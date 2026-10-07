@@ -10,6 +10,7 @@
  *    而 115 直链不带 CORS 头，浏览器直接拒绝播放。把那段判断改掉。
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { embyUpstream } from "../../services/emby/api.js";
 import { fetchUpstream, relayResponse, toEmby } from "./upstream.js";
 
 /**
@@ -60,6 +61,19 @@ function proxyPort(request: FastifyRequest): number {
   return Number(process.env.PROXY_PORT) || 8091;
 }
 
+/**
+ * Emby 自己的端口。System/Info 里有端口字段就用它；Public 版没有这些字段，
+ * 按配置的上游地址推——地址里不写端口的按协议默认。
+ */
+function upstreamPort(): number {
+  try {
+    const url = new URL(embyUpstream());
+    return Number(url.port) || (url.protocol === "https:" ? 443 : 80);
+  } catch {
+    return 0;
+  }
+}
+
 async function handleSystemInfo(request: FastifyRequest, reply: FastifyReply) {
   let upstream: Awaited<ReturnType<typeof fetchUpstream>> | undefined;
   try {
@@ -74,7 +88,7 @@ async function handleSystemInfo(request: FastifyRequest, reply: FastifyReply) {
       return relayResponse(reply, upstream.res, raw);
     }
 
-    const originPort = Number(body.WebSocketPortNumber ?? body.HttpServerPortNumber ?? 0);
+    const originPort = Number(body.WebSocketPortNumber ?? body.HttpServerPortNumber ?? 0) || upstreamPort();
     swapPorts(body, originPort, proxyPort(request));
 
     return relayResponse(reply, upstream.res, JSON.stringify(body), {
@@ -125,6 +139,11 @@ export default async function systemInfoRoutes(fastify: FastifyInstance) {
     for (const variant of ["System", "system"]) {
       for (const info of ["Info", "info"]) {
         fastify.get(`${prefix}/${variant}/${info}`, handleSystemInfo);
+        // 登录前客户端先问的是 Public 版：里面的 LocalAddress / WanAddress 同样带着 Emby 的端口，
+        // 不换掉的话客户端连上之后就直接去找 Emby 了，代理形同虚设；顺带也不再把 Emby 的真实地址亮给没登录的人
+        for (const pub of ["Public", "public"]) {
+          fastify.get(`${prefix}/${variant}/${info}/${pub}`, handleSystemInfo);
+        }
       }
     }
     fastify.get(

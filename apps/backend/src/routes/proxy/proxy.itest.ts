@@ -30,6 +30,13 @@ const LOCAL_FILE = "/media/local/movie.mkv";
 /** strm 里写 OpenList 地址的那种任务：前缀是 URL，代理按 URL 匹配挂载点 */
 const HTTP_MOUNT = "http://ol.local:5244/d/115";
 const HTTP_FILE = `${HTTP_MOUNT}/tv/Show/ep1.mkv`;
+/** 挂载点里的另一个目录：路由规则按路径只让它交给 Emby 时，别的目录照常 302 */
+const FOUR_K_FILE = `${MOUNT}/4K/Movie.mkv`;
+/** 既不是手填挂载点也没有任务的前缀：只有手填的路径映射能让代理接管它 */
+const MAPPED_MOUNT = "/mnt/mapped";
+const MAPPED_FILE = `${MAPPED_MOUNT}/Show/ep1.mkv`;
+/** 假 Emby 收到的条目查询次数：看路径的路由规则要查条目，结果该缓存起来 */
+let itemLookups = 0;
 /**
  * 真实形态的 115 直链：文件名已经是转义过的，签名里带 `+` 和 `=`。
  * 必须**原样**出现在 Location 里：再做一次 encodeURI 的话
@@ -51,8 +58,9 @@ const emby = http.createServer((req, res) => {
   }
   if (url.includes("/Items?Ids=")) {
     const id = new URL(url, "http://x").searchParams.get("Ids");
-    // item-local 指向本地文件，item-http 是 strm 里写 OpenList 地址的条目，其余都指向挂载点里的 strm
-    const path = id === "item-local" ? LOCAL_FILE : id === "item-http" ? HTTP_FILE : PAN_FILE;
+    itemLookups++;
+    // item-local 指向本地文件，item-http 是 strm 里写 OpenList 地址的条目，item-4k 在挂载点的另一个目录，其余都指向挂载点里的 strm
+    const path = id === "item-local" ? LOCAL_FILE : id === "item-http" ? HTTP_FILE : id === "item-4k" ? FOUR_K_FILE : PAN_FILE;
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ Items: [{ Name: "Show", Path: path, MediaSources: [{ Id: id, Path: path, Container: "mkv" }] }] }));
     return;
@@ -64,8 +72,16 @@ const emby = http.createServer((req, res) => {
         { Id: "ms-pan", Path: PAN_FILE, Container: "mkv", SupportsDirectPlay: false, SupportsDirectStream: false, DirectStreamUrl: "/emby/Videos/ms-pan/stream.mkv?api_key=k" },
         { Id: "ms-local", Path: LOCAL_FILE, Container: "mp4", SupportsDirectPlay: false, SupportsDirectStream: false, DirectStreamUrl: "/emby/Videos/ms-local/stream.mp4?api_key=k" },
         { Id: "ms-http", Path: HTTP_FILE, Container: "mkv", SupportsDirectPlay: false, SupportsDirectStream: false, DirectStreamUrl: "/emby/Videos/ms-http/stream.mkv?api_key=k" },
+        { Id: "ms-4k", Path: FOUR_K_FILE, Container: "mkv", SupportsDirectPlay: false, SupportsDirectStream: false, DirectStreamUrl: "/emby/Videos/ms-4k/stream.mkv?api_key=k" },
+        { Id: "ms-mapped", Path: MAPPED_FILE, Container: "mkv", SupportsDirectPlay: false, SupportsDirectStream: false, DirectStreamUrl: "/emby/Videos/ms-mapped/stream.mkv?api_key=k" },
       ],
     }));
+    return;
+  }
+  // Public 版（登录前客户端先问的那个）没有端口字段，只有地址；真 Emby 的路径不分大小写，桩也照做
+  if (url.toLowerCase().includes("/system/info/public")) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ LocalAddress: `http://192.168.1.2:${embyPort}`, ServerName: "lab", Version: "4.8.0.0", Id: "lab" }));
     return;
   }
   // 真 Emby 对 /System/Info 和 /emby/System/Info 都认，桩也照做
@@ -606,6 +622,144 @@ test("改配置后旧缓存自动失效（跨进程）", async () => {
     assert.equal(resolveCalls, 2, "配置变了还命中旧缓存，说明失效没生效");
     setSettings(now);
     resetConfigRevisionMemo();
+  });
+
+// ---- 路由规则 ----
+
+/** 改一下 emby 组里的规则，跑完还原；配置指纹的 memo 也要顺手重置 */
+async function withEmbySettings(patch: Record<string, unknown>, fn: () => Promise<void>) {
+  const now = readAppSettings();
+  setSettings({ ...now, emby: { ...now.emby, ...patch } });
+  resetConfigRevisionMemo();
+  try {
+    await fn();
+  } finally {
+    setSettings(now);
+    resetConfigRevisionMemo();
+  }
+}
+
+test("路由规则：按 UA 交给 Emby 的客户端不 302，PlaybackInfo 也原样", async () => {
+    reset();
+    await withEmbySettings({ routeRules: [{ action: "relay", userAgent: "oldbox" }] }, async () => {
+      const relayed = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k", headers: { "user-agent": "OldBox/1.0" } });
+      assert.equal(relayed.statusCode, 200);
+      assert.equal(relayed.body, "upstream-ok", "命中 relay 的请求要原样回源");
+      assert.equal(resolveCalls, 0, "交给 Emby 的请求不该去换直链");
+
+      const other = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k", headers: { "user-agent": "VLC/3.0" } });
+      assert.equal(other.statusCode, 302, "没命中规则的客户端照常 302");
+
+      const info = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {}, headers: { "user-agent": "OldBox/1.0" } });
+      const pan = JSON.parse(info.body).MediaSources.find((s: { Id: string }) => s.Id === "ms-pan");
+      assert.equal(pan.SupportsDirectPlay, false, "交给 Emby 的客户端，PlaybackInfo 不能改写，不然它拿不到转码");
+      assert.equal(pan.SupportsTranscoding, undefined, "上游没给的字段也不该被我们补上");
+      assert.match(pan.DirectStreamUrl, /^\/emby\/Videos\/ms-pan/, "地址要是上游原样的");
+    });
+  });
+
+test("路由规则：按路径只让某个目录交给 Emby，其它目录照常 302；条目查询结果缓存", async () => {
+    reset();
+    await withEmbySettings({ routeRules: [{ action: "relay", path: `${MOUNT}/4K` }] }, async () => {
+      itemLookups = 0;
+      const relayed = await app.inject({ method: "GET", url: "/emby/Videos/item-4k/stream.mkv?api_key=k", headers: { "user-agent": "VLC/3.0" } });
+      assert.equal(relayed.body, "upstream-ok", "4K 目录交给 Emby");
+      assert.equal(resolveCalls, 0);
+      assert.equal(itemLookups, 1, "裁决要看路径，得查一次条目");
+
+      await app.inject({ method: "GET", url: "/emby/Videos/item-4k/stream.mkv?api_key=k", headers: { "user-agent": "VLC/3.0" } });
+      assert.equal(itemLookups, 1, "同一条目再来一次不该再问 Emby");
+
+      const other = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k", headers: { "user-agent": "VLC/3.0" } });
+      assert.equal(other.statusCode, 302, "别的目录照常 302");
+      assert.equal(other.headers.location, DIRECT_URL);
+
+      const info = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {} });
+      const sources = JSON.parse(info.body).MediaSources;
+      assert.equal(sources.find((s: { Id: string }) => s.Id === "ms-4k").SupportsDirectPlay, false, "4K 目录的源原样");
+      assert.equal(sources.find((s: { Id: string }) => s.Id === "ms-pan").SupportsDirectPlay, true, "其它源照常改写");
+    });
+  });
+
+test("路由规则：Infuse 命中 relay 时连第二跳都不走", async () => {
+    reset();
+    await withEmbySettings({ routeRules: [{ action: "relay", client: "infuse" }] }, async () => {
+      const res = await app.inject({
+        method: "GET",
+        url: "/emby/Videos/item-1/stream.mkv",
+        headers: { "user-agent": "Infuse-Direct/8.5", "x-emby-authorization": 'MediaBrowser Client="Infuse", Device="iPad", DeviceId="d1", Token="k"' },
+      });
+      assert.equal(res.statusCode, 200, "不该 302 回代理自己");
+      assert.equal(res.body, "upstream-ok");
+      assert.equal(resolveCalls, 0);
+    });
+  });
+
+test("路由规则：按来源分内外网（inject 的来源是本机，算内网）", async () => {
+    reset();
+    await withEmbySettings({ routeRules: [{ action: "relay", remote: "lan" }] }, async () => {
+      const res = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
+      assert.equal(res.body, "upstream-ok", "内网来的交给 Emby");
+    });
+    await withEmbySettings({ routeRules: [{ action: "relay", remote: "wan" }] }, async () => {
+      const res = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
+      assert.equal(res.statusCode, 302, "规则只管外网，内网照常 302");
+    });
+  });
+
+test("路由规则：条件全空的 relay 等于关掉 302，PlaybackInfo 也不碰", async () => {
+    reset();
+    await withEmbySettings({ routeRules: [{ action: "relay", note: "先全关" }] }, async () => {
+      const res = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
+      assert.equal(res.body, "upstream-ok");
+      const info = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {} });
+      const pan = JSON.parse(info.body).MediaSources.find((s: { Id: string }) => s.Id === "ms-pan");
+      assert.equal(pan.SupportsDirectPlay, false);
+    });
+  });
+
+// ---- 路径映射 ----
+
+test("路径映射的前缀算进挂载集合：PlaybackInfo 把那个目录的源标成可直连", async () => {
+    reset();
+    const before = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {} });
+    const untouched = JSON.parse(before.body).MediaSources.find((s: { Id: string }) => s.Id === "ms-mapped");
+    assert.equal(untouched.SupportsDirectPlay, false, "没有映射时这个前缀不归代理管");
+
+    await withEmbySettings({ pathMappings: [{ from: `${MAPPED_MOUNT}/`, account: "主号", to: "/视频" }] }, async () => {
+      const after = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {} });
+      const mapped = JSON.parse(after.body).MediaSources.find((s: { Id: string }) => s.Id === "ms-mapped");
+      assert.equal(mapped.SupportsDirectPlay, true, "映射的前缀要和挂载点一样被接管");
+      assert.match(mapped.DirectStreamUrl, /^\/Videos\/item-1\/stream\.mkv\?/);
+    });
+  });
+
+test("改了路由规则或路径映射，旧直链缓存立刻失效", async () => {
+    reset();
+    const a = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k", headers: { "user-agent": "UA-1" } });
+    assert.equal(a.statusCode, 302);
+    assert.equal(resolveCalls, 1);
+
+    await withEmbySettings({ pathMappings: [{ from: "/mnt/zzz", account: "主号" }] }, async () => {
+      await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k", headers: { "user-agent": "UA-1" } });
+      assert.equal(resolveCalls, 2, "映射变了还命中旧缓存，说明规则没进配置指纹");
+    });
+    await withEmbySettings({ routeRules: [{ action: "redirect", userAgent: "nobody" }] }, async () => {
+      await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k", headers: { "user-agent": "UA-1" } });
+      assert.equal(resolveCalls, 3, "路由规则变了同样要重新解析");
+    });
+  });
+
+// ---- System/Info/Public ----
+
+test("System/Info/Public 也换端口：Public 版没有端口字段，Emby 的端口按上游地址推", async () => {
+    const res = await app.inject({ method: "GET", url: "/emby/System/Info/Public" });
+    assert.equal(res.statusCode, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.LocalAddress, "http://192.168.1.2:8091", "登录前拿到的地址也得指向代理，不然客户端连上就绕开了");
+    assert.equal(body.ServerName, "lab", "其它字段原样");
+    const lower = await app.inject({ method: "GET", url: "/system/info/public" });
+    assert.equal(JSON.parse(lower.body).LocalAddress, "http://192.168.1.2:8091", "小写路径同样命中");
   });
 
 after(async () => {

@@ -7,8 +7,8 @@
  */
 import assert from "node:assert/strict";
 import { test as t } from "node:test";
-import type { AppSettings, TaskDefinition } from "@openstrm/shared";
-import { accountNameByTask, effectiveMountPaths, normalizeMediaPath, safeDecode, stripMountPath } from "./direct-link.js";
+import type { AppSettings, ProxyPathMapping, TaskDefinition } from "@openstrm/shared";
+import { accountNameByTask, effectiveMountPaths, joinPanPath, matchPathMapping, normalizeMediaPath, safeDecode, stripMountPath } from "./direct-link.js";
 // ---- stripMountPath ----
 t("剥掉挂载前缀，剩下的就是盘内路径", () => {
   const r = stripMountPath("/mnt/pan/tv/Show/ep1.mkv", ["/mnt/pan"]);
@@ -135,4 +135,53 @@ t("URL 前缀的任务也能反查到账号，不需要路径里带账号名", (
   assert.equal(accountNameByTask("/mnt/pan/小号", "/tv/Show/ep1.mkv", web), "小号");
   const settings = { mediaMountPath: ["/mnt/manual/"] } as unknown as AppSettings;
   assert.deepEqual(effectiveMountPaths(settings, web), ["/mnt/manual", "http://ol:5244/d/115", "/mnt/pan/小号"]);
+});
+
+// ---- 手填的路径映射 ----
+const mappings: ProxyPathMapping[] = [
+  { from: "/mnt/other", account: "小号", to: "/视频" },
+  { from: "/mnt/other/电影/", account: "主号" },
+  { from: "http://ol:5244/d/pan", account: "主号", to: "/" },
+];
+
+t("路径映射取最长前缀，剩下的就是相对路径", () => {
+  const r = matchPathMapping("/mnt/other/电影/a.mkv", mappings);
+  assert.equal(r?.mapping.account, "主号");
+  assert.equal(r?.rest, "/a.mkv");
+  const shorter = matchPathMapping("/mnt/other/tv/a.mkv", mappings);
+  assert.equal(shorter?.mapping.account, "小号");
+  assert.equal(shorter?.rest, "/tv/a.mkv");
+});
+
+t("路径映射按目录边界，不在任何前缀下返回 null", () => {
+  assert.equal(matchPathMapping("/mnt/others/a.mkv", mappings), null, "/mnt/others 不该被 /mnt/other 命中");
+  assert.equal(matchPathMapping("/media/a.mkv", mappings), null);
+  assert.equal(matchPathMapping("/media/a.mkv", undefined), null);
+});
+
+t("没填完的映射不算数：空前缀不能把 / 当成前缀接管一切", () => {
+  assert.equal(matchPathMapping("/media/a.mkv", [{ from: "", account: "主号" }]), null);
+  assert.equal(matchPathMapping("/media/a.mkv", [{ from: "   ", account: "主号" }]), null);
+  assert.equal(matchPathMapping("/media/a.mkv", [{ from: "/media", account: "" }]), null, "没选账号的也不算");
+});
+
+t("URL 前缀的映射同样能剥", () => {
+  const r = matchPathMapping("http://ol:5244/d/pan//tv/a.mkv", mappings);
+  assert.equal(r?.mapping.account, "主号");
+  assert.equal(r?.rest, "/tv/a.mkv");
+});
+
+t("joinPanPath：目标目录拼上相对路径，不填就是根目录", () => {
+  assert.equal(joinPanPath("/视频", "/tv/a.mkv"), "/视频/tv/a.mkv");
+  assert.equal(joinPanPath("视频/", "/a.mkv"), "/视频/a.mkv", "前导斜杠补上、尾斜杠去掉");
+  assert.equal(joinPanPath(undefined, "/a.mkv"), "/a.mkv");
+  assert.equal(joinPanPath("", "/a.mkv"), "/a.mkv");
+  assert.equal(joinPanPath("/", "/a.mkv"), "/a.mkv");
+  assert.equal(joinPanPath("/视频", "/"), "/视频", "路径正好等于前缀时就是目标目录本身");
+  assert.equal(joinPanPath("/", "/"), "/");
+});
+
+t("映射的前缀算进挂载集合，PlaybackInfo 才会把这些源标成可直连", () => {
+  const settings = { emby: { pathMappings: [{ from: "/mnt/other/", account: "主号" }, { from: "", account: "主号" }] } } as unknown as AppSettings;
+  assert.deepEqual(effectiveMountPaths(settings, []), ["/mnt/other"]);
 });

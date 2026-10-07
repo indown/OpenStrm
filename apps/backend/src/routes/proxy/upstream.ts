@@ -59,10 +59,12 @@ export function applyForwardedHeaders(request: FastifyRequest, headers: Headers)
   const priorChain = incoming["x-forwarded-for"];
   const prior = Array.isArray(priorChain) ? priorChain.join(", ") : priorChain;
 
-  headers["x-forwarded-for"] = prior ? `${prior}, ${request.ip}` : request.ip;
+  // 转发链上追加的是真实对端。设了 TRUST_PROXY 时 request.ip 已经是从链上取出来的客户端地址，再追加一遍就重了
+  const peer = request.socket?.remoteAddress || request.ip;
+  headers["x-forwarded-for"] = prior ? `${prior}, ${peer}` : peer;
   /**
-   * X-Real-IP 取真实对端，不能取客户端自报的转发链：
-   * 取链条第一跳的话，任何人发一个 X-Forwarded-For 就能让 Emby 的记录、
+   * X-Real-IP 给 Emby 认人用：没设 TRUST_PROXY 时就是真实对端，设了才按信任的跳数从转发链上取。
+   * 不能无条件采信客户端自报的转发链：任何人发一个 X-Forwarded-For 就能让 Emby 的记录、
    * 封禁、地域判断全部认错人。
    */
   headers["x-real-ip"] = request.ip;

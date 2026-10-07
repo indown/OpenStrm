@@ -9,6 +9,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { EmbyMediaSource } from "../../services/emby/api.js";
 import { clientApiKey } from "../../services/emby/api.js";
 import { currentMountPaths, safeDecode, stripMountPath } from "../../services/resolve/direct-link.js";
+import { clientContext, decideRoute } from "../../services/resolve/route-rules.js";
+import { readSettingsSafe } from "../../services/settings-safe.js";
 import { fetchUpstream, relayResponse, toEmby } from "./upstream.js";
 
 /**
@@ -71,6 +73,8 @@ export function rewritePlaybackInfo(
   mountPaths: string[],
   requestQuery: Record<string, unknown> = {},
   requestHeaders: Record<string, string | string[] | undefined> = {},
+  /** 路由规则说这个路径要交给 Emby：那一个媒体源原样不动，客户端按 Emby 的意思中转或转码 */
+  relay: (path: string) => boolean = () => false,
 ): boolean {
   const sources = body.MediaSources;
   if (!Array.isArray(sources)) return false;
@@ -79,6 +83,7 @@ export function rewritePlaybackInfo(
   for (const source of sources as EmbyMediaSource[]) {
     if (!isOurs(source, mountPaths)) continue;
     if (source.IsInfiniteStream) continue; // 直播流不做直连改写
+    if (relay(source.Path ?? "")) continue;
 
     /**
      * strm 里是 http(s) 地址时不能标"可直接播放"：那意味着客户端自己去取 strm 里的 URL，
@@ -123,12 +128,16 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
     }
 
     // 每个请求算一次，别在每个媒体源上都去读一遍库
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const rules = readSettingsSafe().emby?.routeRules ?? [];
+    const ctx = { ...clientContext(query, request.headers), userAgent: request.headers["user-agent"], ip: request.ip };
     const touched = rewritePlaybackInfo(
       body,
       itemId,
       currentMountPaths(),
-      (request.query ?? {}) as Record<string, unknown>,
+      query,
       request.headers,
+      (path) => rules.length > 0 && decideRoute(rules, { ...ctx, path }) === "relay",
     );
     if (touched) request.log.info({ itemId }, "PlaybackInfo 已改写为直连");
 

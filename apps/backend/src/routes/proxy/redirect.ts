@@ -11,6 +11,7 @@ import { clientApiKey, getItemMediaSource, getSyncJobItemPath } from "../../serv
 import { readSettingsSafe } from "../../services/settings-safe.js";
 import { configRevision } from "../../services/config-revision.js";
 import { resolveEmbyPath } from "../../services/resolve/direct-link.js";
+import { clientContext, decideRoute, rulesNeedPath, type RouteContext } from "../../services/resolve/route-rules.js";
 import { toEmby } from "./upstream.js";
 
 /**
@@ -21,9 +22,16 @@ import { toEmby } from "./upstream.js";
  */
 const linkCache = new LRUCache<string, string>({ max: 2000, ttl: 15 * 60 * 1000 });
 
+/**
+ * 条目查询结果也缓存一份：路由规则要看路径时，裁决在换链之前，
+ * 不缓存的话 Infuse 每个分片的每一跳都要去问一次 Emby。
+ */
+const lookupCache = new LRUCache<string, EmbyItemLookup>({ max: 2000, ttl: 15 * 60 * 1000 });
+
 /** 换了 115 账号或改了挂载配置之后，旧直链就不该再用了 */
 export function clearLinkCache(): void {
   linkCache.clear();
+  lookupCache.clear();
 }
 
 /**
@@ -126,9 +134,12 @@ async function redirectWithLookup(
   reply: FastifyReply,
   itemId: string,
   lookup: PathLookup,
+  /** 缓存 key 里区分 id 的名字空间：同步任务项的 id 和条目 id 是两套数字，不分开会串 */
+  kind: "item" | "sync",
 ) {
   const mediaSourceId = queryValue(request.query, "MediaSourceId", "mediaSourceId");
   const userAgent = request.headers["user-agent"];
+  const settings = readSettingsSafe();
 
   /**
    * 没有客户端凭据就不往下走，而且必须在查缓存之前拦——否则匿名请求能白拿
@@ -139,11 +150,46 @@ async function redirectWithLookup(
    * 裁决——upstream 原样转发请求头，靠头认证的客户端照样能播，只是不走 302。
    */
   const apiKey = clientApiKey(request.query as Record<string, unknown>, request.headers);
-  if (!apiKey && !readSettingsSafe().emby?.allowAnonymousRedirect) {
+  if (!apiKey && !settings.emby?.allowAnonymousRedirect) {
     // info 而不是 debug：正常部署里匿名请求不该出现，而这条不打出来的话，
     // 「媒体库能刷出来、播放却不走直连」在默认日志级别下完全无从查起
     request.log.info({ itemId }, "请求未携带 Emby 凭据，不解析直链，透传回源");
     return toEmby(request, reply);
+  }
+
+  /**
+   * key 里带配置版本：改了账号、挂载点或规则之后旧条目自然失效。
+   * 代理是独立进程，收不到 API 进程的失效通知，只能这样跨进程对齐。
+   */
+  const idKey = `${configRevision()}:${kind}:${itemId}:${mediaSourceId ?? ""}`;
+
+  /**
+   * 路由规则在换链之前裁决：命中「交给 Emby」的请求连 Infuse 的第二跳都不该走。
+   * 只看客户端 / 来源的规则现在就能定；看路径的要先查条目（结果缓存，别让 Infuse 每个分片都问一次 Emby）。
+   */
+  const rules = settings.emby?.routeRules ?? [];
+  let item: EmbyItemLookup | null | undefined;
+  if (rules.length > 0) {
+    const ctx: RouteContext = {
+      ...clientContext(request.query as Record<string, unknown>, request.headers),
+      userAgent,
+      ip: request.ip,
+    };
+    if (rulesNeedPath(rules)) {
+      try {
+        item = lookupCache.get(idKey) ?? (await lookup(itemId, { mediaSourceId, apiKey }));
+        if (item) lookupCache.set(idKey, item);
+      } catch (err) {
+        request.log.error({ err, itemId }, "查询条目失败，回源");
+        return toEmby(request, reply);
+      }
+      ctx.path = item?.path;
+    }
+    if (decideRoute(rules, ctx) === "relay") {
+      // debug 而不是 info：relay 的客户端每个分片都会来一次，排查时开 debug 看
+      request.log.debug({ itemId, ua: userAgent }, "路由规则命中，交给 Emby 处理");
+      return toEmby(request, reply);
+    }
   }
 
   // 不记日志：Infuse 播放时每个分片都重新请求一次流地址，每次都是两跳，
@@ -152,11 +198,8 @@ async function redirectWithLookup(
     return reply.redirect(secondHopLocation(request, apiKey), 302);
   }
 
-  /**
-   * key 里带配置版本：改了账号或挂载点之后旧条目自然失效。
-   * 代理是独立进程，收不到 API 进程的失效通知，只能这样跨进程对齐。
-   */
-  const cacheKey = `${configRevision()}:${itemId}:${mediaSourceId ?? ""}:${userAgent ?? ""}`;
+  // 115 的直链和 UA 绑定，所以 UA 必须进 key
+  const cacheKey = `${idKey}:${userAgent ?? ""}`;
 
   const cached = linkCache.get(cacheKey);
   if (cached) {
@@ -169,7 +212,8 @@ async function redirectWithLookup(
   // catch 里的回源会带着这个坏头去发流，兜底也跟着崩。
   let target: string;
   try {
-    const item = await lookup(itemId, { mediaSourceId, apiKey });
+    // 为了裁决路由已经查过的就不再查
+    if (item === undefined) item = await lookup(itemId, { mediaSourceId, apiKey });
     if (!item?.path) {
       request.log.info({ itemId }, "Emby 未返回路径，回源");
       return toEmby(request, reply);
@@ -214,9 +258,7 @@ async function handleRedirect(request: FastifyRequest, reply: FastifyReply) {
   if (!REDIRECTABLE.has(actionOf(rest))) return toEmby(request, reply);
   if (!itemId) return toEmby(request, reply);
 
-  return redirectWithLookup(request, reply, itemId, (id, opts) =>
-    getItemMediaSource(id, opts),
-  );
+  return redirectWithLookup(request, reply, itemId, (id, opts) => getItemMediaSource(id, opts), "item");
 }
 
 /**
@@ -229,9 +271,7 @@ async function handleSyncDownload(request: FastifyRequest, reply: FastifyReply) 
   if (request.method === "HEAD") return toEmby(request, reply);
   if (!jobItemId) return toEmby(request, reply);
 
-  return redirectWithLookup(request, reply, jobItemId, (id, opts) =>
-    getSyncJobItemPath(id, { apiKey: opts.apiKey }),
-  );
+  return redirectWithLookup(request, reply, jobItemId, (id, opts) => getSyncJobItemPath(id, { apiKey: opts.apiKey }), "sync");
 }
 
 export default async function redirectRoutes(fastify: FastifyInstance) {

@@ -25,6 +25,7 @@ import { OpenlistCopySection } from "./components/OpenlistCopySection";
 import { OrganizeSection } from "./components/OrganizeSection";
 import { UpdateSection } from "./components/UpdateSection";
 import { AgentSection } from "./components/AgentSection";
+import { PathMappingsEditor, RouteRulesEditor } from "./components/EmbyProxyRules";
 import { SectionNav, type Section } from "./components/SectionNav";
 
 /** 右侧导航的顺序就是页面顺序；id 对应各 section 上的锚点 */
@@ -169,6 +170,30 @@ const schema = z.object({
     url: httpUrl("填 http:// 或 https:// 开头的地址"),
     apiKey: z.string(),
     allowAnonymousRedirect: z.boolean(),
+    // 302 代理的两张规则表。行里的错误挂在整张表上（第几条、什么问题），FormMessage 显示在表下面；后端还会再校验一遍
+    pathMappings: z.array(z.object({ from: z.string(), account: z.string(), to: z.string() })).superRefine((rows, ctx) => {
+      const seen = new Set<string>();
+      rows.forEach((row, i) => {
+        const from = row.from.trim();
+        if (!from || !row.account) ctx.addIssue({ code: "custom", message: `第 ${i + 1} 条路径映射：Emby 路径前缀和账号都要填` });
+        else if (!/^(\/|https?:\/\/)/i.test(from)) ctx.addIssue({ code: "custom", message: `第 ${i + 1} 条路径映射：前缀要以 / 或 http(s):// 开头` });
+        const key = from.replace(/\/+$/, "");
+        if (key && seen.has(key)) ctx.addIssue({ code: "custom", message: `第 ${i + 1} 条路径映射：前缀和前面的重复了，解析时只会认第一条` });
+        seen.add(key);
+      });
+    }),
+    routeRules: z.array(
+      z.object({
+        action: z.enum(["redirect", "relay"]),
+        note: z.string(),
+        userAgent: z.string(),
+        client: z.string(),
+        deviceName: z.string(),
+        deviceId: z.string(),
+        path: z.string(),
+        remote: z.enum(["", "lan", "wan"]),
+      }),
+    ),
   }),
   // 两个并发的上下限同样照着后端的 THROTTLE_LIMITS
   throttle: z.object({
@@ -227,6 +252,17 @@ function fromSettings(s: AppSettings): SettingsValues {
       url: s.emby?.url ?? "",
       apiKey: s.emby?.apiKey ?? "",
       allowAnonymousRedirect: s.emby?.allowAnonymousRedirect === true,
+      pathMappings: (s.emby?.pathMappings ?? []).map((m) => ({ from: m.from ?? "", account: m.account ?? "", to: m.to ?? "" })),
+      routeRules: (s.emby?.routeRules ?? []).map((r) => ({
+        action: r.action === "redirect" ? ("redirect" as const) : ("relay" as const),
+        note: r.note ?? "",
+        userAgent: r.userAgent ?? "",
+        client: r.client ?? "",
+        deviceName: r.deviceName ?? "",
+        deviceId: r.deviceId ?? "",
+        path: r.path ?? "",
+        remote: r.remote === "lan" || r.remote === "wan" ? r.remote : ("" as const),
+      })),
     },
     // 后端回的总是补齐的三个值，这里不放兜底数字：以前这里写的默认值和后端真正在用的对不上
     throttle: {
@@ -258,6 +294,12 @@ function fromSettings(s: AppSettings): SettingsValues {
   };
 }
 
+/** 规则里没填的条件不带给后端：空串在后端也当没填，但存进去的东西干净些 */
+function optional<K extends string>(key: K, value: string): Partial<Record<K, string>> {
+  const trimmed = value.trim();
+  return trimmed ? ({ [key]: trimmed } as Record<K, string>) : {};
+}
+
 /** 表单那份 → 提交那份 */
 function toSettings(v: SettingsValues): AppSettings {
   return {
@@ -265,7 +307,22 @@ function toSettings(v: SettingsValues): AppSettings {
     strmExtensions: v.strmExtensions,
     downloadExtensions: v.downloadExtensions,
     mediaMountPath: v.mediaMountPath,
-    emby: v.emby,
+    emby: {
+      url: v.emby.url,
+      apiKey: v.emby.apiKey,
+      allowAnonymousRedirect: v.emby.allowAnonymousRedirect,
+      pathMappings: v.emby.pathMappings.map((m) => ({ from: m.from.trim(), account: m.account, ...optional("to", m.to) })),
+      routeRules: v.emby.routeRules.map((r) => ({
+        action: r.action,
+        ...optional("note", r.note),
+        ...optional("userAgent", r.userAgent),
+        ...optional("client", r.client),
+        ...optional("deviceName", r.deviceName),
+        ...optional("deviceId", r.deviceId),
+        ...optional("path", r.path),
+        ...(r.remote ? { remote: r.remote } : {}),
+      })),
+    },
     throttle: {
       requestsPerSecond: Number(v.throttle.requestsPerSecond),
       requestConcurrency: Number(v.throttle.requestConcurrency),
@@ -678,6 +735,26 @@ export default function SettingsPage() {
                     checked={field.value === true}
                     onCheckedChange={field.onChange}
                   />
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="emby.pathMappings"
+                render={({ field }) => (
+                  <FormItem>
+                    <PathMappingsEditor value={field.value} onChange={field.onChange} />
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="emby.routeRules"
+                render={({ field }) => (
+                  <FormItem>
+                    <RouteRulesEditor value={field.value} onChange={field.onChange} />
+                    <FormMessage />
+                  </FormItem>
                 )}
               />
             </section>

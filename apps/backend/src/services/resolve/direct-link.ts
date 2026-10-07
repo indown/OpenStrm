@@ -10,7 +10,7 @@
  * 直链和请求时用的 UA 是绑定的，所以 UA 必须由调用方传进来——
  * 302 场景要用客户端自己的 UA，否则客户端拿着这条链接去下会被 115 拒掉。
  */
-import type { AccountInfo, AppSettings, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AppSettings, ProxyPathMapping, TaskDefinition } from "@openstrm/shared";
 import { listAccounts } from "../../db/repositories/accounts.js";
 import { listTasks } from "../../db/repositories/tasks.js";
 import { readSettingsSafe } from "../settings-safe.js";
@@ -20,7 +20,7 @@ import { PermanentError } from "../../lib/errors.js";
 type Account115 = Extract<AccountInfo, { accountType: "115" }>;
 
 export type ResolveFailure =
-  /** 一个 115 账号都没配 */
+  /** 没有能用的 115 账号：一个都没配，或者任务 / 路径映射指向的账号已删、改名、不是 115 */
   | "no-account"
   /** 路径不在任何 mediaMountPath 之下，不该由我们接管 */
   | "not-mounted"
@@ -83,7 +83,7 @@ export function stripMountPath(
 }
 
 /**
- * 代理接管的挂载前缀 = 设置里手填的 mediaMountPath ∪ 开了 302 的任务的 strmPrefix。
+ * 代理接管的挂载前缀 = 设置里手填的 mediaMountPath ∪ 手填路径映射的 from ∪ 开了 302 的任务的 strmPrefix。
  *
  * 任务那一半现算而不落库：以前是建任务时追加进 settings，删任务、关 302 都不会摘掉，
  * 列表只增不减，早就删掉的前缀还在被代理接管。
@@ -92,9 +92,38 @@ export function mountPathsFromTasks(tasks: TaskDefinition[]): string[] {
   return tasks.filter((t) => t.enable302 && t.strmPrefix).map((t) => normalizeMount(t.strmPrefix!));
 }
 
+/** 填齐了 from 和 account 的映射才算数：界面上刚点「添加」还没填的那一行不能把 `/` 当成前缀接管一切 */
+function usableMappings(mappings: ProxyPathMapping[] | undefined): ProxyPathMapping[] {
+  return (mappings ?? []).filter((m) => m.from?.trim() && m.account?.trim());
+}
+
 export function effectiveMountPaths(settings: AppSettings, tasks: TaskDefinition[]): string[] {
   const manual = (settings.mediaMountPath ?? []).filter(Boolean).map(normalizeMount);
-  return [...new Set([...manual, ...mountPathsFromTasks(tasks)])];
+  const mapped = usableMappings(settings.emby?.pathMappings).map((m) => normalizeMount(m.from));
+  return [...new Set([...manual, ...mapped, ...mountPathsFromTasks(tasks)])];
+}
+
+/**
+ * 手填的路径映射：Emby 路径前缀 → 账号 + 网盘目录。
+ * 和挂载点一样取最长前缀、按目录边界；同一个前缀写了两条取第一条（保存时会拒掉重复的，这里只是兜底）。
+ */
+export function matchPathMapping(
+  rawPath: string,
+  mappings: ProxyPathMapping[] | undefined,
+): { mapping: ProxyPathMapping; rest: string } | null {
+  const usable = usableMappings(mappings);
+  if (usable.length === 0) return null;
+  const stripped = stripMountPath(rawPath, usable.map((m) => m.from));
+  if (!stripped) return null;
+  const mapping = usable.find((m) => normalizeMount(m.from) === stripped.mount);
+  return mapping ? { mapping, rest: stripped.rest } : null;
+}
+
+/** 映射的目标目录拼上剩余路径：`/视频` + `/tv/a.mkv` → `/视频/tv/a.mkv`；目标不填就是根目录 */
+export function joinPanPath(to: string | undefined, rest: string): string {
+  const base = trimTrailing(normalizeMediaPath(`/${(to ?? "").trim()}`));
+  const tail = rest === "/" ? "" : rest;
+  return normalizeMediaPath(`${base}${tail}`) || "/";
 }
 
 /**
@@ -181,13 +210,27 @@ export async function resolveEmbyPath(
   embyPath: string,
   userAgent?: string,
 ): Promise<ResolveResult> {
+  const settings = readSettingsSafe();
+  const decoded = safeDecode(embyPath);
+
+  /**
+   * 手填的路径映射优先：它就是为任务推不出来的那部分路径准备的，推得出来的本来也不用填。
+   * 命中了就只认它指向的账号——账号被删 / 改名 / 不是 115 时报错回源，不能落到别的账号上。
+   */
+  const mapped = matchPathMapping(decoded, settings.emby?.pathMappings);
+  if (mapped) {
+    const account = accounts115().find((a) => a.name === mapped.mapping.account);
+    if (!account) return { ok: false, reason: "no-account" };
+    return toDirectUrl(account, joinPanPath(mapped.mapping.to, mapped.rest), userAgent);
+  }
+
   /**
    * 先判挂载点再判账号。反过来的话，没配 115 账号时每次播本地文件
    * 都会记一条 no-account 的 warn——而"这个路径不归我们管"才是实情，
    * 跟有没有账号无关。
    */
   const tasks = listTasks();
-  const stripped = stripMountPath(safeDecode(embyPath), effectiveMountPaths(readSettingsSafe(), tasks));
+  const stripped = stripMountPath(decoded, effectiveMountPaths(settings, tasks));
   if (!stripped) return { ok: false, reason: "not-mounted" };
 
   const list = accounts115();
