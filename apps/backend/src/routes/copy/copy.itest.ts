@@ -104,6 +104,40 @@ test("POST /api/copy：手动发起；复制后删源要令牌有「删除」档
   assert.equal((await call("POST", "/api/copy", { taskId: "t1", paths: ["Show"], afterCopy: "burn" })).statusCode, 400);
 });
 
+test("POST /api/copy/after：按记录 id 事后归档（目标里没看到就不动）；删除要「删除」档；ids 和 taskId + paths 二选一；GET 带 canAfterCopy", async () => {
+  const now = Date.now();
+  saveCopies([
+    { id: "k1", account: "acc", srcDir: "/tv/Show", name: "E01.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", rootPath: "/tv", taskId: "t1", trigger: "monitor", afterCopy: "keep", addedAt: now, status: "done", stage: "copying", detail: "复制完成", doneAt: now, attempts: 0, waits: 0, misses: 0 },
+    { id: "p1", account: "acc", srcDir: "/tv/Show", name: "E02.mkv", dstDir: "/local/media/Show", dstBase: "/local/media", rootPath: "/tv", taskId: "t1", trigger: "monitor", afterCopy: "keep", addedAt: now, status: "pending", stage: "waiting", detail: "", attempts: 0, waits: 0, misses: 0 },
+  ]);
+  const list = (await call("GET", "/api/copy")).json() as { items: Array<{ id: string; canAfterCopy: boolean }> };
+  assert.deepEqual(Object.fromEntries(list.items.map((i) => [i.id, i.canAfterCopy])), { k1: true, p1: false });
+
+  // 桩里 OpenList 什么都列不出来：核对不过，源文件不动，照实说
+  const res = await call("POST", "/api/copy/after", { ids: ["k1"], afterCopy: "archive" });
+  assert.equal(res.statusCode, 200, res.body);
+  const body = res.json() as { afterCopy: string; done: number; items: Array<{ id: string; path: string; outcome: string; detail?: string }> };
+  assert.equal(body.afterCopy, "archive");
+  assert.equal(body.done, 0);
+  assert.deepEqual(body.items.map((i) => [i.id, i.path, i.outcome]), [["k1", "Show/E01.mkv", "incomplete"]]);
+  assert.match(body.items[0].detail ?? "", /没有这一份/);
+
+  assert.equal((await call("POST", "/api/copy/after", { ids: ["k1"], taskId: "t1", paths: ["Show"], afterCopy: "archive" })).statusCode, 400, "二选一");
+  assert.equal((await call("POST", "/api/copy/after", { afterCopy: "archive" })).statusCode, 400, "都没给");
+  assert.equal((await call("POST", "/api/copy/after", { ids: ["k1"], afterCopy: "keep" })).statusCode, 400, "去向只能是归档 / 删除");
+  assert.equal((await call("POST", "/api/copy/after", { ids: ["k1"] })).statusCode, 400, "去向必填");
+  assert.equal((await call("POST", "/api/copy/after", { taskId: "没有", paths: ["Show"], afterCopy: "archive" })).statusCode, 404);
+
+  const write = createApiToken({ name: "写-after", scopes: ["read", "run", "write"], toolsets: ["transfer"], expiresAt: null }).token;
+  const denied = await call("POST", "/api/copy/after", { ids: ["k1"], afterCopy: "delete" }, { authorization: `Bearer ${write}` });
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.json().code, "INSUFFICIENT_SCOPE");
+  const viaToken = await call("POST", "/api/copy/after", { ids: ["k1"], afterCopy: "archive" }, { authorization: `Bearer ${write}` });
+  assert.equal(viaToken.statusCode, 200, "归档只要「改网盘」档");
+  const readOnly = createApiToken({ name: "读-after", scopes: ["read"], toolsets: ["transfer"], expiresAt: null }).token;
+  assert.equal((await call("POST", "/api/copy/after", { ids: ["k1"], afterCopy: "archive" }, { authorization: `Bearer ${readOnly}` })).statusCode, 403);
+});
+
 test("没有 token 一律 401", async () => {
   const res = await app.inject({ method: "GET", url: "/api/copy" });
   assert.equal(res.statusCode, 401);

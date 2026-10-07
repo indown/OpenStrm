@@ -720,3 +720,52 @@ copyToOpenlist?: { enabled?: boolean; dstDir?: string };   // dstDir 不填用�
 - 「删源文件失败：网盘接口 30 秒没有回应（自动重试 3 次都没成）」。
 
 接口报错照旧是长说法。对应用例改了期望，加了 `brief` 的单测。
+
+## 事后处理源文件：copy_after（2026-10-07）
+
+起因：用户转述智能体的话「当前这个 MCP 版本没有单独的『把已复制完成的源文件移到归档』接口」。查了，属实，而且不只 MCP 没有：
+
+- 去向（afterCopy）只能在登记那一刻定（任务设置，或 copy_add 这一次指定），记录上「登记时冻结」；`upgradeAfterCopy` 只补还在排队的。
+- 对复制好的再 copy_add 传 archive：`enqueueManualCopy` 看到目标里已经有同名就判「目标里已经都有了」，一条不登记，归档意图静默丢掉。
+- REST 只有看 / 发起 / 重试 / 去掉，面板只有重试和去掉；drive_browse 只读、organize 是改名、strm_delete 只删本地，智能体完全做不到。
+- 伏笔：2026-09-25 方案把「从归档恢复」留到以后；真机那次记过「记录已经是已复制，面板上没有补做这一步的入口」，后来只加了临时错误自动重试。
+
+用户说「按你的推荐开始吧」。
+
+### 方案
+
+**服务层**：新模块 `copy/after.ts`，`settleAfterCopy({ afterCopy: "archive" | "delete", ids? | task + paths?, dstDir?, allowDelete, signal?, onProgress? })`。
+
+- 两种指法归到同一条处理路径：按路径为主（办完的记录只留两天，更早复制的只能这么指；和 copy_add 同一口径，`uniquePaths` 同一套校验），按 id 为辅（界面按钮、copy_list 给的 id）。
+- 核对比复制完自动处理那道门严一层：源还在原处（知道节点 id 的要对得上）、目标里这一份齐了——目录逐层比名字（复用 `planFill`），文件比大小。为此 `TargetListing` 改成带类型 / 大小的 `entries()`（`names()` 由它派生），`planFill` 返回 `{ missing, mismatched }`（手动复制只看 `missing`），`deps.openlist` 多一个可选的 `listEntries`（桩只给 `listNames` 的照样能跑、只比名字）。不齐的 `incomplete`，让人先 copy_add 补（它只补缺的）。
+- 动手复用 `applyAfterCopy`：导出，签名改成 `(c, cfg, { retry, verified })`，返回结构化的 `AfterCopyOutcome`（archived / removed / retry / kept），说明、`sourceKept`、`afterRetry` 照旧写在记录上。`verified: true` 跳过它自己那层一级核对。归档 / 删除 + 删本地 strm + 临时错误挂 `afterRetry` 由循环再做（这边 `startCopyWatcher` 把循环拉起来）都是现成的。当场回话、不发通知；挂到 `afterRetry` 的按老规矩由循环收尾通知。
+- 记录：队列里有复制好的那条就接着用（`afterCopy` 改成这次的、`sourceKept` 清掉、`doneAt` 刷新、detail 前缀「复制完成（事后归档）」）；没有的新记一条 done、trigger manual、detail「目标里已经有这一份，事后处理源文件」，用 `saveCopies` 整份写（`commitCopies` 的 added 会按「刚复制过」去重，人把文件挪回来再归档一次时会把新记录吞掉）。还在复制的用 `upgradeAfterCopy`（导出，参数放宽成 Pick）补去向，结果 `scheduled`；记录上已经有去向的不改（先登记的算）。
+- 两阶段：先只看不改（任何一条核对不了——网盘、OpenList 读不到——整个请求都不动；单条整目录太大 TOO_LARGE 只拦那一条），再逐条处理、随手写回；每条处理完叫一次 `onProgress`。动手前再看一眼任务有没有在整理。`resetArchiveDirCache` 开始前清一次目录链缓存（那份缓存本来是一轮一清的）。
+- 判定 `afterCopyBlocker` / `canAfterCopy`（service.ts，和 `retryBlocker` 并列）：done、不是接管、有 taskId 和 rootPath、没在自动重试、去向是不动或 `sourceKept` 有值（归档里有同名、超时三次没成的还能再来）。pending 另算。
+- 结果 `items[]` 每条：`outcome` = archived / deleted / retrying / kept / incomplete / missing / scheduled / pending / invalid，带 path（任务相对）、id、name、isDir、detail、to。
+
+**REST**：`POST /api/copy/after`（write + transfer；删除按最终去向由服务层把关，令牌要 danger，会话不受限），`GET /api/copy` 每条带 `canAfterCopy`。
+
+**工具** `copy_after`（transfer 组、write 档；注解 idempotent、非破坏性——归档可逆，删除靠档位把关，和 copy_add 一致）：ids 或 task + paths 二选一，afterCopy 必填；40 秒内直接回、超了交给作业用 job_status 等（和 share_save 同一套）。`copy_list` 每条带 `canAfterCopy`，有能处理的给一句提示；服务端说明的「概念」和 USAGE_NOTES 各加一句。工具 42 → 43。
+
+**界面**：队列面板 `canAfterCopy` 的记录多一个「归档源文件」按钮，确认框说清先核对、归档放哪、本地 strm 删、怎么恢复；结果按 outcome 提示。删除不进界面（任务级设置和智能体有）。
+
+**不做**：按记录 id 删除平铺复制（没任务）的源；「从归档恢复」仍是手动挪回。
+
+### 实施记录（2026-10-07）
+
+按方案做完，未提交。
+
+- `services/copy/service.ts`：`OpenlistTargetEntry`、`deps.openlist.listEntries?`、`listOpenlistEntries`；`applyAfterCopy` 导出 + 返回 `AfterCopyOutcome`（说明文案一字没改，archive-source / copy 的用例原样过）；`upgradeAfterCopy` 导出；`resetArchiveDirCache`；`afterCopyBlocker` / `canAfterCopy`。
+- `services/copy/manual.ts`：导出 `assertNotOrganizing`、`uniquePaths`、`TargetListing`（entries + names）、`planFill`（`FillPlan`）、`sizeMismatch`。
+- `services/copy/after.ts`（新）：上面那套。
+- `routes/copy/index.ts`：`POST /api/copy/after`、`canAfterCopy`。
+- `services/agent/tools/copy.ts`：`copy_after`、`copy_list` 的 `canAfterCopy` 和提示；`tools/index.ts` 登记；`instructions.ts` 两句；快照 +1。
+- 前端：`lib/api.ts` 的 `CopyItem.canAfterCopy`、`CopyAfterInput / Result`、`api.copy.after`；`CopyQueuePanel` 按钮 + 确认框 + 结果提示。
+- README「智能体接入」两处。
+- 测试：新 `copy/after.itest.ts` 10 条（按 id 归档、整目录缺项 / 大小对不上 / 齐了、排着的补去向、八种不能处理的原因、归档里同名 / 节点换了、按路径新记一条、按路径接着用旧记录 + 网盘没有 + 目标没有、十种拒绝、删除、超时挂重试到点挪成）；`routes/copy/copy.itest` +1、`routes/mcp/mcp-copy.itest` +1；manual / archive-source / copy / remove-source 四个文件 100 条原样过；工具快照更新。tsc、eslint 前后端都过。
+- 真机（2026-10-07 下午，用户批准后在 115 上做的）：本机 OpenList 容器挂 `115 Cloud`（cookie 来自配置库只读拷贝）+ `Local`（scratch 目录），scratch 后端 4100、前端 dev 3223；115 根下建 `/v1007lab`，经 OpenList 上传三个 340 KB 的测试视频，`POST /api/copy` 复制到 `/local`（约 70 秒完成，去向不动）。
+  - REST `POST /api/copy/after`（按 id）：3.6 秒，`archived`、`to: /v1007lab/归档`；记录 detail「复制完成（事后归档）；网盘上那份已归档到 /v1007lab/归档，本地 strm 也删了」，`canAfterCopy` 变 false；115 上 `/v1007lab/归档/after-test.mkv` 340827、原处没了；本地 strm 删了。**115 报的大小和 OpenList Local 报的一致**（340827），文件大小核对这一层在真机上不会误拦。
+  - MCP（官方 SDK 客户端连 /mcp，日常令牌）：`copy_list` 每条带 `canAfterCopy`、提示指向 copy_after；`copy_after` 传 delete 报 INSUFFICIENT_SCOPE（提示换 archive）；ids 和 task + paths 一起给报 VALIDATION；按 `task: "v1007lab", paths: ["after-test2.mkv"]` 3.65 秒 `archived`（state done、带 jobId，接着用了队列里那条记录）；再来一次 `missing`「网盘上没有这条路径（源文件已不在原处）」。
+  - 界面（3223）：队列面板只有去向是不动的那条有「归档源文件」按钮；确认框文案对；点「归档」约 4 秒后 toast「已归档到 /v1007lab/归档，本地 strm 已删」，行上变成「复制后归档」+ 新 detail，按钮消失。
+  - 收尾：`/115/v1007lab`（里面只剩「归档」+ 三个测试视频）经 OpenList `fs/remove` 删进 115 回收站，根目录列表里已经没有它；容器 `docker rm -f`，带 cookie 的 scratch 文件删掉。

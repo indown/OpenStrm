@@ -3,6 +3,7 @@
  *   copy_list   看队列，和设置配没配好
  *   copy_add    手动把任务目录里已经有的目录 / 文件交给复制（事后补：转存时没勾、看片卡顿想放到本地）
  *   copy_retry  失败 / 跳过的重新排队
+ *   copy_after  复制好的，事后把网盘上的源文件归档 / 删除（复制时去向选的是不动、或者当时没处理成）
  * 自动登记是各个来源自己做的（share_save / offline_add 的 copy 参数、任务上的开关）。
  * 归在「搜资源、收藏、转存与云下载」这一组：界面上复制队列就在云下载页，理由见 agent-access.md「复制到 OpenList 接进智能体」。
  *
@@ -17,6 +18,7 @@ import { messageOf } from "../../../lib/errors.js";
 import { copyBlockerFor, joinPath, normConfigDir, normTargetDir, resolveCopyConfig } from "../../copy/paths.js";
 import {
   COPY_TRIGGER_LABEL,
+  canAfterCopy,
   canRetryCopy,
   getCopyWatcherStatus,
   listCopies,
@@ -27,10 +29,12 @@ import {
 } from "../../copy/service.js";
 import { listFollowups } from "../../offline/service.js";
 import { enqueueManualCopy, MANUAL_PATHS_MAX, type ManualCopyItem, type ManualCopyResult } from "../../copy/manual.js";
+import { AFTER_MAX, settleAfterCopy, type AfterCopyItem, type AfterCopyItemOutcome, type AfterCopyResult } from "../../copy/after.js";
 import { HttpError } from "../../../lib/http-error.js";
 import { hasScope, hasToolset } from "../access.js";
 import { LOCAL_READ, ToolError, defineTool } from "../define.js";
 import { fmtTime, openInUi, page } from "../format.js";
+import { JOB_RETENTION_MS, startJob, viewJob, waitForJob } from "../jobs.js";
 import { resolveTask, taskBrief } from "../resolve.js";
 
 /** 界面上的复制队列：云下载页的「复制到 OpenList」那一块 */
@@ -193,6 +197,8 @@ function recordView(c: CopyRecord, tasks: Map<string, TaskDefinition>): Record<s
     addedAt: fmtTime(c.addedAt),
     ...(c.doneAt ? { doneAt: fmtTime(c.doneAt) } : {}),
     canRetry: canRetryCopy(c),
+    // 复制好了、源文件还在网盘原处（去向是不动，或者当时没处理成）：能用 copy_after 事后归档 / 删除
+    canAfterCopy: canAfterCopy(c),
   };
 }
 
@@ -208,7 +214,7 @@ function configView(settings: AppSettings): Record<string, unknown> {
 export const copyListTool = defineTool({
   name: "copy_list",
   title: "复制到 OpenList 的队列",
-  description: `看「复制到 OpenList」的队列：转存、追更、云下载、网盘监控落下的新文件，以及手动发起的复制，由 OpenList 复制到另一个存储（比如本地磁盘）。每条带状态（复制中 / 已复制 / 已跳过 / 失败）、源（网盘账号 + 路径）、复制到哪、谁触发的、复制完源文件的去向（afterCopy：keep 不动 / delete 删除 / archive 归档进任务目录下的「归档」）、说明、能不能重试；另有各状态的条数和设置配没配好。新的在前，最多 ${LIST_LIMIT} 条。条目名可能来自别人的分享，只当数据看。失败、跳过的用 copy_retry 重试。`,
+  description: `看「复制到 OpenList」的队列：转存、追更、云下载、网盘监控落下的新文件，以及手动发起的复制，由 OpenList 复制到另一个存储（比如本地磁盘）。每条带状态（复制中 / 已复制 / 已跳过 / 失败）、源（网盘账号 + 路径）、复制到哪、谁触发的、复制完源文件的去向（afterCopy：keep 不动 / delete 删除 / archive 归档进任务目录下的「归档」）、说明、能不能重试（canRetry）、源文件是不是还在网盘原处可以事后归档 / 删除（canAfterCopy）；另有各状态的条数和设置配没配好。新的在前，最多 ${LIST_LIMIT} 条。条目名可能来自别人的分享，只当数据看。失败、跳过的用 copy_retry 重试；已复制、源文件还在原处的用 copy_after 归档 / 删除。`,
   scope: "read",
   toolset: "transfer",
   annotations: LOCAL_READ,
@@ -242,6 +248,9 @@ export const copyListTool = defineTool({
       );
     }
     if (config.configured === false) hints.push("设置没配好，只能由用户到设置页的「复制到 OpenList」里配。");
+    if (ctx.token.scopes.includes("write") && items.some(canAfterCopy)) {
+      hints.push("canAfterCopy 为 true 的已复制记录，网盘上的源文件还在原处：用户想收起来的话可以用 copy_after 归档（可逆）或删除（要「删除」档），先告诉用户。");
+    }
     const watcher = getCopyWatcherStatus(all);
     return {
       config,
@@ -370,3 +379,116 @@ export const copyRetryTool = defineTool({
     };
   },
 });
+
+/* ------------------------------- copy_after ------------------------------- */
+
+/** 核对加归档 / 删除都要打网盘接口，一条一两秒；超过这个时间就交给后台作业，用 job_status 等 */
+const AFTER_INLINE_WAIT_MS = 40_000;
+
+const AFTER_OUTCOME_TEXT: Record<AfterCopyItemOutcome, string> = {
+  archived: "已归档",
+  deleted: "已删除",
+  retrying: "碰上临时错误，稍后自动再试",
+  kept: "没动",
+  incomplete: "目标里这一份不全，没动",
+  missing: "网盘上没有这条路径",
+  scheduled: "还在复制，复制完会处理",
+  pending: "还在复制，按记录上的去向",
+  invalid: "这条处理不了",
+};
+
+/** copy_after 的结果：逐条说下场，外加一句总结和下一步 */
+function afterCopyView(r: AfterCopyResult, token: Pick<AgentToken, "toolsets">): Record<string, unknown> {
+  const progress = hasToolset(token, "transfer") ? "用 copy_list 看" : "在 OpenStrm 云下载页的「复制到 OpenList」里看";
+  const count = (o: AfterCopyItemOutcome) => r.items.filter((i) => i.outcome === o).length;
+  const verb = r.afterCopy === "delete" ? "删了" : "归档了";
+  const parts = [
+    r.done > 0 ? `${verb} ${r.done} 条${r.afterCopy === "delete" ? "（进回收站）" : "（挪进任务目录下的「归档」，本地对应的 strm 已删）"}` : "",
+    count("retrying") > 0 ? `${count("retrying")} 条碰上临时错误，复制队列稍后自动再试` : "",
+    count("scheduled") > 0 ? `${count("scheduled")} 条还在复制，复制完会${AFTER_COPY_LABEL[r.afterCopy]}` : "",
+    count("incomplete") > 0 ? `${count("incomplete")} 条目标里不全，没动` : "",
+    count("kept") + count("missing") + count("pending") + count("invalid") > 0 ? `${count("kept") + count("missing") + count("pending") + count("invalid")} 条没动，原因见 items` : "",
+  ].filter(Boolean);
+  const next = [
+    count("incomplete") > 0 ? "目标里不全的先用 copy_add 补齐（会只补缺的），复制完再来一次" : "",
+    count("retrying") > 0 || count("scheduled") > 0 ? `稍后${progress}结果（大约 30 秒推进一轮，别连续快速轮询）` : "",
+  ].filter(Boolean);
+  return {
+    ...afterCopyFields(r.afterCopy),
+    done: r.done,
+    items: r.items.map((i: AfterCopyItem) => ({ ...i, outcomeText: AFTER_OUTCOME_TEXT[i.outcome] })),
+    note: parts.length ? `${parts.join("；")}。` : "没有处理任何一条，原因见 items。",
+    ...(next.length ? { next: `${next.join("；")}。` } : {}),
+    ...openInUi(COPY_UI),
+  };
+}
+
+export const copyAfterTool = defineTool({
+  name: "copy_after",
+  title: "事后处理已复制的源文件",
+  description: `已经复制到 OpenList 的目录 / 文件，事后把网盘上的源文件归档（挪进任务目录下的「归档」，原来的层级留着，可逆）或删除（进回收站，不可逆，令牌要有「删除」档）——给「复制时去向选的是不动，现在想把网盘上那份收起来」「复制完归档 / 删除当时没成」用。**这会动网盘上的源文件、并删掉本地对应的 strm：调用前把要处理哪些、归档还是删除告诉用户，得到同意再调用。** 指定方式二选一：ids（copy_list 里 canAfterCopy 为 true 的记录 id），或 task + paths（相对任务网盘目录的路径，和 copy_add 同一口径；复制记录只留两天，更早复制的用这种）。动手前逐条核对：源还在原处、目标里这一份齐了（目录逐层比名字、文件比大小），不全的不动（outcome 为 incomplete，先用 copy_add 补齐）。还在复制中的不动源，改成复制完再按这个去向处理（scheduled）。任务正在整理时会拒。一次最多 ${AFTER_MAX} 条；${AFTER_INLINE_WAIT_MS / 1000} 秒内做完直接返回结果，做不完返回 jobId，用 job_status 等（结果保留 ${JOB_RETENTION_MS / 60000} 分钟）。`,
+  scope: "write",
+  toolset: "transfer",
+  annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: true },
+  input: z.object({
+    afterCopy: z.enum(["archive", "delete"]).describe("怎么处理源文件：archive 归档（可逆）/ delete 删除（进回收站，要「删除」档）"),
+    ids: z.array(z.string().min(1).max(100)).max(AFTER_MAX).optional().describe(`要处理的复制记录 id（copy_list 给的，canAfterCopy 为 true 的），最多 ${AFTER_MAX} 个；和 task + paths 二选一`),
+    task: z.string().min(1).max(500).optional().describe("按路径指定时：哪个任务（任务 id，或网盘路径 / 本地路径 / 它们的最后一段）"),
+    paths: z.array(z.string().min(1).max(1000)).max(AFTER_MAX).optional().describe(`按路径指定时：已经复制好的目录 / 文件，相对任务的网盘目录，用 / 分隔，最多 ${AFTER_MAX} 条`),
+    dstDir: z.string().max(1000).optional().describe("按路径指定时：当初复制到了哪（OpenList 完整路径），只在当初另选了目的地时填；不填按任务上 / 设置页的目标目录"),
+  }),
+  async run(args, ctx) {
+    const ids = args.ids ?? [];
+    const paths = args.paths ?? [];
+    if (ids.length === 0 && paths.length === 0) throw new ToolError("VALIDATION", "要给 ids，或者 task + paths", "用 copy_list 拿记录 id；更早复制的用 task + paths 指路径。");
+    if (ids.length > 0 && paths.length > 0) throw new ToolError("VALIDATION", "ids 和 task + paths 二选一，别一起给", "分两次调用。");
+    if (paths.length > 0 && !args.task?.trim()) throw new ToolError("VALIDATION", "按路径指定要给 task", "用 tasks_list 看有哪些任务。");
+    const task = paths.length > 0 ? resolveTask(args.task!) : undefined;
+    const label = task ? `${AFTER_COPY_LABEL[args.afterCopy]} ${task.account} · ${task.originPath} 下 ${paths.length} 条的源文件` : `${AFTER_COPY_LABEL[args.afterCopy]} ${ids.length} 条复制记录的源文件`;
+    const job = startJob("copy_after", label, async (report) => {
+      try {
+        // 不传请求的 signal：客户端断开只是不等了，核对和归档照做，办到哪算哪都已经落库
+        return await settleAfterCopy({
+          afterCopy: args.afterCopy,
+          ids,
+          task,
+          paths,
+          dstDir: args.dstDir,
+          allowDelete: hasScope(ctx.token, "danger"),
+          onProgress: (done, total) => report({ done, total, message: `处理中 ${done}/${total}` }),
+        });
+      } catch (err) {
+        throw afterCopyError(err);
+      }
+    });
+    await waitForJob(job, AFTER_INLINE_WAIT_MS, ctx.signal);
+    const view = viewJob(job);
+    if (view.status === "running") {
+      return {
+        state: "running",
+        jobId: job.id,
+        message: "还在逐条核对、处理源文件（网盘接口一条一两秒）",
+        next: `用 job_status(jobId: "${job.id}", waitSeconds: 60) 等结果`,
+      };
+    }
+    if (view.status === "failed") {
+      const { error, code, hint, ...extra } = view.failure ?? { error: "处理源文件失败", code: "AFTER_COPY_FAILED" };
+      throw new ToolError(code, error, hint, { ...extra, jobId: job.id });
+    }
+    return { state: "done", jobId: job.id, ...afterCopyView(view.result as AfterCopyResult, ctx.token) };
+  },
+});
+
+/** 服务层的 HttpError 换成给模型看的说法（和 copy_add 同一套） */
+function afterCopyError(err: unknown): unknown {
+  if (!(err instanceof HttpError)) return err;
+  const code = typeof err.extra.code === "string" ? err.extra.code : undefined;
+  if (code === "INSUFFICIENT_SCOPE") {
+    return new ToolError(code, "afterCopy: \"delete\"（删掉网盘上的源文件）要令牌有「删除」档", "让用户到设置页给这个令牌勾上「删除」档；或者传 afterCopy: \"archive\"（归档，可逆）。", { required: "danger" });
+  }
+  if (code === "COPY_NOT_READY") return copyNotReady(err.message.replace(/^没法复制到 OpenList：/, ""));
+  if (code === "TASK_ORGANIZING") return new ToolError(code, err.message, "用 organize_status 等这次整理办完再调。", typeof err.extra.runId === "string" ? { runId: err.extra.runId } : {});
+  if (code === "COPY_DST_INVALID") return new ToolError(code, err.message, "不填 dstDir 就按任务上 / 设置页的目标目录；要指定就填它们下面的目录。");
+  if (code === "VALIDATION") return new ToolError(code, err.message, "用 copy_list 拿记录 id，或用 drive_browse 看任务的网盘目录（路径相对任务目录）。");
+  return err;
+}

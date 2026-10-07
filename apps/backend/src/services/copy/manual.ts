@@ -25,7 +25,7 @@ import { autoOrganizeBusy } from "../organize/auto.js";
 import { isStagingDir } from "../strm/staging.js";
 import { normalizeRel } from "../strm/manage.js";
 import { baseName, copyBlockerFor, copyDstProblem, copyOptionsFor, dstDirFor, joinPath, normConfigDir, normDir, normTargetDir, parentDir, resolveCopyConfig, type CopyConfig } from "./paths.js";
-import { enqueueCopy, findCoveringRecord, isMissingDir, listOpenlistNames, lookupFresh, withAfterCopy, type CopyOutcome, type CopySource } from "./service.js";
+import { enqueueCopy, findCoveringRecord, isMissingDir, listOpenlistEntries, lookupFresh, withAfterCopy, type CopyOutcome, type CopySource, type OpenlistTargetEntry } from "./service.js";
 
 const log = moduleLogger("copy-manual");
 
@@ -130,7 +130,8 @@ export async function enqueueManualCopy(input: ManualCopyInput): Promise<ManualC
     } else if (!node.isDir) {
       plans.push({ rel, outcome: "exists", isDir: false, sources: [] });
     } else {
-      const sources = await planFill(provider, abs, node.id, joinPath(dstDir, baseName(abs)), targets, signal);
+      // 大小对不上的（没复制完的残留）这里不管：目标里有这个名字就补不进去，由事后处理源文件那边（after.ts）当「不全」拦住
+      const { missing: sources } = await planFill(provider, abs, node.id, joinPath(dstDir, baseName(abs)), targets, signal);
       plans.push({ rel, outcome: sources.length > 0 ? "filled" : "complete", isDir: true, sources });
     }
   }
@@ -168,7 +169,7 @@ export async function enqueueManualCopy(input: ManualCopyInput): Promise<ManualC
 }
 
 /** 整理正在动这个任务的目录（跑着的 run，或攒着的自动整理）就拒：压着等整理的那套只放整理开始之前登记的，这里直说更清楚 */
-function assertNotOrganizing(task: TaskDefinition): void {
+export function assertNotOrganizing(task: TaskDefinition): void {
   const organizing = listRunsByStatus(["planning", "applying", "reverting"]).find((r) => r.taskId === task.id);
   if (organizing || autoOrganizeBusy(task.id)) {
     throw http(409, "这个任务正在整理，整理完再复制", "TASK_ORGANIZING", organizing ? { runId: organizing.id } : {});
@@ -187,9 +188,10 @@ function explainNothing(items: ManualCopyItem[]): string {
 /**
  * 归一路径：只收拢斜杠、去掉空段和 `.`，**不削每段的空格**（网盘上真有「Season 1 」这种名字，削了就找不到）；
  * 不许 `..` 和控制字符，不许任务目录本身（整目录复制会摆成 dst/tv，层级不对），不许暂存区（重复文件、归档），去重；
- * 父目录已经在里面的子路径去掉——整目录复制会把它带过去，单独登记只会让目录到时按「目标里已有」跳过
+ * 父目录已经在里面的子路径去掉——整目录复制会把它带过去，单独登记只会让目录到时按「目标里已有」跳过。
+ * 事后处理源文件（after.ts）按路径指定时也走这一套
  */
-function uniquePaths(paths: string[]): string[] {
+export function uniquePaths(paths: string[]): string[] {
   if (paths.length === 0) throw http(400, "paths 不能为空", "VALIDATION");
   if (paths.length > MANUAL_PATHS_MAX) throw http(400, `一次最多 ${MANUAL_PATHS_MAX} 条路径`, "VALIDATION");
   const out: string[] = [];
@@ -208,36 +210,51 @@ function uniquePaths(paths: string[]): string[] {
 }
 
 /**
- * OpenList 目标目录的一层条目名，同一次请求里每个目录只列一次。
+ * OpenList 目标目录的一层条目（名字、类型、大小），同一次请求里每个目录只列一次。
  * 只有 OpenList 明确说「没有这个目录」才记成 null（当它还没有）；连不上、超时这些不能猜——
  * 猜成「没有」会整目录登记，到时按「目标里已有」跳过，缺的永远补不上，所以直接报错、整个请求不登记
  */
-class TargetListing {
-  private readonly cache = new Map<string, string[] | null>();
+export class TargetListing {
+  private readonly cache = new Map<string, OpenlistTargetEntry[] | null>();
   private calls = 0;
   constructor(private readonly cfg: CopyConfig) {}
-  async names(dir: string): Promise<string[] | null> {
+  async entries(dir: string): Promise<OpenlistTargetEntry[] | null> {
     const key = normDir(dir);
     const hit = this.cache.get(key);
     if (hit !== undefined) return hit;
     if (++this.calls > FILL_DIRS_MAX) throw http(400, `目标里要比对的目录超过 ${FILL_DIRS_MAX} 个，请缩小范围（少选几个目录）`, "TOO_LARGE");
-    let names: string[] | null;
+    let entries: OpenlistTargetEntry[] | null;
     try {
-      names = await listOpenlistNames(this.cfg, key);
+      entries = await listOpenlistEntries(this.cfg, key);
     } catch (err) {
       if (!isMissingDir(err)) throw upstreamError(`读 OpenList 的 ${key} 失败：${messageOf(err)}`, {}, err);
-      names = null;
+      entries = null;
     }
-    this.cache.set(key, names);
-    return names;
+    this.cache.set(key, entries);
+    return entries;
+  }
+  async names(dir: string): Promise<string[] | null> {
+    const entries = await this.entries(dir);
+    return entries ? entries.map((e) => e.name) : null;
   }
 }
 
+/** 两边都知道大小才比；对不上多半是没复制完的残留 */
+export const sizeMismatch = (src: number | undefined, dst: number | undefined): boolean => src !== undefined && dst !== undefined && src !== dst;
+
+/** planFill 的结论：目标里缺的（按文件 / 整个子目录），以及两边都在、文件大小却对不上的（相对 abs 的路径） */
+export interface FillPlan {
+  missing: CopySource[];
+  mismatched: string[];
+}
+
 /**
- * 目标里已经有同名目录：和源子树逐层比对，目标里缺的文件按文件登记、缺的子目录整目录登记（只比名字）。
- * 有 walkSubtree 的网盘（夸克 / OpenList）一次拿到整棵带 id；115 只有文件路径，目录从路径里推，节点 id 到提交时再钉
+ * 目标里已经有同名目录：和源子树逐层比对，目标里缺的文件按文件登记、缺的子目录整目录登记（只比名字）；
+ * 两边都有的文件顺带比大小（两边都知道才比），对不上的单列——手动复制不管它（目标里有这个名字就补不进去），
+ * 事后处理源文件（after.ts）靠它拦住「目标里是个没复制完的残留」。
+ * 有 walkSubtree 的网盘（夸克 / OpenList）一次拿到整棵带 id 和大小；115 只有文件路径，目录从路径里推，节点 id 到提交时再钉、大小不比
  */
-async function planFill(provider: DriveProvider, abs: string, id: string, olDir: string, targets: TargetListing, signal: AbortSignal | undefined): Promise<CopySource[]> {
+export async function planFill(provider: DriveProvider, abs: string, id: string, olDir: string, targets: TargetListing, signal: AbortSignal | undefined): Promise<FillPlan> {
   const entries = await subtreeEntries(provider, abs, { id, signal });
   const files = entries.filter((e) => !e.isDir).length;
   if (files > FILL_FILES_MAX) throw http(400, `「${baseName(abs)}」里有 ${files} 个文件，超过一次补齐的上限 ${FILL_FILES_MAX}，请缩小范围`, "TOO_LARGE");
@@ -249,19 +266,23 @@ async function planFill(provider: DriveProvider, abs: string, id: string, olDir:
     list.push(e);
     children.set(dir, list);
   }
-  const out: CopySource[] = [];
+  const missing: CopySource[] = [];
+  const mismatched: string[] = [];
   const walk = async (relDir: string, dir: string): Promise<void> => {
     signal?.throwIfAborted();
-    const names = (await targets.names(dir)) ?? [];
+    const here = new Map(((await targets.entries(dir)) ?? []).map((t) => [t.name, t]));
     for (const e of children.get(relDir) ?? []) {
       const name = baseName(e.path);
-      if (!names.includes(name)) {
-        out.push({ path: joinPath(abs, e.path), isDir: e.isDir, ...(e.id ? { nodeId: e.id } : {}) });
+      const hit = here.get(name);
+      if (!hit) {
+        missing.push({ path: joinPath(abs, e.path), isDir: e.isDir, ...(e.id ? { nodeId: e.id } : {}) });
       } else if (e.isDir) {
         await walk(e.path, joinPath(dir, name));
+      } else if (sizeMismatch(e.size, hit.size)) {
+        mismatched.push(e.path);
       }
     }
   };
   await walk("", olDir);
-  return out;
+  return { missing, mismatched };
 }

@@ -796,6 +796,88 @@ test("copy_add：手动把任务目录里已有的目录交给复制；复制后
   }
 });
 
+test("copy_after：按记录 id 事后归档源文件（目标里不全的不动、齐了才挪，本地 strm 跟着删）；删除要「删除」档；只读令牌看不到；copy_list 带 canAfterCopy", async () => {
+  d115.tree.addFile("/tv/Show/E01.mkv", { size: 9 });
+  d115.tree.addFile("/tv/Show/E02.mkv", { size: 9 });
+  const local = path.join(LOCAL, "tv", "Show", "E01.strm");
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  fs.writeFileSync(local, "/mnt/pan/tv/Show/E01.mkv");
+  /** OpenList 目标目录里现有的条目：这条用例自己换一套桩，结束时换回去 */
+  const names: Record<string, string[]> = {};
+  setCopyServiceDeps({
+    openlist: {
+      listNames: async (_cfg, dir) => names[dir] ?? [],
+      listEntries: async (_cfg, dir) => (names[dir] ?? []).map((name) => ({ name, size: 9 })),
+      mkdir: async () => {},
+      copy: async () => [],
+      copyTasks: async () => ({ undone: [], done: [] }),
+    },
+    notify: async () => {},
+  });
+  saveCopies([
+    record({ id: "k1", status: "done", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Show", name: "E01.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", doneAt: Date.now(), detail: "复制完成" }),
+    record({ id: "k2", status: "done", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Show", name: "E02.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", doneAt: Date.now(), detail: "复制完成" }),
+  ]);
+  const daily = await connect(dailyToken);
+  const read = await connect(readToken);
+  try {
+    assert.ok(!(await read.listTools()).tools.some((t) => t.name === "copy_after"), "只读令牌没有 copy_after");
+    const tool = (await daily.listTools()).tools.find((t) => t.name === "copy_after")!;
+    assert.match(tool.description ?? "", /得到同意再调用/);
+
+    const list = await call(daily, "copy_list", { status: "done" });
+    assert.deepEqual(list.data.items.map((i: Record<string, unknown>) => [i.id, i.canAfterCopy]), [["k1", true], ["k2", true]]);
+    assert.match(list.data.next, /copy_after/);
+
+    // 目标里还什么都没有：核对不过，不动
+    const incomplete = await call(daily, "copy_after", { ids: ["k1"], afterCopy: "archive" });
+    assert.equal(incomplete.isError, false, JSON.stringify(incomplete.data));
+    assert.equal(incomplete.data.state, "done");
+    assert.equal(incomplete.data.done, 0);
+    assert.equal(incomplete.data.items[0].outcome, "incomplete");
+    assert.equal(incomplete.data.items[0].outcomeText, "目标里这一份不全，没动");
+    assert.match(incomplete.data.next, /copy_add/);
+    assert.ok(d115.tree.get("/tv/Show/E01.mkv"));
+
+    // 目标里齐了：挪进归档，本地 strm 删掉
+    names["/local/media/Show"] = ["E01.mkv"];
+    const ok = await call(daily, "copy_after", { ids: ["k1"], afterCopy: "archive" });
+    assert.equal(ok.isError, false, JSON.stringify(ok.data));
+    assert.equal(ok.data.done, 1);
+    assert.equal(ok.data.afterCopy, "archive");
+    assert.deepEqual(ok.data.items.map((i: Record<string, unknown>) => [i.path, i.outcome, i.to]), [["Show/E01.mkv", "archived", "/tv/归档/Show"]]);
+    assert.match(ok.data.note, /归档了 1 条/);
+    assert.ok(d115.tree.get("/tv/归档/Show/E01.mkv"));
+    assert.equal(d115.tree.get("/tv/Show/E01.mkv"), undefined);
+    assert.equal(fs.existsSync(local), false);
+    assert.equal(listCopies().find((c) => c.id === "k1")!.afterCopy, "archive");
+
+    // 日常令牌没有「删除」档：拒掉，网盘不动
+    const del = await call(daily, "copy_after", { ids: ["k2"], afterCopy: "delete" });
+    assert.equal(del.isError, true);
+    assert.equal(del.data.code, "INSUFFICIENT_SCOPE");
+    assert.match(del.data.hint, /archive/);
+    assert.ok(d115.tree.get("/tv/Show/E02.mkv"));
+
+    // 按路径指：task + paths，和 ids 不能一起给
+    const both = await call(daily, "copy_after", { ids: ["k2"], task: "tv", paths: ["Show/E02.mkv"], afterCopy: "archive" });
+    assert.equal(both.isError, true);
+    assert.equal(both.data.code, "VALIDATION");
+    names["/local/media/Show"] = ["E01.mkv", "E02.mkv"];
+    const byPath = await call(daily, "copy_after", { task: "tv", paths: ["Show/E02.mkv"], afterCopy: "archive" });
+    assert.equal(byPath.isError, false, JSON.stringify(byPath.data));
+    assert.deepEqual(byPath.data.items.map((i: Record<string, unknown>) => [i.id, i.outcome]), [["k2", "archived"]], "接着用队列里那条记录");
+    assert.ok(d115.tree.get("/tv/归档/Show/E02.mkv"));
+  } finally {
+    await daily.close();
+    await read.close();
+    setCopyServiceDeps({
+      openlist: { listNames: async () => [], mkdir: async () => {}, copy: async () => [], copyTasks: async () => ({ undone: [], done: [] }) },
+      notify: async () => {},
+    });
+  }
+});
+
 test("重试：失败 / 跳过的重新排队，已经在队列里的算成功；已复制的、接管的、不存在的不收；全都不行回 isError", async () => {
   saveCopies([
     record({ id: "f1", status: "failed", afterCopy: "delete", attempts: 3, doneAt: Date.now() }),

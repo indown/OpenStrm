@@ -315,6 +315,8 @@ export interface CopyItem {
   holdUntil?: number;
   /** 后端算好的「能不能重试」：失败的、目标里已有同名而跳过的才行（接管来的、用不着了的、已复制的不行） */
   canRetry: boolean;
+  /** 后端算好的「源文件还在网盘原处、能事后归档 / 删除」：复制好了、去向是不动（或当时没处理成）、知道属于哪个任务 */
+  canAfterCopy: boolean;
 }
 
 /** POST /api/copy：手动把任务网盘目录里已有的目录 / 文件交给复制 */
@@ -336,6 +338,25 @@ export interface CopyAddResult {
   deleteSource: boolean;
   reason?: string;
   items: Array<{ path: string; outcome: CopyAddOutcome; queued: number; isDir?: boolean }>;
+}
+
+/** POST /api/copy/after：复制好的，事后把网盘上的源文件归档 / 删除 */
+export interface CopyAfterInput {
+  afterCopy: "archive" | "delete";
+  /** 复制记录 id；和 taskId + paths 二选一 */
+  ids?: string[];
+  taskId?: string;
+  /** 相对任务网盘目录 */
+  paths?: string[];
+  dstDir?: string;
+}
+/** 每条的下场：归档了 / 删了 / 临时错误稍后再试 / 没动（原因在 detail）/ 目标里不全 / 网盘上没有 / 还在复制、复制完会处理 / 还在复制 / 这条处理不了 */
+export type CopyAfterOutcome = "archived" | "deleted" | "retrying" | "kept" | "incomplete" | "missing" | "scheduled" | "pending" | "invalid";
+export interface CopyAfterResult {
+  afterCopy: "archive" | "delete";
+  /** 处理成了几条 */
+  done: number;
+  items: Array<{ path: string; id?: string; name: string; outcome: CopyAfterOutcome; isDir?: boolean; detail?: string; to?: string }>;
 }
 
 export interface CopyQueue {
@@ -761,6 +782,8 @@ export const api = {
     /** 手动发起：要到网盘核对路径、和目标比对，115 整目录导出要几分钟（和 strm 校验一样给足） */
     add: (input: CopyAddInput) => data(axiosInstance.post<CopyAddResult>("/api/copy", input, { timeout: 330_000 })),
     retry: (id: string) => data(axiosInstance.post<CopyItem>(`/api/copy/${encodeURIComponent(id)}/retry`)),
+    /** 事后归档 / 删除源文件：要到网盘和 OpenList 核对再挪，和发起复制一样等得久一点 */
+    after: (input: CopyAfterInput) => data(axiosInstance.post<CopyAfterResult>("/api/copy/after", input, { timeout: 330_000 })),
     remove: (id: string) => data(axiosInstance.delete<{ success: true }>(`/api/copy/${encodeURIComponent(id)}`)),
   },
 

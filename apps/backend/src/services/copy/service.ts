@@ -113,10 +113,22 @@ export const COPY_TRIGGER_LABEL: Record<CopyTrigger, string> = {
 
 /* ------------------------------- 依赖注入 ------------------------------- */
 
+/** OpenList 目标目录里的一条：核对复制全不全时比名字，文件再比大小（不知道大小的不比） */
+export interface OpenlistTargetEntry {
+  name: string;
+  isDir?: boolean;
+  size?: number;
+}
+
 interface Deps {
   openlist: {
     /** 刷新目录缓存并返回其中的条目名 */
     listNames: (cfg: CopyConfig, dir: string) => Promise<string[]>;
+    /**
+     * 同上，但每条带类型和大小：事后处理源文件（copy/after.ts）核对目标里那份全不全时，文件还要比大小。
+     * 测试桩可以不给，那就只比名字（listOpenlistEntries 会按 listNames 补）
+     */
+    listEntries?: (cfg: CopyConfig, dir: string) => Promise<OpenlistTargetEntry[]>;
     /** 建目标目录（OpenList 的 /fs/copy 不会自己建） */
     mkdir: (cfg: CopyConfig, dir: string) => Promise<void>;
     /** 提交复制；返回的任务和 names 一一对应 */
@@ -148,6 +160,7 @@ interface Deps {
 const realDeps: Deps = {
   openlist: {
     listNames: async (cfg, dir) => (await openlistListDir(cfg.account, dir, { refresh: true })).map((e) => e.name),
+    listEntries: async (cfg, dir) => (await openlistListDir(cfg.account, dir, { refresh: true })).map((e) => ({ name: e.name, isDir: e.is_dir, size: e.size })),
     mkdir: (cfg, dir) => openlistMkdir(cfg.account, dir),
     copy: (cfg, srcDir, dstDir, names) => openlistCopy(cfg.account, srcDir, dstDir, names),
     copyTasks: (cfg) => openlistCopyTasks(cfg.account),
@@ -396,7 +409,7 @@ function mergeInto(c: CopyRecord, whole: CopyRecord, now: number): void {
  * 已经排着的是删除、这次是归档（或反过来）：算先登记的，不改。
  * 正在跑的那一轮手里的同一条也一起改，免得它收尾写回时盖掉。补上了返回 true
  */
-function upgradeAfterCopy(dup: CopyRecord, rec: CopyRecord): boolean {
+export function upgradeAfterCopy(dup: CopyRecord, rec: Pick<CopyRecord, "afterCopy" | "nodeId" | "holdUntil">): boolean {
   if (rec.afterCopy === "keep" || dup.afterCopy !== "keep" || dup.status !== "pending" || dup.adopted) return false;
   const nodeId = dup.nodeId ?? rec.nodeId;
   if (!nodeId) return false;
@@ -437,6 +450,10 @@ export function enqueueCopyFor(
 
 /** OpenList 里某个目录的一层条目名（刷新缓存）。手动复制补齐时比对目标用；走 deps，测试能换成桩 */
 export const listOpenlistNames = (cfg: CopyConfig, dir: string): Promise<string[]> => deps.openlist.listNames(cfg, dir);
+
+/** 同上，带类型和大小；桩只给了 listNames 的就只有名字 */
+export const listOpenlistEntries = async (cfg: CopyConfig, dir: string): Promise<OpenlistTargetEntry[]> =>
+  deps.openlist.listEntries ? deps.openlist.listEntries(cfg, dir) : (await deps.openlist.listNames(cfg, dir)).map((name) => ({ name }));
 
 /** 结果里去向的两个字段：afterCopy 是准的，deleteSource 是给一直读它的调用方留的 */
 export const withAfterCopy = (afterCopy: CopyAfterCopy): Pick<CopyOutcome, "afterCopy" | "deleteSource"> => ({ afterCopy, deleteSource: afterCopy === "delete" });
@@ -1026,7 +1043,7 @@ async function afterCopiedInner(c: CopyRecord, cfg: CopyConfig): Promise<void> {
     if (c.sourceKept) c.detail += `；${c.sourceKept}，源文件没动`;
     return;
   }
-  await applyAfterCopy(c, cfg, false);
+  await applyAfterCopy(c, cfg, { retry: false });
 }
 
 /**
@@ -1038,7 +1055,7 @@ async function retryAfterCopies(cfg: CopyConfig, due: CopyRecord[], touched: Set
     if (!awaitingAfterRetry(c)) continue;
     touched.add(c);
     c.detail = "复制完成";
-    await applyAfterCopy(c, cfg, true);
+    await applyAfterCopy(c, cfg, { retry: true });
     persist();
   }
 }
@@ -1066,28 +1083,42 @@ function transientAfterCopyError(account: string, err: unknown): boolean {
   return facts.status !== undefined && (facts.status >= 500 || facts.status === 429);
 }
 
+/** applyAfterCopy 的结论：挪进归档了 / 删了 / 碰上临时错误晚点再做 / 没动（原因在 why，同时记在 sourceKept） */
+export type AfterCopyOutcome =
+  | { kind: "archived"; to: string }
+  | { kind: "removed" }
+  | { kind: "retry"; why: string; nextAt: number }
+  | { kind: "kept"; why: string };
+
 /**
  * 按去向处理网盘上的源文件（删 / 归档）：先核对（目标里看得全、节点 id 对得上），过了才动。
  * 碰上临时错误不当最终结果：记下来隔一会儿再做（afterRetry），次数用完才按「没按设置处理」收场。
- * retry：这是晚点再做的那一次——上一次也可能其实做成了、只是没等到回话，源不见了要分情况认
+ * retry：这是晚点再做的那一次——上一次也可能其实做成了、只是没等到回话，源不见了要分情况认。
+ * verified：调用方已经按更严的口径核对过目标里这一份齐了（copy/after.ts 逐层比名字、文件比大小），这里不再看一遍。
+ * 说明、sourceKept、afterRetry 都写在记录上；返回值给要当场回话的调用方（事后处理源文件）用
  */
-async function applyAfterCopy(c: CopyRecord, cfg: CopyConfig, retry: boolean): Promise<void> {
+export async function applyAfterCopy(c: CopyRecord, cfg: CopyConfig, opts: { retry: boolean; verified?: boolean }): Promise<AfterCopyOutcome> {
+  const { retry } = opts;
   const prior = c.afterRetry?.attempts ?? 0;
   c.afterRetry = undefined;
   /** 说明里的动词：删 / 归档 */
   const verb = c.afterCopy === "delete" ? "删" : "归档";
   /** 没按设置处理源文件：原因记在 sourceKept（收尾的通知里也说一声），说明里带上；晚点再做的那次没成另发一条通知 */
-  const kept = (why: string, tail = `，源文件没${verb}`) => {
+  const kept = (why: string, tail = `，源文件没${verb}`): AfterCopyOutcome => {
     c.sourceKept = why;
     c.detail += `；${why}${tail}`;
     if (retry) keptThisTick.push(c);
+    return { kind: "kept", why };
   };
   if (c.adopted || c.srcDir === "") return kept("这条是升级前接管的，不知道源在哪", `，没${verb}`);
   const src = joinPath(c.srcDir, c.name);
   try {
-    const verdict = await verifyCopied(c, cfg);
-    if (!verdict.ok) return kept(verdict.why);
+    if (!opts.verified) {
+      const verdict = await verifyCopied(c, cfg);
+      if (!verdict.ok) return kept(verdict.why);
+    }
     let outcome: string;
+    let result: AfterCopyOutcome | undefined;
     if (c.afterCopy === "delete") {
       outcome = await deps.removeSource(c.account, src, c.nodeId);
       if (outcome === "removed") c.detail += "；网盘上那份已删";
@@ -1096,18 +1127,21 @@ async function applyAfterCopy(c: CopyRecord, cfg: CopyConfig, retry: boolean): P
         outcome = "removed";
         c.detail += "；网盘上已经没有这一份（多半上次已经删掉了）";
       }
+      if (outcome === "removed") result = { kind: "removed" };
     } else if (c.afterCopy === "archive") {
       const r = await deps.archiveSource(c.account, src, c.nodeId, c.rootPath, { retry });
       outcome = r.kind;
-      if (r.kind === "archived") c.detail += r.earlier ? `；网盘上那份已归档到 ${r.to}（上次其实已经挪过去了）` : `；网盘上那份已归档到 ${r.to}`;
-      else if (r.kind === "exists") return kept("归档目录里已经有同名的", "，源文件没动");
+      if (r.kind === "archived") {
+        c.detail += r.earlier ? `；网盘上那份已归档到 ${r.to}（上次其实已经挪过去了）` : `；网盘上那份已归档到 ${r.to}`;
+        result = { kind: "archived", to: r.to };
+      } else if (r.kind === "exists") return kept("归档目录里已经有同名的", "，源文件没动");
       else if (r.kind === "staged") return kept("它本来就在归档目录里", "，没再动");
       else if (r.kind === "no-root") return kept("不知道任务目录在哪（平铺复制的），归档不了", "，源文件没动");
     } else {
       // 库里混进了认不得的去向（手改过、回退过版本）：当不动，不猜
       return kept(`不认识的去向「${String(c.afterCopy)}」`, "，源文件没动");
     }
-    if (outcome === "removed" || outcome === "archived") {
+    if (result) {
       // 本地的 strm 指着的路径已经空了，留着就是 Emby 里一个放不了的条目。
       // 不能指望网盘监控来收拾：115 删文件时 Provider 当场就把路径缓存清了，
       // 随后那条删除事件（不带父目录）就对不上任何任务，被当成根目录下的文件跳过（真机撞到）
@@ -1116,21 +1150,26 @@ async function applyAfterCopy(c: CopyRecord, cfg: CopyConfig, retry: boolean): P
       } catch (err) {
         c.detail += `，本地 strm 没删掉：${messageOf(err)}`;
       }
-    } else if (outcome === "missing") kept("源文件已不在原处", `，没${verb}`);
-    else if (outcome === "changed") kept("源路径上换成了别的文件", `，没${verb}`);
-    else if (outcome === "unsupported") kept(`这个网盘不支持${c.afterCopy === "delete" ? "删除" : "移动"}`);
+      return result;
+    }
+    if (outcome === "missing") return kept("源文件已不在原处", `，没${verb}`);
+    if (outcome === "changed") return kept("源路径上换成了别的文件", `，没${verb}`);
+    if (outcome === "unsupported") return kept(`这个网盘不支持${c.afterCopy === "delete" ? "删除" : "移动"}`);
+    return kept(`${verb}源文件没成（${outcome}）`, "");
   } catch (err) {
     // 原因只要一句人话：说明和通知里后面紧跟着「1 分钟后自动再试」，不能再叫人「稍后再试」
     const why = networkErrorText(err, { brief: true }) ?? messageOf(err);
     if (transientAfterCopyError(c.account, err) && prior < AFTER_RETRY_DELAYS_MS.length) {
       const delay = AFTER_RETRY_DELAYS_MS[prior];
-      c.afterRetry = { attempts: prior + 1, nextAt: deps.now() + delay, why };
+      const nextAt = deps.now() + delay;
+      c.afterRetry = { attempts: prior + 1, nextAt, why };
       c.detail += `；${verb}源文件没成（${why}），${Math.round(delay / 60_000)} 分钟后自动再试（${prior + 1}/${AFTER_RETRY_DELAYS_MS.length}）`;
       log.warn({ err }, `复制后${verb}源文件没成，${Math.round(delay / 60_000)} 分钟后再试：${src}`);
-      return;
+      return { kind: "retry", why, nextAt };
     }
-    kept(`${verb}源文件失败：${why}${prior > 0 ? `（自动重试 ${prior} 次都没成）` : ""}`, "");
+    const result = kept(`${verb}源文件失败：${why}${prior > 0 ? `（自动重试 ${prior} 次都没成）` : ""}`, "");
     log.warn({ err }, `复制后${verb}源文件失败：${src}`);
+    return result;
   }
 }
 
@@ -1180,6 +1219,11 @@ async function archiveSourceReal(
 
 /** 这一轮里已经确认 / 建过的归档目录链（账号 + 路径 → 节点）：一季几十集归档时同一条链不用每条都到网盘列一遍；每轮开始清空 */
 const ensuredDirs = new Map<string, { id: string; path: string }>();
+
+/** 不在循环里跑的归档（事后处理源文件，copy/after.ts）开始前也清一次：别用上一轮留下的目录链 */
+export function resetArchiveDirCache(): void {
+  ensuredDirs.clear();
+}
 
 /** 从 base 往下逐级确认 / 建出目录，返回最后一级；沿途撞上同名文件就抛 */
 async function ensureDriveDir(provider: DriveProvider, base: string, segs: string[]): Promise<{ id: string; path: string }> {
@@ -1272,6 +1316,24 @@ export function retryBlocker(c: CopyRecord): string | null {
 }
 
 export const canRetryCopy = (c: CopyRecord): boolean => retryBlocker(c) === null;
+
+/**
+ * 为什么不能事后处理这条的源文件（归档 / 删除），能就回 null。界面的按钮（GET /api/copy 带的 canAfterCopy）、
+ * 智能体的 copy_list / copy_after、服务层 copy/after.ts 同一个口径：复制好了、源文件还在原处
+ * （去向是不动，或者当时没按设置处理成——归档里有同名、接口超时三次都没成），而且知道它属于哪个任务。
+ * 还在复制的另算：copy_after 会把它的去向补上，复制完再处理（见 after.ts），这里只说它还没好
+ */
+export function afterCopyBlocker(c: CopyRecord): string | null {
+  if (c.status === "pending") return "这条还在复制，复制完才轮到源文件";
+  if (c.status !== "done") return "这条没复制成，没有要处理的源文件";
+  if (c.adopted || c.srcDir === "") return "这条是升级前接管的，不知道源在哪";
+  if (!c.taskId || !c.rootPath) return "这条是平铺复制的，不属于任何任务，不知道任务目录在哪";
+  if (c.afterRetry) return `源文件的${afterLabel(c)}正在自动重试，不用再发起`;
+  if (c.afterCopy !== "keep" && !c.sourceKept) return `源文件已经按设置${afterLabel(c)}过了`;
+  return null;
+}
+
+export const canAfterCopy = (c: CopyRecord): boolean => afterCopyBlocker(c) === null;
 
 /** 一条的重试结果：ok 的是重新排上了（alreadyQueued = 本来就排着）；不行的带原因和该回的状态码 */
 export type CopyRetryResult =

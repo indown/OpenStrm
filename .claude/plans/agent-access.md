@@ -2149,6 +2149,10 @@ P3 做完（HDHive 两个工具除外，见上面的范围），没提交。工�
 
 用户要在界面和智能体里都能单独发起一次复制（转存时没勾、看片卡顿想把某部片放到本地）。方案写在 openlist-copy.md「手动发起复制」：服务层 `enqueueManualCopy`（目标里已有同名目录时按缺的补）、`POST /api/copy`、工具 `copy_add`（transfer 组、write 档，路径用 `strm_search` / `drive_browse` 找，调用前当面确认），界面在复制队列面板和 strm 管理页开入口。同日用户又提出复制后三选一（不动 / 删除 / 归档），方案在 openlist-copy.md「复制后的去向」：任务上 `afterCopy` 三选一，归档放任务目录下的「归档」；`copy_add` 可按次指定去向，`delete` 要 danger 档，`share_save` / `offline_add` 仍跟任务。两件 2026-09-25 都实施完（工具 36 个），实施记录在 openlist-copy.md 末节「实施记录（2026-09-25，两件一起）」。
 
+### 事后处理源文件（2026-10-07）
+
+用户转述智能体的话「当前这个 MCP 版本没有单独的『把已复制完成的源文件移到归档』接口」，查实后按推荐做了：服务层 `copy/after.ts` 的 `settleAfterCopy`、`POST /api/copy/after`、工具 `copy_after`（transfer 组、write 档，ids 或 task + paths 二选一，删除要 danger 档，40 秒内直接回否则交作业）、`copy_list` 每条带 `canAfterCopy`、界面队列面板「归档源文件」按钮。动手前核对源在原处、目标里齐了（目录逐层比名字、文件比大小）。工具 42 → 43。方案与实施记录在 openlist-copy.md「事后处理源文件：copy_after」。
+
 ## 核实记录
 
 2026-09-18 查的官方来源：

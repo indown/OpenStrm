@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { Archive, Loader2, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AddCopyDialog } from "@/components/AddCopyDialog";
 import { AFTER_COPY_LABEL } from "@/lib/openlist-copy";
@@ -17,7 +17,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { StatusBadge, type StatusTone } from "@/components/status-badge";
-import { api, type CopyItem } from "@/lib/api";
+import { api, type CopyAfterOutcome, type CopyItem } from "@/lib/api";
 import { usePolling } from "@/hooks/use-polling";
 import { apiErrorMessage } from "@/lib/axios";
 
@@ -36,9 +36,23 @@ const TRIGGER_LABEL: Record<CopyItem["trigger"], string> = {
   manual: "手动",
 };
 
+/** 事后归档源文件：除了归档成了，其余都提示原因 */
+const AFTER_OUTCOME_TEXT: Record<CopyAfterOutcome, string> = {
+  archived: "已归档",
+  deleted: "已删除",
+  retrying: "碰上临时错误，稍后自动再试",
+  kept: "源文件没动",
+  incomplete: "目标里这一份不全，源文件没动",
+  missing: "网盘上已经没有这条路径",
+  scheduled: "还在复制，复制完会归档",
+  pending: "还在复制",
+  invalid: "这条处理不了",
+};
+
 /**
  * 「复制到 OpenList」的队列。自动登记是各个来源做的（云下载 / 转存 / 追更 / 监控）；
- * 「新建复制」是事后补的手动发起（转存时没勾、后来才开了复制）。失败的能单独重试，不想跟的能去掉。
+ * 「新建复制」是事后补的手动发起（转存时没勾、后来才开了复制）。失败的能单独重试，不想跟的能去掉；
+ * 复制好了、源文件还在网盘原处的（去向选的是不动，或者当时没归档成）能事后「归档源文件」。
  * 队列空着、复制也没配好时整块不显示，免得没用这个功能的人看到一块空面板
  */
 export function CopyQueuePanel() {
@@ -48,6 +62,7 @@ export function CopyQueuePanel() {
   const [working, setWorking] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<CopyItem | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<CopyItem | null>(null);
   /** 设置页选了 OpenList 账号、至少给一个网盘填了挂载根：队列空着也给「新建复制」的入口 */
   const [configured, setConfigured] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -80,18 +95,26 @@ export function CopyQueuePanel() {
   // 有在跑的就盯着，跑完自己停
   usePolling(load, 5000, { enabled: pending > 0 });
 
-  const act = async (id: string, what: "retry" | "remove") => {
+  const act = async (id: string, what: "retry" | "remove" | "archive") => {
     setWorking((prev) => new Set(prev).add(id));
     try {
       if (what === "retry") {
         await api.copy.retry(id);
         toast.success("已重新排队");
+      } else if (what === "archive") {
+        // 后端先核对目标里这一份齐了才挪：没动的说清楚为什么
+        const r = await api.copy.after({ ids: [id], afterCopy: "archive" });
+        const item = r.items[0];
+        if (!item) toast.error("没有处理任何一条");
+        else if (item.outcome === "archived") toast.success(`已归档到 ${item.to ?? "任务目录下的「归档」"}，本地 strm 已删`);
+        else if (item.outcome === "retrying" || item.outcome === "scheduled") toast.message(AFTER_OUTCOME_TEXT[item.outcome], { description: item.detail });
+        else toast.error(AFTER_OUTCOME_TEXT[item.outcome], { description: item.detail });
       } else {
         await api.copy.remove(id);
       }
       await load();
     } catch (err) {
-      toast.error(apiErrorMessage(err, what === "retry" ? "重试失败" : "删除失败"));
+      toast.error(apiErrorMessage(err, what === "retry" ? "重试失败" : what === "archive" ? "归档源文件失败" : "删除失败"));
     } finally {
       setWorking((prev) => {
         const next = new Set(prev);
@@ -145,6 +168,11 @@ export function CopyQueuePanel() {
                     {busy ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
                   </Button>
                 )}
+                {c.canAfterCopy && (
+                  <Button variant="ghost" size="icon" className="size-8" title="把网盘上的源文件挪进任务目录下的「归档」" disabled={busy} onClick={() => setArchiveTarget(c)}>
+                    {busy ? <Loader2 className="size-4 animate-spin" /> : <Archive className="size-4" />}
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="icon"
@@ -163,6 +191,31 @@ export function CopyQueuePanel() {
       {total > items.length && <p className="text-xs text-muted-foreground">只显示 {items.length} 条（能重试的、还在跑的排在前面），队列里共 {total} 条</p>}
 
       <AddCopyDialog open={addOpen} onOpenChange={setAddOpen} onQueued={() => void load()} />
+
+      <AlertDialog open={archiveTarget !== null} onOpenChange={(o) => !o && setArchiveTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>把源文件归档？</AlertDialogTitle>
+            <AlertDialogDescription>
+              先核对 OpenList 里「{archiveTarget?.name}」这一份齐了（目录逐层比、文件比大小），再把网盘上那份挪进任务目录下的「归档」（原来的层级留着），本地对应的 strm 删掉。
+              想恢复的话到网盘里挪回去就行。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                const target = archiveTarget;
+                setArchiveTarget(null);
+                if (target) void act(target.id, "archive");
+              }}
+            >
+              归档
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={dropTarget !== null} onOpenChange={(o) => !o && setDropTarget(null)}>
         <AlertDialogContent>

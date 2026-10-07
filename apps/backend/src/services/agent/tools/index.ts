@@ -24,7 +24,7 @@ import { followCheckTool, followDeleteTool, followListTool, followUpdateTool } f
 import { strmCheckTool, strmDeleteTool, strmFixTool, strmRebuildTool, strmSearchTool, strmVerifyTool } from "./strm.js";
 import { resourceSearchTool } from "./resource.js";
 import { libraryAddTool, libraryMatchTool, librarySearchTool, librarySourcesTool, libraryWorkTool, libraryWorksTool } from "./library.js";
-import { copyAddTool, copyListTool, copyRetryTool } from "./copy.js";
+import { copyAddTool, copyAfterTool, copyListTool, copyRetryTool } from "./copy.js";
 
 export const AGENT_TOOLS: readonly ToolDef[] = [
   overviewTool,
@@ -69,6 +69,7 @@ export const AGENT_TOOLS: readonly ToolDef[] = [
   copyListTool,
   copyAddTool,
   copyRetryTool,
+  copyAfterTool,
 ];
 
 /** 档位里有、工具集里也有（基础工具不属于任何一组，总在） */
