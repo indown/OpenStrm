@@ -168,11 +168,14 @@ export async function enqueueManualCopy(input: ManualCopyInput): Promise<ManualC
   return { queued, dstDir: base, ...withAfterCopy(reported), items, ...(stuck ? { reason: stuck } : {}) };
 }
 
-/** 整理正在动这个任务的目录（跑着的 run，或攒着的自动整理）就拒：压着等整理的那套只放整理开始之前登记的，这里直说更清楚 */
-export function assertNotOrganizing(task: TaskDefinition): void {
+/**
+ * 整理正在动这个任务的目录（跑着的 run，或攒着的自动整理）就拒：压着等整理的那套只放整理开始之前登记的，这里直说更清楚。
+ * action 是报错里的动词：复制（这里）、归档（copy/archive.ts）
+ */
+export function assertNotOrganizing(task: TaskDefinition, action = "复制"): void {
   const organizing = listRunsByStatus(["planning", "applying", "reverting"]).find((r) => r.taskId === task.id);
   if (organizing || autoOrganizeBusy(task.id)) {
-    throw http(409, "这个任务正在整理，整理完再复制", "TASK_ORGANIZING", organizing ? { runId: organizing.id } : {});
+    throw http(409, `这个任务正在整理，整理完再${action}`, "TASK_ORGANIZING", organizing ? { runId: organizing.id } : {});
   }
 }
 
@@ -189,9 +192,9 @@ function explainNothing(items: ManualCopyItem[]): string {
  * 归一路径：只收拢斜杠、去掉空段和 `.`，**不削每段的空格**（网盘上真有「Season 1 」这种名字，削了就找不到）；
  * 不许 `..` 和控制字符，不许任务目录本身（整目录复制会摆成 dst/tv，层级不对），不许暂存区（重复文件、归档），去重；
  * 父目录已经在里面的子路径去掉——整目录复制会把它带过去，单独登记只会让目录到时按「目标里已有」跳过。
- * 事后处理源文件（after.ts）按路径指定时也走这一套
+ * 事后处理源文件（after.ts）、归档到暂存区（archive.ts）按路径指定时也走这一套；action 是报错里的动词
  */
-export function uniquePaths(paths: string[]): string[] {
+export function uniquePaths(paths: string[], action = "复制"): string[] {
   if (paths.length === 0) throw http(400, "paths 不能为空", "VALIDATION");
   if (paths.length > MANUAL_PATHS_MAX) throw http(400, `一次最多 ${MANUAL_PATHS_MAX} 条路径`, "VALIDATION");
   const out: string[] = [];
@@ -202,8 +205,8 @@ export function uniquePaths(paths: string[]): string[] {
     } catch {
       throw http(400, `路径里不能有「..」或控制字符：${raw}`, "VALIDATION");
     }
-    if (!rel) throw http(400, "路径不能是任务目录本身：要整个任务都复制，把它下面的条目选上", "VALIDATION");
-    if (isStagingDir(rel)) throw http(400, `「${rel.split("/")[0]}」是暂存区（整理挪进去的重复文件、复制后归档的），不复制`, "VALIDATION");
+    if (!rel) throw http(400, `路径不能是任务目录本身：要整个任务都${action}，把它下面的条目选上`, "VALIDATION");
+    if (isStagingDir(rel)) throw http(400, `「${rel.split("/")[0]}」是暂存区（整理挪进去的重复文件、归档的），不${action}`, "VALIDATION");
     if (!out.includes(rel)) out.push(rel);
   }
   return out.filter((p) => !out.some((o) => o !== p && p.startsWith(`${o}/`)));

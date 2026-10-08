@@ -12,7 +12,7 @@ export const AGENT_INSTRUCTIONS = `OpenStrm 把网盘（115 / 夸克 / OpenList�
 - 同步、整理、校验是后台活儿：发起后拿到句柄，用对应的 *_status 工具带 waitSeconds 等结果，不要连续快速轮询。
 - 账号 cookie 失效或被风控时，只能由用户在管理界面处理，不要反复重试。
 
-概念：账号 → 同步任务（网盘目录 → 本地 strm 目录）→ 执行记录。转存分享、115 云下载都落到某个任务的目录里，并自动生成 strm；追更订阅定时转存分享里的新增。任务可以开「复制到 OpenList」：落进来的新文件再由 OpenList 复制到别处（比如本地盘），复制完源文件按任务设置不动 / 删掉 / 归档（tasks_list 的 copyToOpenlist）；已经在网盘上的也能手动交给复制（copy_add），复制好的还能事后把源文件归档 / 删除（copy_after）。整理 = 按 TMDB 在网盘上改名归档：先预览出清单，人确认后执行，做过的能撤销。
+概念：账号 → 同步任务（网盘目录 → 本地 strm 目录）→ 执行记录。转存分享、115 云下载都落到某个任务的目录里，并自动生成 strm；追更订阅定时转存分享里的新增。任务可以开「复制到 OpenList」：落进来的新文件再由 OpenList 复制到别处（比如本地盘），复制完源文件按任务设置不动 / 删掉 / 归档（tasks_list 的 copyToOpenlist）；已经在网盘上的也能手动交给复制（copy_add），复制好的还能事后把源文件归档 / 删除（copy_after）；不管复制、单纯想把网盘上的目录 / 文件收进暂存区（任务目录下的「归档」，不再同步，可逆）用 drive_archive。整理 = 按 TMDB 在网盘上改名归档：先预览出清单，人确认后执行，做过的能撤销。
 
 用法：先用 overview 了解现状；任务、账号可以直接用名称引用。找资源：先 library_search 看收藏夹（用户收藏的分享，还没存进网盘；瞬间出结果），结果带 work 的用 library_work 看这部的全部版本、用户本地有没有、转存参数；没有合适的再 resource_search 网上搜 → share_inspect 看内容、判断是不是要的那一部 → 用户同意后 share_save / offline_add。用户想先收着以后再存：library_add；按作品逛收藏夹：library_works（能按类型、地区筛，也能对片单）；认错的用 library_match 改（先给用户看）；失效的分享用 library_sources 看、找替代。整理：organize_preview / organize_detail 看清单，认不准的用 tmdb_search 找、organize_adjust 改，把 confirmText 原样给用户看，同意后带 planVersion 调 organize_apply。句柄在服务重启后失效，失效就重新发起。`;
 
@@ -25,4 +25,5 @@ export const USAGE_NOTES = [
   "转存、云下载、追更检查之前看一眼任务的 copyToOpenlist（tasks_list）：开着的会把新文件复制到 OpenList，afterCopy 是 delete 的复制完还会删掉网盘上的源文件和本地 strm，archive 的会把源文件挪进任务目录下的「归档」，要一并告诉用户；share_save / offline_add 传 copy: true 能让这一次也复制；任务开着复制的没法这一次不复制。",
   "用户想把网盘上已经有的某部片放到本地磁盘（比如看片卡顿）：先用 strm_search 按片名找到它在任务里的位置，把复制到哪、复制完源文件怎么办说给用户，同意后再调 copy_add。",
   "已经复制到 OpenList 的，用户想把网盘上那份收起来：copy_after 归档（挪进任务目录下的「归档」，可逆）或删除（要「删除」档）；会先核对目标里那份齐了才动，本地对应的 strm 跟着删。调用前先告诉用户。",
+  "用户想把网盘上某部片 / 某个目录收起来、不在库里出现但先别删：drive_archive 挪进任务目录下的「归档」（暂存区，可逆，本地对应的 strm 跟着删）；它不管有没有复制过、不核对副本。要先复制到本地再收的，用 copy_add（afterCopy: archive）或 copy_after。调用前先告诉用户。",
 ];

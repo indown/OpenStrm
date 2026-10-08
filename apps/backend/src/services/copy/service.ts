@@ -184,6 +184,13 @@ export function setCopyServiceDeps(partial: Partial<Deps> | null): void {
   deps = partial ? { ...realDeps, ...partial } : { ...realDeps };
 }
 
+/**
+ * 挪进归档、删本地 strm 这两步单独给「归档到暂存区」（copy/archive.ts）用：和复制后归档是同一个实现，桩也共用。
+ * 包一层而不是直接导出 deps：setCopyServiceDeps 换的是整个 deps 对象，调用时才取才能拿到换过的
+ */
+export const archiveDriveSource: Deps["archiveSource"] = (account, path, nodeId, rootPath, opts) => deps.archiveSource(account, path, nodeId, rootPath, opts);
+export const removeLocalMirrorOf: Deps["removeLocalMirror"] = (account, path, isDir) => deps.removeLocalMirror(account, path, isDir);
+
 /* ------------------------------- 登记 ------------------------------- */
 
 export interface CopySource {
@@ -1068,8 +1075,8 @@ function settleAfterRetry(c: CopyRecord, why: string): void {
   keptThisTick.push(c);
 }
 
-/** 网络断、超时、网盘异步任务失败、5xx / 429：过一会儿多半就好了。账号失效、风控不算——那得人去修 */
-function transientAfterCopyError(account: string, err: unknown): boolean {
+/** 网络断、超时、网盘异步任务失败、5xx / 429：过一会儿多半就好了。账号失效、风控不算——那得人去修。归档到暂存区（archive.ts）碰上它就停手 */
+export function transientAfterCopyError(account: string, err: unknown): boolean {
   if (isAbortError(err)) return false;
   let provider: DriveProvider | undefined;
   try {

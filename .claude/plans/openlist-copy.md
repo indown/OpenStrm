@@ -769,3 +769,49 @@ copyToOpenlist?: { enabled?: boolean; dstDir?: string };   // dstDir 不填用�
   - MCP（官方 SDK 客户端连 /mcp，日常令牌）：`copy_list` 每条带 `canAfterCopy`、提示指向 copy_after；`copy_after` 传 delete 报 INSUFFICIENT_SCOPE（提示换 archive）；ids 和 task + paths 一起给报 VALIDATION；按 `task: "v1007lab", paths: ["after-test2.mkv"]` 3.65 秒 `archived`（state done、带 jobId，接着用了队列里那条记录）；再来一次 `missing`「网盘上没有这条路径（源文件已不在原处）」。
   - 界面（3223）：队列面板只有去向是不动的那条有「归档源文件」按钮；确认框文案对；点「归档」约 4 秒后 toast「已归档到 /v1007lab/归档，本地 strm 已删」，行上变成「复制后归档」+ 新 detail，按钮消失。
   - 收尾：`/115/v1007lab`（里面只剩「归档」+ 三个测试视频）经 OpenList `fs/remove` 删进 115 回收站，根目录列表里已经没有它；容器 `docker rm -f`，带 cookie 的 scratch 文件删掉。
+
+## 归档到暂存区：drive_archive（2026-10-08）
+
+起因：用户指出「现在提供的 copy_after 归档接口，只能归档已经完整复制到本地硬盘的文件」。查实：属实，而且是有意的——动手前核对源在原处、目标里齐了（目录逐层比名字、文件比大小），不齐的 `incomplete` 一个不动；复制中的只补去向。细节：115 整目录核对只比名字（导出树没大小），单文件比大小。现有工具链覆盖：没复制过 → `copy_add`（afterCopy: archive）；复制了一半 → `copy_add` 补齐再 `copy_after`；复制中 → `copy_after` 排成复制完归档。真正的空白是「不管有没有复制、单纯想把网盘上的目录 / 文件挪进归档」。
+
+用户只要补这个空白，问推荐。推荐**单独做一个动作**，不往 copy_after 上加「跳过核对」的开关：归档动作（`archiveSource` + 删本地 strm）本来就不依赖复制记录，单独做和加开关代价差不多；加开关得伪造一条「已复制」记录，队列和 copy_list 会把没复制过的显示成已复制；智能体碰到 incomplete 会顺手带上开关绕过核对；单独的动作不碰 OpenList 配置，没配复制的也能用暂存区。用户：「按你的推荐开始吧，界面也要」。
+
+### 方案
+
+**服务层** `services/copy/archive.ts`：`archiveToStaging({ task, paths, signal?, onProgress? })` → `{ done, archiveDir, items[] }`，每条 `outcome` = archived / kept / copying / missing / failed / skipped，带 path（任务相对）、name、isDir、detail、to。
+
+- 路径口径和 copy_add 一样：`uniquePaths(paths, "归档")`（不收任务目录本身、不收暂存区、父目录在就不单列子路径；报错动词参数化，`assertNotOrganizing(task, "归档")` 同理）。
+- 正在复制到 OpenList 的拒掉（队列里 pending 的记录，源是它、在它下面、或它在那条的源目录下面）：挪走了 OpenList 那边的复制就断了；提示等复制完或用 copy_after 排成复制完归档。
+- 任务正在整理时整个请求拒（409 TASK_ORGANIZING）；网盘不支持写 400 UNSUPPORTED。
+- 两阶段：先按父目录绕开缓存找节点（复用 after.ts 导出的 `Lookups`，网盘读不到整个请求都不动），再逐条 `archiveDriveSource`（service.ts 导出的 `deps.archiveSource` 包装，节点 id 钉住）→ `removeLocalMirrorOf` 删本地 strm → `markCopyRecords`（队列里同一个源、或它下面的复制好的记录标成 afterCopy = archive，面板按钮和 copy_after 不再给它）。
+- 幂等：源不在原处、`归档/<rel>` 里却有同名的，当上次已经挪过了（archived + 「上次挪过了」，done 也算）。归档里已有同名的 kept，不覆盖不合并。
+- 挪的时候出错：那条 failed（`networkErrorText` 换成人话）；是网络问题 / 临时错误（`transientAfterCopyError` 导出）就停手，后面的 skipped「前面一条碰上网络问题，这条没试」；单条被网盘拒的不影响别的。不进自动重试，再调一次即可。
+- 只做归档，不做删除；不发通知；不碰 OpenList。
+
+**REST** `POST /api/drive/archive`（新文件 `routes/drive/archive.ts`，body `{ taskId, paths }`，write + transfer，和 copy_after 同一档）。
+
+**工具** `drive_archive`（transfer.ts，transfer 组 write 档；注解 idempotent、非破坏性）：task + paths，40 秒内直接回否则交作业用 job_status 等（和 copy_after 同一套）；结果带 archiveDir、逐条 outcomeText、note / next、openInUi 指向 strm 管理页。`copy_after` 的描述和 incomplete 的 next 都指向它；instructions 概念句 + USAGE_NOTES 各加一句。工具 43 → 44。
+
+**界面**：`components/ArchiveDialog.tsx`（照 AddCopyDialog：选任务 → 从网盘里选目录 / 文件（根下暂存区不列）→ 确认框 → 结果列表按 outcome 标色，收进去了就叫 onDone 刷新）；strm 管理页：目录「更多操作」多一项「归档到暂存区」，strm 行多一个归档图标按钮（桌面 / 窄屏两套），顶部「工具」多一项「归档当前目录到暂存区」（任务根灰掉）；strm 行先读 strm 内容算出网盘路径（和复制同一个 `rowDrivePath`）。
+
+**不做**：按 id 删除；「从归档恢复」仍是手动挪回；115 整目录核对不比大小（用户只要补空白）。
+
+### 实施记录（2026-10-08）
+
+按方案做完，未提交。
+
+- `services/copy/manual.ts`：`uniquePaths(paths, action)` / `assertNotOrganizing(task, action)` 报错动词参数化（默认仍是「复制」）。
+- `services/copy/service.ts`：导出 `archiveDriveSource` / `removeLocalMirrorOf`（`deps` 的包装，调用时才取，桩照样生效）、`transientAfterCopyError`。`services/copy/after.ts`：导出 `Lookups`。
+- `services/copy/archive.ts`（新）：`archiveToStaging`。真机 MCP 复测时发现「源不在原处、归档里有同名」那条在第一阶段就下结论，不会补本地 strm 和记录（上次挪成了、回话丢在收尾之前的话本地 strm 会留下）——改成带 `earlier` 进第二阶段，只补收尾不动网盘。
+- `routes/drive/archive.ts`（新）`POST /api/drive/archive`，`index.ts` 登记。
+- `services/agent/tools/transfer.ts`：`drive_archive`（`archiveView` / `archiveError`）；`tools/index.ts` 登记；`instructions.ts` 概念句 + USAGE_NOTES 各一句；`tools/copy.ts` 的 copy_after 描述和 incomplete 的 next 指向 drive_archive；快照 43 → 44。
+- 前端：`lib/api.ts`（`DriveArchiveInput / Outcome / Result`、`api.drive.archive`）；`components/ArchiveDialog.tsx`（新）；`app/strm/page.tsx`（`rowDrivePath` 从 copyRow 里抽出来给复制 / 归档共用、`RowProps.onArchive`、DirMenu 一项、strm 行归档图标按钮两套布局、顶部「工具」一项、挂弹框，收进去了就 `b.refresh()`）。
+- README 三处：权限档「日常」、「复制到 OpenList」一节末尾、strm 管理一节后面一段。
+- 测试：`services/copy/archive.itest.ts` 6 条（收文件 / 收目录 + 记录联动 / 不动的几种 + 上次挪过了补收尾 / 拒绝 / 网络问题停手、修好再来不重复 / 单条失败不影响别的）；`routes/drive/archive.itest.ts` 1 条；`routes/mcp/mcp-copy.itest.ts` +1；tools 快照。全量 1533 过（在 earlier 改法之前跑的；之后三个文件 26 条复跑过）。tsc / eslint 前后端过，`next build` 过。
+- 真机（2026-10-08，115）：OpenList 容器挂 115 Cloud（cookie 来自配置库只读拷贝，容器只映射 127.0.0.1:5246）往 115 根下建 `/v1008lab/{某剧/S01/E01.mkv, 某剧/S01/E02.mkv, 电影/movie.mkv}`（ffmpeg 造的 88 KB 测试视频）；scratch 后端 4100（新库：115 账号 + v1008lab 任务 + 日常令牌，监控 / Telegram / Emby 关）跑一次同步生成 3 个 strm。
+  - REST `POST /api/drive/archive`（某剧/S01/E01.mkv）：6.2 秒，`archived`、`to: /v1008lab/归档/某剧/S01`、「本地 strm 也删了」；115 上原处没了，归档里有。
+  - MCP（官方 SDK 客户端，日常令牌，28 个工具里有 drive_archive）：「某剧」→ `kept`「归档目录里已经有同名的」（归档/某剧 已由上一步建出）；「某剧/S01/E02.mkv」→ `archived` 4 秒；同一条再调 → `archived`「已经在归档里（上次挪过了）」不重复；「归档/某剧」→ VALIDATION 带 drive_browse 提示。换上 earlier 改法重启后端再调一次 E02 → 同样「上次挪过了」。
+  - 界面（3223 dev → 4100，隐藏窗口用 JS 派事件）：strm 页 v1008lab 目录行「更多操作」里有「归档到暂存区」；弹框预填任务和「电影」；确认框文案；点「归档」约 5 秒后结果「电影 已归档 · 本地 strm 也删了」+ toast「收进暂存区 1 项，本地对应的 strm 已删」，列表刷新成空。
+  - 115 最终：`/v1008lab/归档/{某剧/S01/{E01,E02}.mkv, 电影/movie.mkv}`，`/v1008lab/某剧/S01` 留着空目录（收单个文件不收拾父目录，和 copy_after 一样）；本地 strm 全没了。
+  - 收尾：`/v1008lab` 经 OpenList `fs/remove` 删进 115 回收站（Provider 再看已是 missing）；容器 `rm -f`、带 cookie 的 scratch 目录整个删掉、Docker Desktop 停掉。
+- zsh 坑：`for args in "a b"; do cmd $args` 不分词（第一轮 MCP 全报 paths 空），要写 `${=args}`。

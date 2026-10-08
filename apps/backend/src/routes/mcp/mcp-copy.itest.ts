@@ -8,6 +8,7 @@
  *     strmAfterDownload 只算生成 strm 的回执；offline_list 把两种回执分开列
  *   - follow_check 带回 copy；没开转存那一组的令牌不叫它调 copy_list
  *   - copy_list / copy_retry：条数、过滤、配置、能不能重试、各种状态；只读令牌看不到 copy_retry
+ *   - drive_archive：不管复制、把网盘上的目录 / 文件收进任务目录下的「归档」；正在复制的不动；只读令牌看不到
  *   - overview / tasks_list 的复制字段
  *
  *   CONFIG_DIR=... DATA_DIR=... pnpm test:file src/routes/mcp/mcp-copy.itest.ts
@@ -875,6 +876,57 @@ test("copy_after：按记录 id 事后归档源文件（目标里不全的不动
       openlist: { listNames: async () => [], mkdir: async () => {}, copy: async () => [], copyTasks: async () => ({ undone: [], done: [] }) },
       notify: async () => {},
     });
+  }
+});
+
+test("drive_archive：不管复制过没有，把网盘上的目录 / 文件收进任务目录下的「归档」（本地 strm 跟着删、复制好的记录标成已归档）；正在复制的不动；只读令牌看不到", async () => {
+  d115.tree.addFile("/tv/Show/E01.mkv", { size: 9 });
+  d115.tree.addFile("/tv/Show/E02.mkv", { size: 9 });
+  d115.tree.addFile("/tv/Other/E01.mkv", { size: 9 });
+  const local = path.join(LOCAL, "tv", "Show", "E01.strm");
+  fs.mkdirSync(path.dirname(local), { recursive: true });
+  fs.writeFileSync(local, "/mnt/pan/tv/Show/E01.mkv");
+  saveCopies([
+    record({ id: "k1", status: "done", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Show", name: "E01.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", doneAt: Date.now(), detail: "复制完成" }),
+    record({ id: "p1", status: "pending", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Other", name: "E01.mkv", isDir: false, dstDir: "/local/media/Other", dstBase: "/local/media" }),
+  ]);
+  const daily = await connect(dailyToken);
+  const read = await connect(readToken);
+  try {
+    assert.ok(!(await read.listTools()).tools.some((t) => t.name === "drive_archive"), "只读令牌没有 drive_archive");
+    const tool = (await daily.listTools()).tools.find((t) => t.name === "drive_archive")!;
+    assert.match(tool.description ?? "", /得到同意再调用/);
+
+    // 目标里什么都没有也照收：不核对副本
+    const res = await call(daily, "drive_archive", { task: "tv", paths: ["Show", "Other/E01.mkv", "没有的"] });
+    assert.equal(res.isError, false, JSON.stringify(res.data));
+    assert.equal(res.data.state, "done");
+    assert.equal(res.data.done, 1);
+    assert.equal(res.data.archiveDir, "/tv/归档");
+    assert.deepEqual(
+      res.data.items.map((i: Record<string, unknown>) => [i.path, i.outcome, i.outcomeText, i.to]),
+      [
+        ["Show", "archived", "已归档", "/tv/归档"],
+        ["Other/E01.mkv", "copying", "正在复制到 OpenList，没动", undefined],
+        ["没有的", "missing", "网盘上没有这条路径", undefined],
+      ],
+    );
+    assert.match(res.data.note, /收进暂存区 1 条/);
+    assert.match(res.data.next, /copy_after/);
+    assert.match(res.data.openInUi, /\/strm\?taskId=c-tv/);
+    assert.ok(d115.tree.get("/tv/归档/Show/E02.mkv"));
+    assert.equal(d115.tree.get("/tv/Show"), undefined);
+    assert.ok(d115.tree.get("/tv/Other/E01.mkv"), "正在复制的没动");
+    assert.equal(fs.existsSync(local), false);
+    assert.equal(listCopies().find((c) => c.id === "k1")!.afterCopy, "archive", "复制好的记录标成已归档");
+
+    const bad = await call(daily, "drive_archive", { task: "tv", paths: ["归档/Show"] });
+    assert.equal(bad.isError, true);
+    assert.equal(bad.data.code, "VALIDATION");
+    assert.match(bad.data.hint, /drive_browse/);
+  } finally {
+    await daily.close();
+    await read.close();
   }
 });
 

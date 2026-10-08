@@ -359,6 +359,24 @@ export interface CopyAfterResult {
   items: Array<{ path: string; id?: string; name: string; outcome: CopyAfterOutcome; isDir?: boolean; detail?: string; to?: string }>;
 }
 
+/* ------------------------------- 归档到暂存区 ------------------------------- */
+
+/** POST /api/drive/archive：把任务网盘目录里的目录 / 文件挪进任务目录下的「归档」（暂存区），不管复制队列、不核对副本 */
+export interface DriveArchiveInput {
+  taskId: string;
+  /** 相对任务网盘目录 */
+  paths: string[];
+}
+/** 每条的下场：归档了（含上次挪过的）/ 没动（原因在 detail）/ 正在复制到 OpenList 没动 / 网盘上没有 / 没成 / 前一条碰上网络问题没试 */
+export type DriveArchiveOutcome = "archived" | "kept" | "copying" | "missing" | "failed" | "skipped";
+export interface DriveArchiveResult {
+  /** 收进去了几条 */
+  done: number;
+  /** 归档目录（网盘绝对路径） */
+  archiveDir: string;
+  items: Array<{ path: string; name: string; isDir?: boolean; outcome: DriveArchiveOutcome; detail?: string; to?: string }>;
+}
+
 export interface CopyQueue {
   /** 能重试的在前、再是还在跑的，各自新的在前 */
   items: CopyItem[];
@@ -829,6 +847,11 @@ export const api = {
     local: (basePath = "") => data(axiosInstance.post<DirectoryNode[]>("/api/directory/local/list", { basePath })),
     remote: (account: string, path = "", withFiles = false) =>
       data(axiosInstance.post<DirectoryNode[]>("/api/directory/remote/list", { account, path, ...(withFiles ? { withFiles: true } : {}) })),
+  },
+
+  drive: {
+    /** 归档到暂存区：逐条到网盘找节点再挪，一条一两秒，给宽一点 */
+    archive: (input: DriveArchiveInput) => data(axiosInstance.post<DriveArchiveResult>("/api/drive/archive", input, { timeout: 330_000 })),
   },
 
   tmdb: {

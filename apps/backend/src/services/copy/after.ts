@@ -261,8 +261,8 @@ export async function settleAfterCopy(input: AfterCopyInput): Promise<AfterCopyR
   return { afterCopy, done, items };
 }
 
-/** 网盘上这个路径现在是哪一条（带大小、类型），按父目录绕开缓存列；同一次请求里每个父目录只列一次 */
-class Lookups {
+/** 网盘上这个路径现在是哪一条（带大小、类型），按父目录绕开缓存列；同一次请求里每个父目录只列一次。归档到暂存区（archive.ts）也用 */
+export class Lookups {
   private readonly dirs = new Map<string, Promise<DriveEntry[] | null>>();
   async entry(account: string, abs: string): Promise<DriveEntry | null> {
     const provider = providerForAccount(account);

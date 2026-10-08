@@ -410,7 +410,7 @@ function afterCopyView(r: AfterCopyResult, token: Pick<AgentToken, "toolsets">):
     count("kept") + count("missing") + count("pending") + count("invalid") > 0 ? `${count("kept") + count("missing") + count("pending") + count("invalid")} 条没动，原因见 items` : "",
   ].filter(Boolean);
   const next = [
-    count("incomplete") > 0 ? "目标里不全的先用 copy_add 补齐（会只补缺的），复制完再来一次" : "",
+    count("incomplete") > 0 ? "目标里不全的先用 copy_add 补齐（会只补缺的），复制完再来一次；不打算复制、只想把网盘上那份收进暂存区的用 drive_archive" : "",
     count("retrying") > 0 || count("scheduled") > 0 ? `稍后${progress}结果（大约 30 秒推进一轮，别连续快速轮询）` : "",
   ].filter(Boolean);
   return {
@@ -426,7 +426,7 @@ function afterCopyView(r: AfterCopyResult, token: Pick<AgentToken, "toolsets">):
 export const copyAfterTool = defineTool({
   name: "copy_after",
   title: "事后处理已复制的源文件",
-  description: `已经复制到 OpenList 的目录 / 文件，事后把网盘上的源文件归档（挪进任务目录下的「归档」，原来的层级留着，可逆）或删除（进回收站，不可逆，令牌要有「删除」档）——给「复制时去向选的是不动，现在想把网盘上那份收起来」「复制完归档 / 删除当时没成」用。**这会动网盘上的源文件、并删掉本地对应的 strm：调用前把要处理哪些、归档还是删除告诉用户，得到同意再调用。** 指定方式二选一：ids（copy_list 里 canAfterCopy 为 true 的记录 id），或 task + paths（相对任务网盘目录的路径，和 copy_add 同一口径；复制记录只留两天，更早复制的用这种）。动手前逐条核对：源还在原处、目标里这一份齐了（目录逐层比名字、文件比大小），不全的不动（outcome 为 incomplete，先用 copy_add 补齐）。还在复制中的不动源，改成复制完再按这个去向处理（scheduled）。任务正在整理时会拒。一次最多 ${AFTER_MAX} 条；${AFTER_INLINE_WAIT_MS / 1000} 秒内做完直接返回结果，做不完返回 jobId，用 job_status 等（结果保留 ${JOB_RETENTION_MS / 60000} 分钟）。`,
+  description: `已经复制到 OpenList 的目录 / 文件，事后把网盘上的源文件归档（挪进任务目录下的「归档」，原来的层级留着，可逆）或删除（进回收站，不可逆，令牌要有「删除」档）——给「复制时去向选的是不动，现在想把网盘上那份收起来」「复制完归档 / 删除当时没成」用。**这会动网盘上的源文件、并删掉本地对应的 strm：调用前把要处理哪些、归档还是删除告诉用户，得到同意再调用。** 指定方式二选一：ids（copy_list 里 canAfterCopy 为 true 的记录 id），或 task + paths（相对任务网盘目录的路径，和 copy_add 同一口径；复制记录只留两天，更早复制的用这种）。动手前逐条核对：源还在原处、目标里这一份齐了（目录逐层比名字、文件比大小），不全的不动（outcome 为 incomplete，先用 copy_add 补齐）；不打算复制、只想把网盘上那份收进暂存区的用 drive_archive（不核对副本）。还在复制中的不动源，改成复制完再按这个去向处理（scheduled）。任务正在整理时会拒。一次最多 ${AFTER_MAX} 条；${AFTER_INLINE_WAIT_MS / 1000} 秒内做完直接返回结果，做不完返回 jobId，用 job_status 等（结果保留 ${JOB_RETENTION_MS / 60000} 分钟）。`,
   scope: "write",
   toolset: "transfer",
   annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: true },

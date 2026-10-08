@@ -218,6 +218,42 @@
     }
   },
   {
+    "name": "drive_archive",
+    "scope": "write",
+    "toolset": "transfer",
+    "annotations": {
+      "readOnly": false,
+      "destructive": false,
+      "idempotent": true,
+      "openWorld": true
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "paths": {
+          "minItems": 1,
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        }
+      },
+      "required": [
+        "task",
+        "paths"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "share_inspect",
     "scope": "read",
     "toolset": "transfer",

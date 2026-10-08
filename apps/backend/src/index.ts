@@ -80,6 +80,7 @@ import { startLibraryIdentify, stopLibraryIdentify } from "./services/library/id
 // Directory routes
 import directoryLocalRoute from "./routes/directory/local.js";
 import directoryRemoteRoute from "./routes/directory/remote.js";
+import driveArchiveRoute from "./routes/drive/archive.js";
 import strmRoute from "./routes/strm/index.js";
 
 
@@ -180,6 +181,7 @@ await app.register(librarySaveToTaskRoute);
 // Directory routes
 await app.register(directoryLocalRoute);
 await app.register(directoryRemoteRoute);
+await app.register(driveArchiveRoute);
 await app.register(strmRoute);
 
 // Alist-compatible route

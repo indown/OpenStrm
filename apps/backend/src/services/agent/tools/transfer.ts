@@ -1,5 +1,5 @@
 /**
- * 转存与云下载工具集：看网盘目录、看分享、转存分享、加 115 云下载、看云下载列表。
+ * 转存与云下载工具集：看网盘目录、归档到暂存区、看分享、转存分享、加 115 云下载、看云下载列表。
  *
  * 分享里的文件名、标题是第三方内容：只放在数据字段里，不拼进 next / hint 这类提示句。
  */
@@ -30,6 +30,7 @@ import {
   type SaveSelectionResult,
 } from "../../share/receive.js";
 import { withAfterCopy, type CopyOutcome } from "../../copy/service.js";
+import { ARCHIVE_MAX, archiveToStaging, type ArchiveItem, type ArchiveItemOutcome, type ArchiveSummary } from "../../copy/archive.js";
 import { HttpError } from "../../../lib/http-error.js";
 import { copyBlockerFor, copyDstProblem, copyOptionsFor, normConfigDir } from "../../copy/paths.js";
 import { isSafeItemName } from "../../strm/share-strm.js";
@@ -135,6 +136,101 @@ export const driveBrowseTool = defineTool({
       fileCount: listing.fileCount,
       ...(truncated ? { truncated } : {}),
     };
+  },
+});
+
+/* ------------------------------- 归档到暂存区 ------------------------------- */
+
+/** 逐条到网盘找节点再挪，一条一两秒；超过这个时间就交给后台作业，用 job_status 等 */
+const ARCHIVE_INLINE_WAIT_MS = 40_000;
+
+const ARCHIVE_OUTCOME_TEXT: Record<ArchiveItemOutcome, string> = {
+  archived: "已归档",
+  kept: "没动",
+  copying: "正在复制到 OpenList，没动",
+  missing: "网盘上没有这条路径",
+  failed: "归档没成",
+  skipped: "前面一条碰上网络问题，这条没试",
+};
+
+/** strm 管理页：归档之后本地 strm 没了，从这里看 */
+const strmUiPath = (task: TaskDefinition) => `/strm?${new URLSearchParams({ taskId: task.id })}`;
+
+/** drive_archive 的结果：逐条说下场，外加一句总结和下一步 */
+function archiveView(r: ArchiveSummary, task: TaskDefinition): Record<string, unknown> {
+  const count = (o: ArchiveItemOutcome) => r.items.filter((i) => i.outcome === o).length;
+  const parts = [
+    r.done > 0 ? `收进暂存区 ${r.done} 条（挪进了 ${r.archiveDir}，本地对应的 strm 已删）` : "",
+    count("copying") > 0 ? `${count("copying")} 条正在复制到 OpenList，没动` : "",
+    count("kept") + count("missing") > 0 ? `${count("kept") + count("missing")} 条没动，原因见 items` : "",
+    count("failed") + count("skipped") > 0 ? `${count("failed") + count("skipped")} 条没成，原因见 items` : "",
+  ].filter(Boolean);
+  const next = [
+    count("copying") > 0 ? "正在复制的等复制完再来；要复制完就归档的，用 copy_list 拿到记录 id 后调 copy_after" : "",
+    count("failed") + count("skipped") > 0 ? "没成的稍后再调一次（已经挪过的会直接算归档，不会重复）" : "",
+    r.done > 0 ? "想恢复的话到网盘里把它从「归档」挪回原处，再同步一次" : "",
+  ].filter(Boolean);
+  return {
+    task: taskBrief(task),
+    archiveDir: r.archiveDir,
+    done: r.done,
+    items: r.items.map((i: ArchiveItem) => ({ ...i, outcomeText: ARCHIVE_OUTCOME_TEXT[i.outcome] })),
+    note: parts.length ? `${parts.join("；")}。` : "没有处理任何一条，原因见 items。",
+    ...(next.length ? { next: `${next.join("；")}。` } : {}),
+    ...openInUi(strmUiPath(task)),
+  };
+}
+
+/** 服务层的 HttpError 换成给模型看的说法 */
+function archiveError(err: unknown): unknown {
+  if (!(err instanceof HttpError)) return err;
+  const code = typeof err.extra.code === "string" ? err.extra.code : undefined;
+  if (code === "TASK_ORGANIZING") return new ToolError(code, err.message, "用 organize_status 等这次整理办完再调。", typeof err.extra.runId === "string" ? { runId: err.extra.runId } : {});
+  if (code === "VALIDATION") return new ToolError(code, err.message, "用 drive_browse 看这个任务的网盘目录，路径相对任务目录；暂存区（归档、重复文件）里的不用收。");
+  if (code === "UNSUPPORTED") return new ToolError(code, err.message);
+  return err;
+}
+
+export const driveArchiveTool = defineTool({
+  name: "drive_archive",
+  title: "归档到暂存区",
+  description: `把任务网盘目录里的目录 / 文件挪进任务目录下的「归档」（暂存区）：原来的层级留着（tv/某剧/S01/E01.mkv → tv/归档/某剧/S01/E01.mkv），可逆（到网盘里挪回去就行）；进了暂存区就不再同步、监控、整理，本地对应的 strm 删掉，Emby 里也就没了。不看复制队列、不核对别处有没有副本：没复制过的、不打算复制的、已经用别的办法备份好的都能收——想先复制到 OpenList 再收的，用 copy_add（afterCopy: archive）或 copy_after。**这会动网盘上的文件、并删掉本地对应的 strm：调用前把要收哪些告诉用户，得到同意再调用。** paths 相对任务的网盘目录（和 copy_add / drive_browse 同一口径），一次最多 ${ARCHIVE_MAX} 条，不能是任务目录本身和暂存区。正在复制到 OpenList 的不动（等复制完，或用 copy_after 排成复制完归档）；归档里已有同名的不动；任务正在整理时会拒。${ARCHIVE_INLINE_WAIT_MS / 1000} 秒内做完直接返回结果，做不完返回 jobId，用 job_status 等（结果保留 ${JOB_RETENTION_MS / 60000} 分钟）。`,
+  scope: "write",
+  toolset: "transfer",
+  annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: true },
+  input: z.object({
+    task: z.string().min(1).max(500).describe("哪个任务（任务 id，或网盘路径 / 本地路径 / 它们的最后一段）"),
+    paths: z.array(z.string().min(1).max(1000)).min(1).max(ARCHIVE_MAX).describe(`要收起来的目录 / 文件，相对任务的网盘目录，用 / 分隔，最多 ${ARCHIVE_MAX} 条`),
+  }),
+  async run(args, ctx) {
+    const task = resolveTask(args.task);
+    const job = startJob("drive_archive", `归档 ${task.account} · ${task.originPath} 下 ${args.paths.length} 条到暂存区`, async (report) => {
+      try {
+        // 不传请求的 signal：客户端断开只是不等了，挪到哪算哪都已经落库
+        return await archiveToStaging({
+          task,
+          paths: args.paths,
+          onProgress: (done, total) => report({ done, total, message: `归档中 ${done}/${total}` }),
+        });
+      } catch (err) {
+        throw archiveError(err);
+      }
+    });
+    await waitForJob(job, ARCHIVE_INLINE_WAIT_MS, ctx.signal);
+    const view = viewJob(job);
+    if (view.status === "running") {
+      return {
+        state: "running",
+        jobId: job.id,
+        message: "还在逐条挪进归档（网盘接口一条一两秒）",
+        next: `用 job_status(jobId: "${job.id}", waitSeconds: 60) 等结果`,
+      };
+    }
+    if (view.status === "failed") {
+      const { error, code, hint, ...extra } = view.failure ?? { error: "归档失败", code: "ARCHIVE_FAILED" };
+      throw new ToolError(code, error, hint, { ...extra, jobId: job.id });
+    }
+    return { state: "done", jobId: job.id, ...archiveView(view.result as ArchiveSummary, task) };
   },
 });
 
