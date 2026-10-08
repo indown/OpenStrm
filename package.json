@@ -1,7 +1,7 @@
 {
   "name": "openstrm",
   "private": true,
-  "version": "2.16.0-rc.1",
+  "version": "2.16.0-rc.2",
   "description": "OpenStrm - Strm Management Platform",
   "license": "MIT",
   "scripts": {
