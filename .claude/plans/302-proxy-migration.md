@@ -205,3 +205,5 @@ v1 的两条规则都是 njs 里的通用表达式引擎（任意 `r.*` 变量 +
 **没验到的**：Emby Web 真正起播——浏览器自动化那个标签页 `visibilityState=hidden`，Chrome 对后台标签页推迟加载 `<video>`，
 播放器一直转圈但代理根本没收到流请求（页面里 `fetch` 同一个地址立刻拿到 302，CDN 对带 Referer / Sec-Fetch 的请求也回 206），
 是环境不是代码；Infuse 真机还是只有用户的设备能验。
+
+**发布**：功能合成一个提交 958fa66，`chore(release): v2.16.0-rc.1` = d856687，tag 已推（2026-10-07，main 未动）。Release 四作业与 CI@v2 全绿，GitHub Release 是 prerelease，Docker Hub rc 镜像 b470196f490c（amd64 / arm64），latest 仍是 v2.15.0 的 b06e1e4dba65。
