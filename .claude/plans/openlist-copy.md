@@ -815,3 +815,6 @@ copyToOpenlist?: { enabled?: boolean; dstDir?: string };   // dstDir 不填用�
   - 115 最终：`/v1008lab/归档/{某剧/S01/{E01,E02}.mkv, 电影/movie.mkv}`，`/v1008lab/某剧/S01` 留着空目录（收单个文件不收拾父目录，和 copy_after 一样）；本地 strm 全没了。
   - 收尾：`/v1008lab` 经 OpenList `fs/remove` 删进 115 回收站（Provider 再看已是 missing）；容器 `rm -f`、带 cookie 的 scratch 目录整个删掉、Docker Desktop 停掉。
 - zsh 坑：`for args in "a b"; do cmd $args` 不分词（第一轮 MCP 全报 paths 空），要写 `${=args}`。
+
+**发布**：功能合成一个提交 b31af05（前面的 c0de163 只是把 rc.1 的发布记录补进 302-proxy-migration.md），`chore(release): v2.16.0-rc.2` = 09e4b1e，tag 已推（2026-10-08，main 未动）。
+Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）与 CI@v2 两作业全绿，GitHub Release 是 prerelease，Docker Hub `v2.16.0-rc.2` 镜像 c1583e206da7（amd64 / arm64），latest 仍是 v2.15.0 的 b06e1e4dba65。
