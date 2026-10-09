@@ -279,14 +279,19 @@ ingress:
 
 ### 使用 Docker (推荐)
 
-镜像是多架构的（linux/amd64、linux/arm64），`docker-compose.yml` 直接拉取 `indown/openstrm:latest`：
+只是部署的话不用克隆仓库，一个 `docker-compose.yml` 就够了。找个空目录放它，`data`、`config` 两个目录启动时会自动建在旁边：
 
 ```bash
-git clone https://github.com/indown/OpenStrm.git
-cd OpenStrm
-# 只需要 docker-compose.yml 一个文件；里面有 TZ / PUID / JWT_SECRET 等可选项的注释
+mkdir openstrm && cd openstrm
+curl -fsSLO https://raw.githubusercontent.com/indown/OpenStrm/main/docker-compose.yml
 docker compose up -d
 ```
+
+机器上连不上 `raw.githubusercontent.com` 的话，用浏览器打开仓库里的 [docker-compose.yml](docker-compose.yml)，内容存成同名文件放进这个目录也一样。
+
+镜像是 `indown/openstrm:latest`，支持 linux/amd64 和 linux/arm64。时区默认 `Asia/Shanghai`；`PUID` / `PGID`、`LOG_LEVEL` 等可选项在文件里以注释写好了，要用就去掉 `#` 再 `docker compose up -d` 一次，各项说明见下方「环境变量」。
+
+启动后打开 `http://<机器 IP>:3000`，接着看下方「第一次用」。
 
 不用 compose 的话：
 
@@ -342,7 +347,7 @@ docker compose up -d
 
 ### 从源码构建镜像
 
-改了代码想跑自己的版本：
+改了代码想跑自己的版本，在仓库根目录执行：
 
 ```bash
 docker compose -f docker-compose.build.yml up -d --build
