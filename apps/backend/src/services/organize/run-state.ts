@@ -17,7 +17,7 @@ import { extSet } from "../strm/naming.js";
 import { notify } from "../notify.js";
 import { messageOf, retryableItem, revertPendingItem, revertWorkItem } from "./failures.js";
 import { TmdbClient, type TmdbApi } from "./identify.js";
-import type { ScopeRoot } from "./plan.js";
+import type { EpisodeFill, ScopeRoot } from "./plan.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
 import { AUDIO_EXTS, type ScopeEntry, type Unit } from "./units.js";
 
@@ -276,6 +276,8 @@ export interface PlanState {
   otherTaskRoots: string[];
   /** 越到范围外、整棵列过的单元根（里面有什么都知道了，腾空后能判断删不删，见 cleanupRoots） */
   outsideRoots: Set<string>;
+  /** 单元的补空值（记住的识别、追更上次的整理，见 plan.ts 的 EpisodeFill）：重规划照用；人换了匹配就清掉，那是上一部作品的 */
+  fills: Map<string, EpisodeFill>;
 }
 
 export const planContext = (state: PlanState) => ({ settings: state.org, libraryType: state.task.organize?.libraryType });

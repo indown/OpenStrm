@@ -463,6 +463,45 @@ test("失败的项再执行会重试；记忆按新路径写、不被旧记忆�
   assert.equal(memory?.tmdbId, 153312, "这次确认的 153312 而不是被挪过来的旧记忆 999");
 });
 
+test("记住的季 / 集偏移只补空：作品目录里别的季、整理好的文件不被压，再整理不重复加偏移；没写季的新文件照样补上，勾记住不丢原来的", async () => {
+  const work = "我和僵尸有个约会 (1998) [tmdbid=19389]";
+  drive.tree.addFile(`/tv/${work}/Season 01/我和僵尸有个约会 - S01E01.mkv`);
+  drive.tree.addFile(`/tv/${work}/Season 02/我和僵尸有个约会 - S02E13.mkv`);
+  rememberMatch({ accountName: "acc", srcPath: `/tv/${work}`, mediaType: "tv", tmdbId: 19389, title: "我和僵尸有个约会", year: "1998", season: 2, episodeOffset: 12 });
+
+  // 手动整理整个作品目录：整理好的都不动（以前第 1 季被压去第 2 季撞冲突、S02E13 被改成 S02E25）
+  const whole = await createRun({ taskId: "t1", subPath: work });
+  const ready = await untilStatus(whole.id, ["ready"]);
+  assert.equal(ready.stats.planned, 0, listItems(whole.id).map((i) => `${i.action} ${i.srcPath} -> ${i.dstPath}`).join("\n"));
+  assert.equal(ready.stats.conflicts, 0);
+  const wholeUnit = getRunDetail(whole.id).units[0];
+  assert.equal(wholeUnit.match?.reason, "上次确认过的识别结果");
+  assert.equal(wholeUnit.seasonOverride, null, "记住的季不写进单元的季覆盖");
+  assert.equal(wholeUnit.episodeOffset, 0);
+  assert.ok(!wholeUnit.notes.some((n) => n.startsWith("按记住的识别")), "没用上就不提");
+  cancelRun(whole.id);
+
+  // 第 1 季的新文件落进作品目录（监控）：文件名写了 S01，不被记住的季压
+  drive.tree.addFile(`/tv/${work}/我和僵尸有个约会.S01E05.mkv`);
+  const s1 = await createRun({ taskId: "t1", paths: [`${work}/我和僵尸有个约会.S01E05.mkv`], mode: "auto", trigger: "monitor" });
+  await untilStatus(s1.id, ["done"]);
+  assert.ok(drive.tree.get(`/tv/${work}/Season 01/我和僵尸有个约会 - S01E05.mkv`), "进第 1 季");
+
+  // 没写季的新文件：补上第 2 季、集数 +12；勾「记住」、这次没改季 / 偏移，原来记着的留着
+  drive.tree.addFile(`/tv/${work}/我和僵尸有个约会.EP02.mkv`);
+  const raw = await createRun({ taskId: "t1", paths: [`${work}/我和僵尸有个约会.EP02.mkv`], mode: "review", trigger: "monitor" });
+  await untilStatus(raw.id, ["ready"]);
+  const rawUnit = getRunDetail(raw.id).units[0];
+  assert.equal(listItems(raw.id).find((i) => i.srcPath.endsWith("EP02.mkv"))!.dstPath, `/tv/${work}/Season 02/我和僵尸有个约会 - S02E14.mkv`);
+  assert.ok(rawUnit.notes.includes("按记住的识别：1 个没写季的文件放第 2 季、集数 +12"), rawUnit.notes.join("；"));
+  await patchUnit(raw.id, rawUnit.key, { remember: true });
+  assert.ok(getRunDetail(raw.id).units[0].notes.includes("按记住的识别：1 个没写季的文件放第 2 季、集数 +12"), "重规划照样补空");
+  await applyRun(raw.id);
+  await untilStatus(raw.id, ["done"]);
+  const memory = recallMatch("acc", `/tv/${work}`);
+  assert.deepEqual([memory?.season, memory?.episodeOffset], [2, 12], "勾了记住、没改季 / 偏移：原来记着的留着");
+});
+
 test("自动触发的 run（按路径）也会列范围外的目标目录：已存在的不再 mkdir，撞名算冲突", async () => {
   drive.tree.addDir("/tv/沙丘：第二部 (2024) [tmdbid=693134]");
   drive.tree.addFile("/tv/沙丘：第二部 (2024) [tmdbid=693134]/沙丘：第二部 (2024) - 2160p.mkv");

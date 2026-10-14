@@ -2,7 +2,7 @@
  * 执行：按顺序补本地镜像 → mkdir → 改名 → 移动 → 本地镜像 → 逐条记账 → 删空目录 → 收尾；放弃失败项让 run 收口。
  */
 import type { OrganizeItem, OrganizeRun, OrganizeSkipResult, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
-import { bumpAttempts, getRun, listItems, listRunsByStatus, listUnits, rememberMatch, repathMatches, updateItem, updateItems, updateRun } from "../../db/repositories/organize.js";
+import { bumpAttempts, getRun, listItems, listRunsByStatus, listUnits, recallMatch, rememberMatch, repathMatches, updateItem, updateItems, updateRun } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { isAbortError } from "../../lib/errors.js";
@@ -449,15 +449,19 @@ export function afterApply(task: TaskDefinition, provider: DriveProvider, units:
   for (const m of mappings) if (m.root) repathMatches(provider.account.name, absOf(task, m.from), absOf(task, m.to));
   for (const u of units) {
     if (!u.match || !u.dstRoot || !u.remember) continue;
+    const srcPath = absOf(task, u.dstRoot);
+    // 记住的季 / 集偏移只补空、不在单元上（preview.ts 的 memoryFill）：这次没改的，同一部作品原来记着的留着
+    const prev = recallMatch(provider.account.name, srcPath);
+    const kept = prev && prev.tmdbId === u.match.tmdbId && prev.mediaType === u.match.mediaType ? prev : null;
     rememberMatch({
       accountName: provider.account.name,
-      srcPath: absOf(task, u.dstRoot),
+      srcPath,
       mediaType: u.match.mediaType,
       tmdbId: u.match.tmdbId,
       title: u.match.title,
       year: u.match.year,
-      season: u.seasonOverride,
-      episodeOffset: u.episodeOffset,
+      season: u.seasonOverride ?? kept?.season ?? null,
+      episodeOffset: u.episodeOffset || kept?.episodeOffset || 0,
     });
   }
   // 复制队列按文件跟：整理最常见的是「一集挪进作品目录、顺手改名」，所在目录没腾空，目录级映射里没有它

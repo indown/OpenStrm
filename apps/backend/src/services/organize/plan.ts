@@ -61,6 +61,8 @@ export interface UnitPlanInput {
   match: OrganizeMatch | null;
   seasonOverride: number | null;
   episodeOffset: number;
+  /** 补空值（记住的识别、追更上次的整理）：见 EpisodeFill */
+  fill?: EpisodeFill | null;
   /** `season:episode` → 集标题（开了集标题才有） */
   episodeTitles?: Map<string, string>;
   selected: boolean;
@@ -105,6 +107,19 @@ interface SeasonEpisode {
   /** 没有季标记的集数（给模板的 {absolute}） */
   absolute?: number;
   note?: string;
+  /** 补空值真用上了（见 EpisodeFill）：单元说明里要提一句 */
+  filled?: true;
+}
+
+/**
+ * 补空值：季只给自己什么季都没给的文件（文件名、识别词、季目录、目录名都没有），集偏移只给文件名没写季的文件（原样编号）。
+ * 记住的识别、追更上次的整理都是这个口径：作品目录以后还会收别的季，整理好的文件再整理也不能再套一次；人定的季 / 偏移照旧强制
+ */
+export interface EpisodeFill {
+  season: number | null;
+  episodeOffset: number;
+  /** 哪来的，写进单元说明：「按记住的识别」「沿用追更「X」上次的整理」 */
+  from: string;
 }
 
 /** 去掉尾巴数字后的标题是不是这部剧：对单元自己的标题候选和 TMDB 的译名 / 原名 / 英文名 */
@@ -120,11 +135,20 @@ function isSameWork(titles: string[], unit: Unit, match: OrganizeMatch): boolean
  * 识别词直指（`{[tmdbid=…;s=2]}`）只在直指的就是认出来的这部作品时才算：命中文件名的，s / e 只管这一个文件、压过别的；
  * 命中目录名的，s 管整个单元（特别篇除外），折算绝对集数也按它，人在预览里改的季优先
  */
-export function resolveEpisode(file: UnitFile, unit: Unit, match: OrganizeMatch, seasonOverride: number | null, episodeOffset: number): SeasonEpisode | null {
+export function resolveEpisode(
+  file: UnitFile,
+  unit: Unit,
+  match: OrganizeMatch,
+  seasonOverride: number | null,
+  episodeOffset: number,
+  fill?: EpisodeFill | null,
+): SeasonEpisode | null {
   const p = file.parsed;
   const pin = file.direct && file.direct.tmdbId === match.tmdbId ? file.direct : undefined;
   const ruleSeason = pin?.season === undefined && unit.dirDirect && unit.dirDirect.tmdbId === match.tmdbId ? unit.dirDirect.season : undefined;
-  let season: number | undefined = pin?.season ?? p.season ?? ruleSeason ?? file.seasonFromDir ?? unit.parsed.season;
+  const own = pin?.season ?? p.season ?? ruleSeason ?? file.seasonFromDir ?? unit.parsed.season;
+  const fillSeason = own === undefined && fill && fill.season !== null ? fill.season : undefined;
+  let season: number | undefined = own ?? fillSeason;
   let episode: number | undefined = pin?.episode ?? p.episode;
   let episodeEnd: number | undefined = pin?.episode !== undefined ? undefined : p.episodeEnd;
   let absolute = p.absolute;
@@ -167,12 +191,21 @@ export function resolveEpisode(file: UnitFile, unit: Unit, match: OrganizeMatch,
   }
   if (season === undefined) season = p.isSpecial ? 0 : 1;
   // 识别词钉死了集数的不再偏移
+  const fillOffset = fill && pin?.episode === undefined && p.season === undefined ? fill.episodeOffset : 0;
   if (pin?.episode === undefined) {
-    episode += episodeOffset;
-    if (episodeEnd !== undefined) episodeEnd += episodeOffset;
+    episode += episodeOffset + fillOffset;
+    if (episodeEnd !== undefined) episodeEnd += episodeOffset + fillOffset;
   }
   if (episode < 0) return null;
-  return { season, episode, episodeEnd, absolute, note };
+  // 补空的季是 1 和没补一样，不算用上
+  const filled = (fillSeason !== undefined && fillSeason !== 1 && season === fillSeason && seasonOverride === null) || fillOffset !== 0;
+  return { season, episode, episodeEnd, absolute, note, ...(filled ? { filled: true as const } : {}) };
+}
+
+/** 补空值用上了：「按记住的识别：2 个没写季的文件放第 2 季、集数 +12」 */
+function fillNote(fill: EpisodeFill, count: number): string {
+  const what = [fill.season !== null && fill.season !== 1 ? `放第 ${fill.season} 季` : "", fill.episodeOffset ? `集数 ${fill.episodeOffset > 0 ? "+" : ""}${fill.episodeOffset}` : ""].filter(Boolean);
+  return `${fill.from}：${count} 个没写季的文件${what.join("、")}`;
 }
 
 function fileVars(file: UnitFile): TemplateVars {
@@ -293,6 +326,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
   const dstRoot = rootTemplate ? renderTemplate(rootTemplate, common, { colon: s.colon }).path : "";
 
   const excluded = input.excluded ?? new Set<string>();
+  let filledCount = 0;
   for (const f of unit.files) {
     if (f.kind !== "video" || f.inExtrasDir || f.parsed.isExtra) continue;
     if (excluded.has(f.path)) {
@@ -301,12 +335,13 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
     }
     let vars: TemplateVars = { ...common, ...fileVars(f) };
     if (match.mediaType === "tv") {
-      const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset);
+      const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset, input.fill);
       if (!se) {
         push(f, null, "看不出是第几集");
         continue;
       }
       if (se.note) notes.push(`${f.name}：${se.note}`);
+      if (se.filled) filledCount++;
       const key = `${se.season}:${se.episode}`;
       vars = {
         ...vars,
@@ -342,6 +377,8 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
       videoDst.delete(f);
     } else seen.set(dst, f);
   }
+
+  if (filledCount > 0 && input.fill) notes.push(fillNote(input.fill, filledCount));
 
   const videos = [...videoDst.keys()];
   // 单元里所有的正片（排没排上都算）：字幕在它们里面找主人
@@ -404,7 +441,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
       // 就跟着留下——不能退到「唯一排上的那个视频」，那会把别的视频的字幕配给它
       let owner: UnitFile | undefined;
       if (match.mediaType === "tv") {
-        const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset);
+        const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset, input.fill);
         if (se) owner = videos.find((v) => videoKey.get(v) === `${se.season}:${se.episode}`);
       }
       owner ??= unitVideos.filter((v) => f.stem.startsWith(v.stem)).sort((a, b) => b.stem.length - a.stem.length)[0];

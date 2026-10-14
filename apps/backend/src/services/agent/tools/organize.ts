@@ -544,7 +544,7 @@ const changeSchema = z
     mediaType: z.enum(["movie", "tv"]).optional().describe("单元：和 tmdbId 一起给，movie 电影 / tv 剧集；不给就沿用现在的类型"),
     season: z.number().int().min(-1).max(99).optional().describe("单元：整个单元都当第几季，0 是特别篇，-1 取消这个设置"),
     episodeOffset: z.number().int().min(-2000).max(2000).optional().describe("单元：集数加减多少（第二季从 13 集接着编号时填 -12）"),
-    remember: z.boolean().optional().describe("单元：执行后记住这次的识别，下次同一个目录直接用"),
+    remember: z.boolean().optional().describe("单元：执行后记住这次的识别，下次同一个目录直接用（记住的季 / 集偏移只补给文件名没写季的文件）"),
     selected: z.boolean().optional().describe("单元：整理 / 不整理；文件：整理 / 留在原处"),
     resolve: z
       .enum(["rename", "custom", "duplicate", "delete", "replace", "keep"])

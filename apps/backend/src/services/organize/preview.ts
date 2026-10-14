@@ -2,7 +2,7 @@
  * 预览：建 run → 列范围 → 分单元 → 识别（TMDB）→ 规划 → 落库；预览里改单元 / 换匹配；换匹配弹框的 TMDB 搜索。
  */
 import { randomUUID } from "node:crypto";
-import type { OrganizeCandidate, OrganizeConflictResolution, OrganizeItem, OrganizeMatch, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeCandidate, OrganizeConflictResolution, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
 import { getRun, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
@@ -21,7 +21,7 @@ import { messageOf } from "./failures.js";
 import { idTagFromName, identifyUnit, type IdEvidence, type KnownId, type TmdbApi } from "./identify.js";
 import { nfoEvidence } from "./nfo.js";
 import { duplicatePathFor, isStagingDir } from "../strm/staging.js";
-import { finalizeItems, planUnit, type PlannedItem, type ScopeRoot, type UnitPlan } from "./plan.js";
+import { finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan } from "./plan.js";
 import { parseRules } from "./rules.js";
 import { resolveOrganizeSettings } from "./settings.js";
 import { isNamedAfter, looksLikeReleaseDir } from "./parse-name.js";
@@ -341,6 +341,16 @@ async function walkScope(provider: DriveProvider, task: TaskDefinition, run: Org
   return { entries, files, roots };
 }
 
+/**
+ * 记住的识别里的季 / 集偏移只补空（见 plan.ts 的 EpisodeFill），不写进单元的季覆盖 / 集偏移：作品目录以后还会收别的季、
+ * 整理好的文件再整理也不能再套一次。认出来的不是记着的那部作品（识别词直指了别的）就不用
+ */
+function memoryFill(memory: OrganizeMatchMemory | null | undefined, match: OrganizeMatch | null): EpisodeFill | null {
+  if (!memory || !match || match.mediaType !== "tv" || memory.tmdbId !== match.tmdbId || memory.mediaType !== match.mediaType) return null;
+  if (memory.season === null && memory.episodeOffset === 0) return null;
+  return { season: memory.season, episodeOffset: memory.episodeOffset, from: "按记住的识别" };
+}
+
 /** 影库条目：转存自影库的目录名和条目的 rawName 一致 */
 function libraryEvidence(unit: Unit, entries: ReturnType<typeof listLibraryEntries>): KnownId | null {
   if (!unit.rootPath) return null;
@@ -496,6 +506,7 @@ async function preview(job: Job, runId: string): Promise<void> {
       .filter((t) => t.id !== task.id)
       .map((t) => normalizePath(t.originPath)),
     outsideRoots: new Set(),
+    fills: new Map(),
   };
   state.refPaths = [...rewriteFollowSubPaths(task.id, [], true), ...state.offlineRefs, ...rewriteCopyPaths(task.id, task.originPath, [], true)];
   const library = listLibraryEntries();
@@ -526,15 +537,12 @@ async function preview(job: Job, runId: string): Promise<void> {
     }
     state.episodeTitles.set(unit.key, episodeTitles);
     state.identifyNotes.set(unit.key, identifyNotes);
-    const memory = evidence.memory;
     // 引用数等删空目录的边界定了再算（refsOf）
     const row = toUnitRow(runId, unit, match, null, 0);
-    if (memory) {
-      row.seasonOverride = memory.season;
-      row.episodeOffset = memory.episodeOffset;
-    }
+    const fill = memoryFill(evidence.memory, match);
+    if (fill) state.fills.set(unit.key, fill);
     const plan = planUnit(
-      { unit, match, seasonOverride: row.seasonOverride, episodeOffset: row.episodeOffset, episodeTitles, selected: row.selected },
+      { unit, match, seasonOverride: row.seasonOverride, episodeOffset: row.episodeOffset, fill, episodeTitles, selected: row.selected },
       { settings: org, libraryType: task.organize?.libraryType },
     );
     row.dstRoot = plan.dstRoot;
@@ -628,6 +636,7 @@ function replanRun(run: OrganizeRun, state: PlanState, changed: Map<string, Orga
         match: r.match,
         seasonOverride: r.seasonOverride,
         episodeOffset: r.episodeOffset,
+        fill: state.fills.get(u.key),
         episodeTitles: state.episodeTitles.get(u.key),
         selected: r.selected,
         excluded: excludedRel(state.task, r),
@@ -861,6 +870,7 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
             match: next.match,
             seasonOverride: next.seasonOverride,
             episodeOffset: next.episodeOffset,
+            fill: picked.has(row.key) ? null : state.fills.get(row.key),
             episodeTitles: picked.get(row.key)?.episodeTitles ?? state.episodeTitles.get(row.key),
             selected: true,
             excluded: excludedRel(state.task, next),
@@ -878,6 +888,7 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
     for (const [key, p] of picked) {
       state.episodeTitles.set(key, p.episodeTitles);
       state.identifyNotes.set(key, []);
+      state.fills.delete(key);
     }
     // 批量的冲突办法按这一刻的清单和单元行重新定：等的时候别人可能刚改过
     const freshRows = listUnits(runId);

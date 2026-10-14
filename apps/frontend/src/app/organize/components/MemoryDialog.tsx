@@ -71,7 +71,7 @@ export function MemoryDialog({ open, onOpenChange }: { open: boolean; onOpenChan
       <DialogContent size="lg" className="flex max-h-[85vh] flex-col">
         <DialogHeader>
           <DialogTitle>识别记忆</DialogTitle>
-          <DialogDescription>预览里勾了「记住这个识别」的目录：下次整理同一个目录直接按它认（算把握大）。记错了的删掉，下次就重新识别。</DialogDescription>
+          <DialogDescription>预览里勾了「记住这个识别」的目录：下次整理同一个目录直接按它认（算把握大）。记住的季 / 集偏移只补给文件名没写季的文件，别的季和已经整理好的文件不受影响。记错了的删掉，下次就重新识别。</DialogDescription>
         </DialogHeader>
         {list && list.length > 0 && <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="按目录、片名或编号找" className="h-8 text-xs" />}
         <div className="min-h-0 flex-1 overflow-y-auto">
