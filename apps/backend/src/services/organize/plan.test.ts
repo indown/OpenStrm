@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { OrganizeMatch } from "@openstrm/shared";
 import { EXCLUDED_REASON, finalizeItems, planUnit, resolveEpisode, type ScopeRoot } from "./plan.js";
+import { parseRules } from "./rules.js";
 import { resolveOrganizeSettings } from "./settings.js";
 import { buildUnits, type ScopeEntry } from "./units.js";
 
@@ -107,6 +108,28 @@ test("绝对集数按每季集数折算；季覆盖和集偏移", () => {
   const es2 = entries(["Show/BEEF - 13 [1080p].mkv"]);
   const [u2] = buildUnits(es2, { scopePath: "", taskRootName: "root", videoExts, rules: [] });
   assert.deepEqual(resolveEpisode(u2.files[0], u2, { ...beef, seasons: undefined }, 1, -12), { season: 1, episode: 1, episodeEnd: undefined, absolute: 13, note: undefined });
+});
+
+test("识别词直指带季：命中目录名的 s 管整个单元（人改的季优先、特别篇除外）；命中文件名的 s / e 只管那个文件；直指的不是认出来的作品就不算", () => {
+  const { rules } = parseRules(["某某剧 第二部 => {[tmdbid=153312;type=tv;s=2]}", "BEEF 特别篇 => {[tmdbid=153312;s=0;e=3]}"]);
+  const es = entries(["某某剧 第二部/01.mkv", "某某剧 第二部/02.mkv", "某某剧 第二部/BEEF.S01E05.mkv", "某某剧 第二部/BEEF 特别篇.mkv", "某某剧 第二部/BEEF.SP01.mkv"]);
+  const [unit] = buildUnits(es, { scopePath: "", taskRootName: "root", videoExts, rules });
+  assert.equal(unit.dirDirect?.season, 2, "命中的是目录名");
+  const se = (name: string, match = beef, seasonOverride: number | null = null, offset = 0) => {
+    const r = resolveEpisode(unit.files.find((f) => f.name === name)!, unit, match, seasonOverride, offset);
+    return r && `S${r.season}E${r.episode}`;
+  };
+  assert.equal(se("01.mkv"), "S2E1", "目录名直指的季");
+  assert.equal(se("BEEF.S01E05.mkv"), "S2E5", "文件名里写着 S01 也按直指的季");
+  assert.equal(se("BEEF.SP01.mkv"), "S0E1", "特别篇还是特别篇");
+  assert.equal(se("01.mkv", beef, 3), "S3E1", "人在预览里改的季优先");
+  assert.equal(se("BEEF 特别篇.mkv"), "S0E3", "命中文件名的 s / e 只管这个文件");
+  assert.equal(se("BEEF 特别篇.mkv", beef, 3, 5), "S0E3", "钉死的季 / 集不吃季覆盖和集偏移");
+  const other = { ...beef, tmdbId: 999 };
+  assert.equal(se("01.mkv", other), "S1E1", "直指的不是认出来的作品：不算");
+  assert.equal(se("BEEF 特别篇.mkv", other), null, "钉的集数也不算，名字里又看不出集数");
+  const p = planUnit({ unit, match: beef, seasonOverride: null, episodeOffset: 0, selected: true }, { settings });
+  assert.equal(p.items.find((i) => i.srcPath.endsWith("/01.mkv"))!.dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 02/怒呛人生 - S02E01.mkv");
 });
 
 test("没识别 / 没勾选：全部 skip；花絮默认跟着进 extras/，设置成留在原处才不动", () => {

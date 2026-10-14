@@ -51,6 +51,8 @@ export interface Unit {
   kindHint: "movie" | "tv" | "unknown";
   files: UnitFile[];
   direct?: DirectSpec;
+  /** 识别词命中的是目录名（不是某个文件名）：它给的季管整个单元（见 plan.ts 的 resolveEpisode） */
+  dirDirect?: DirectSpec;
   /** 多个视频都没有集数、标题又一样时的视频个数：先按同一部电影的多个版本猜，规划时 TMDB 没认成剧集才提示 */
   multiVersion?: number;
   /**
@@ -278,7 +280,9 @@ export function buildUnits(entries: ScopeEntry[], opts: BuildUnitsOptions): Unit
       parsed.titles = [...parsed.titles, ...extra];
       // 这个目录是不是这部作品自己的（里面认不出的图片 / nfo 原名跟进作品目录）：任务根不算；范围根（tv、inbox 这种）要目录名就是这部作品
       const ownsDir = root !== "" && (!atScopeRoot || (dirTitleOk && rootParsed.parsed.titles.some((t) => fileParsed.titles.some((f) => normalizeTitle(f) === normalizeTitle(t)))));
-      units.push(makeUnit(root, rootName, parsed, list, rootParsed.direct, opts, ownsDir));
+      const unit = makeUnit(root, rootName, parsed, list, rootParsed.direct, opts, ownsDir);
+      if (rootParsed.direct) unit.dirDirect = rootParsed.direct;
+      units.push(unit);
       continue;
     }
     // 拆：每个标题一个单元；非视频文件按同名前缀跟着视频走，跟不上的不进任何单元（原地不动）

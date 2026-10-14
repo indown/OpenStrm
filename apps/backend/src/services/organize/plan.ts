@@ -117,16 +117,20 @@ function isSameWork(titles: string[], unit: Unit, match: OrganizeMatch): boolean
  * 一集在哪一季第几集：文件自己的 S01E01 最可信；只有绝对集数时结合季目录 / TMDB 每季集数折算；
  * 名字里只有标题末尾的数字（`回家的诱惑69`）、去掉数字正好是这部剧的名字时，数字当绝对集数。
  * 用户给的季覆盖和集偏移最后套上。
+ * 识别词直指（`{[tmdbid=…;s=2]}`）只在直指的就是认出来的这部作品时才算：命中文件名的，s / e 只管这一个文件、压过别的；
+ * 命中目录名的，s 管整个单元（特别篇除外），折算绝对集数也按它，人在预览里改的季优先
  */
 export function resolveEpisode(file: UnitFile, unit: Unit, match: OrganizeMatch, seasonOverride: number | null, episodeOffset: number): SeasonEpisode | null {
   const p = file.parsed;
-  let season: number | undefined = p.season ?? file.seasonFromDir ?? unit.parsed.season;
-  let episode: number | undefined = p.episode;
-  let episodeEnd: number | undefined = p.episodeEnd;
+  const pin = file.direct && file.direct.tmdbId === match.tmdbId ? file.direct : undefined;
+  const ruleSeason = pin?.season === undefined && unit.dirDirect && unit.dirDirect.tmdbId === match.tmdbId ? unit.dirDirect.season : undefined;
+  let season: number | undefined = pin?.season ?? p.season ?? ruleSeason ?? file.seasonFromDir ?? unit.parsed.season;
+  let episode: number | undefined = pin?.episode ?? p.episode;
+  let episodeEnd: number | undefined = pin?.episode !== undefined ? undefined : p.episodeEnd;
   let absolute = p.absolute;
   const absoluteEnd = p.absoluteEnd;
   let note: string | undefined;
-  if (p.isSpecial && p.season === undefined) season = 0;
+  if (p.isSpecial && p.season === undefined && pin?.season === undefined) season = 0;
   if (episode === undefined && absolute === undefined && !p.isSpecial) {
     // 单元阶段没敢认的尾巴数字（只有这一个文件、没有季目录也没有兄弟可比）：TMDB 已经认成剧集，它就是集数
     const t = trailingNumber(p);
@@ -157,10 +161,16 @@ export function resolveEpisode(file: UnitFile, unit: Unit, match: OrganizeMatch,
     }
   }
   if (episode === undefined) return null;
-  if (seasonOverride !== null) season = seasonOverride;
+  if (pin?.season === undefined) {
+    if (seasonOverride !== null) season = seasonOverride;
+    else if (ruleSeason !== undefined && !p.isSpecial) season = ruleSeason;
+  }
   if (season === undefined) season = p.isSpecial ? 0 : 1;
-  episode += episodeOffset;
-  if (episodeEnd !== undefined) episodeEnd += episodeOffset;
+  // 识别词钉死了集数的不再偏移
+  if (pin?.episode === undefined) {
+    episode += episodeOffset;
+    if (episodeEnd !== undefined) episodeEnd += episodeOffset;
+  }
   if (episode < 0) return null;
   return { season, episode, episodeEnd, absolute, note };
 }
