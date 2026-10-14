@@ -2,6 +2,7 @@
  * 夸克网盘的 Provider。同步 / 浏览 / 直链走 quark/client.ts，分享走 quark/share.ts；快照变更源在 services/life/sources/quark.ts。
  * 夸克没有整树导出：子树靠逐层列目录，同一层的目录并发列（在飞上限 4，真正的节流是账号限流器）。
  * 名字里带 / 的条目按路径根本找不回来，跳过并告警。
+ * 监控不用每轮整棵列：dirFingerprints 按路径批量取目录指纹（updated_at + include_items），快照源只列变了的目录。
  */
 import type { AccountQuark } from "@openstrm/shared";
 import { mapLimit } from "../../../lib/async.js";
@@ -15,6 +16,7 @@ import {
   quarkListDir,
   quarkMkdir,
   quarkMove,
+  quarkPathList,
   quarkRename,
   quarkResolvePath,
   rememberQuarkDir,
@@ -40,11 +42,13 @@ import {
   RemoteDirNotFoundError,
   ShareGoneError,
   type AccountIssue,
+  type DirFingerprint,
   type DriveEntry,
   type DriveLink,
   type DriveNode,
   type DriveProvider,
   type DriveWriteOps,
+  type ReadOptions,
   type ReceiveItem,
   type ReceiveResult,
   type ShareEntry,
@@ -61,8 +65,11 @@ import {
 const log = moduleLogger("quark");
 
 function toEntry(e: QuarkEntry): DriveEntry {
-  return { id: e.fid, name: e.name, isDir: e.isDir, size: e.size, token: e.fid, modifiedAt: e.modifiedAt || undefined };
+  return { id: e.fid, name: e.name, isDir: e.isDir, size: e.size, token: e.fid, modifiedAt: e.modifiedAt || undefined, ...(e.isDir ? { items: e.items } : {}) };
 }
+
+/** 后台监控发的请求走 life 通道，不占界面和同步用的 normal 并发（每秒请求数是账号共用的，不变） */
+const channelOf = (opts?: { background?: boolean }) => (opts?.background ? "life" : "normal") as "life" | "normal";
 
 function toShareEntry(f: QuarkShareFile): ShareEntry {
   return { id: f.fid, name: f.name, isDir: f.isDir, size: f.isDir ? undefined : f.size, token: f.token, modifiedAt: f.modifiedAt || undefined };
@@ -240,15 +247,17 @@ export class QuarkProvider implements DriveProvider {
     }
   }
 
-  async listDir(id: string, signal?: AbortSignal): Promise<DriveEntry[]> {
-    return (await quarkListDir(this.account, id, signal)).map(toEntry);
+  /** 夸克没有自己的目录缓存，fresh 不用管 */
+  async listDir(id: string, signal?: AbortSignal, opts?: { fresh?: boolean; background?: boolean }): Promise<DriveEntry[]> {
+    return (await quarkListDir(this.account, id, signal, { channel: channelOf(opts) })).map(toEntry);
   }
 
-  private async walk(rootFid: string, signal?: AbortSignal): Promise<SubtreeEntry[]> {
+  private async walk(rootFid: string, signal?: AbortSignal, background?: boolean): Promise<SubtreeEntry[]> {
     const out: SubtreeEntry[] = [];
     let frontier: Array<{ fid: string; rel: string[] }> = [{ fid: rootFid, rel: [] }];
+    const channel = channelOf({ background });
     while (frontier.length > 0) {
-      const listed = await mapLimit(frontier, 4, (dir) => quarkListDir(this.account, dir.fid, signal));
+      const listed = await mapLimit(frontier, 4, (dir) => quarkListDir(this.account, dir.fid, signal, { channel }));
       const next: typeof frontier = [];
       frontier.forEach((dir, i) => {
         for (const item of listed[i]) {
@@ -257,7 +266,14 @@ export class QuarkProvider implements DriveProvider {
             continue;
           }
           const segs = [...dir.rel, item.name];
-          out.push({ path: segs.join("/"), id: item.fid, isDir: item.isDir, size: item.size, modifiedAt: item.modifiedAt || undefined });
+          out.push({
+            path: segs.join("/"),
+            id: item.fid,
+            isDir: item.isDir,
+            size: item.size,
+            modifiedAt: item.modifiedAt || undefined,
+            ...(item.isDir ? { items: item.items } : {}),
+          });
           if (item.isDir) next.push({ fid: item.fid, rel: segs });
         }
       });
@@ -278,8 +294,19 @@ export class QuarkProvider implements DriveProvider {
     return syncViewFromPaths(entries.map((e) => e.path.split("/")));
   }
 
-  async walkSubtree(path: string, opts?: { id?: string; signal?: AbortSignal }): Promise<SubtreeEntry[]> {
-    return this.walk(await this.rootFid(path, opts?.id, opts?.signal), opts?.signal);
+  async walkSubtree(path: string, opts?: { id?: string } & ReadOptions): Promise<SubtreeEntry[]> {
+    return this.walk(await this.rootFid(path, opts?.id, opts?.signal), opts?.signal, opts?.background);
+  }
+
+  /** path_list 按路径批量取目录指纹（50 个一批）；文件、不存在的、服务端回的路径和传的对不上的都不回 */
+  async dirFingerprints(paths: string[], opts?: ReadOptions): Promise<Map<string, DirFingerprint>> {
+    const hits = await quarkPathList(this.account, paths, { signal: opts?.signal, channel: channelOf(opts) });
+    const out = new Map<string, DirFingerprint>();
+    for (const p of paths) {
+      const e = hits.get(p);
+      if (e?.isDir) out.set(p, { id: e.fid, modifiedAt: e.modifiedAt, items: e.items });
+    }
+    return out;
   }
 
   async downloadLink(path: string, opts?: { token?: string; signal?: AbortSignal }): Promise<DriveLink> {
@@ -320,7 +347,7 @@ class QuarkWrite implements DriveWriteOps {
 
   async mkdir(parent: { id: string; path: string }, name: string, signal?: AbortSignal): Promise<DriveNode> {
     const fid = await quarkMkdir(this.account, parent.id, name, signal);
-    rememberQuarkDir(this.account, joinPan(parent.path, name), { fid, name, isDir: true, size: 0, category: 0, modifiedAt: Date.now() });
+    rememberQuarkDir(this.account, joinPan(parent.path, name), { fid, name, isDir: true, size: 0, category: 0, modifiedAt: Date.now(), items: 0 });
     return { id: fid, isDir: true };
   }
 

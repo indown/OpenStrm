@@ -13,7 +13,7 @@ export type LifeMonitorSettings = {
   accounts?: string[];
   /** latest=只处理启动之后的事件；all=全量补齐；last=从上次停止的游标继续 */
   pullMode?: LifePullMode;
-  /** 两轮轮询之间的间隔秒数，默认 15；夸克是快照对比，最短 300 */
+  /** 两轮轮询之间的间隔秒数，默认 15；夸克按目录指纹对比，最短 60 */
   intervalSeconds?: number;
   /** 允许的事件动作，默认全开 */
   eventModes?: LifeEventMode[];

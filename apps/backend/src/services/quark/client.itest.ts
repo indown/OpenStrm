@@ -17,14 +17,17 @@ import {
   QuarkError,
   quarkDownloadLink,
   quarkListDir,
+  quarkPathList,
   quarkResolvePath,
   setQuarkApiBase,
 } from "./client.js";
+import { QuarkProvider } from "../drive/providers/quark.js";
 
-type RawFile = { fid: string; file_name: string; file: boolean; size?: number; category?: number };
+type RawFile = { fid: string; file_name: string; file: boolean; size?: number; category?: number; updated_at?: number; include_items?: number };
+const TV_UPDATED = 1_700_000_000_000;
 const tree: Record<string, RawFile[]> = {
   "0": [
-    { fid: "d-tv", file_name: "tv", file: false },
+    { fid: "d-tv", file_name: "tv", file: false, updated_at: TV_UPDATED, include_items: 1 },
     { fid: "d-big", file_name: "big", file: false },
     { fid: "f-root", file_name: "root.txt", file: true, size: 3 },
   ],
@@ -44,7 +47,7 @@ const sortCalls = new Map<string, number>();
 let pathListCalls: string[][] = [];
 /** path_list 只认目录、只认精确路径（真机行为） */
 const dirPaths: Record<string, RawFile & { file_path: string }> = {
-  "/tv": { fid: "d-tv", file_name: "tv", file: false, file_path: "/tv" },
+  "/tv": { fid: "d-tv", file_name: "tv", file: false, file_path: "/tv", updated_at: TV_UPDATED, include_items: 1 },
   "/tv/Show & Co": { fid: "d-show", file_name: "Show &amp; Co", file: false, file_path: "/tv/Show & Co" },
   "/big": { fid: "d-big", file_name: "big", file: false, file_path: "/big" },
 };
@@ -80,6 +83,8 @@ const server = http.createServer((req, res) => {
       const body = JSON.parse(raw) as { file_path: string[]; namespace: string };
       pathListCalls.push(body.file_path);
       if (body.namespace !== "0") return json(400, { status: 400, code: 14001, message: "Bad Parameter" });
+      // 真机：一次超过 50 个路径就报这个
+      if (body.file_path.length > 50) return json(400, { status: 400, code: 14001, message: "Bad Parameter: [fids size limit]" });
       return json(200, { status: 200, code: 0, data: body.file_path.filter((p) => dirPaths[p]).map((p) => dirPaths[p]) });
     }
     if (url.pathname === "/file/download") {
@@ -126,6 +131,26 @@ test("列目录：带 pr / fr、Cookie、Referer、固定 UA；文件名反转�
   assert.equal(lastSort?.headers["user-agent"], QUARK_UA);
   const show = await quarkListDir(account, "d-tv");
   assert.equal(show[0].name, "Show & Co");
+});
+
+test("path_list 一次最多 50 个路径：超过的分批问；条目带 updated_at 和子项数；Provider 的 dirFingerprints 只回目录、键是传进去的路径", async () => {
+  pathListCalls = [];
+  const fakes = Array.from({ length: 117 }, (_, i) => `/tv/none-${i}`);
+  const hits = await quarkPathList(account, ["/tv", ...fakes, "/tv/Show & Co", "/big"]);
+  assert.deepEqual(
+    pathListCalls.map((c) => c.length),
+    [50, 50, 20],
+  );
+  assert.deepEqual([...hits.keys()].sort(), ["/big", "/tv", "/tv/Show & Co"]);
+  assert.equal(hits.get("/tv")?.items, 1);
+  assert.equal(hits.get("/tv")?.modifiedAt, TV_UPDATED);
+  assert.equal(hits.get("/big")?.items, 0, "没带 include_items 的是 0");
+
+  const fps = await new QuarkProvider(account).dirFingerprints(["/tv", "/tv/none-1"]);
+  assert.deepEqual([...fps], [["/tv", { id: "d-tv", modifiedAt: TV_UPDATED, items: 1 }]]);
+
+  const root = await quarkListDir(account, "0");
+  assert.equal(root.find((e) => e.name === "tv")?.items, 1, "列目录的条目同样带子项数");
 });
 
 test("翻页：_total 250 分三页拼齐后停下", async () => {

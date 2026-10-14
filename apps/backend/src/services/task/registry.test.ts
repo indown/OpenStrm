@@ -7,13 +7,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Subject, Subscription } from "rxjs";
+import { events } from "../events.js";
 import {
+  cancelRunningTask,
   getRunningTask,
   registerRunningTask,
   releaseTaskStart,
   reserveTaskStart,
   unregisterRunningTask,
   waitForTaskStart,
+  type RunningTask,
 } from "./registry.js";
 
 /** 30ms 内没落定就当还挂着 */
@@ -58,4 +61,35 @@ test("客户端断开：signal 中止后立刻返回 undefined，之后 release 
   reserveTaskStart("t4");
   assert.equal(await waitForTaskStart("t4", already.signal), undefined, "已中止的 signal 不挂");
   releaseTaskStart("t4");
+});
+
+test("任务不在跑了就发 task.finished：启动阶段就结束的、跑完的、被取消的各发一次；取消后 runner 收尾不重复发，没占过位的不发", () => {
+  const seen: string[] = [];
+  const off = events.on("task.finished", ({ taskId }) => seen.push(taskId));
+  const fakeRun = (): RunningTask => ({ subject: new Subject(), subscription: new Subscription(), logs: [] });
+  try {
+    reserveTaskStart("f1");
+    releaseTaskStart("f1", { status: 200, message: "no files to download", idle: true });
+    assert.deepEqual(seen, ["f1"], "无事可做 / 起不来：启动阶段结束就是结束");
+
+    reserveTaskStart("f2");
+    registerRunningTask("f2", fakeRun());
+    releaseTaskStart("f2", { status: 200, message: "3 files to download" });
+    assert.deepEqual(seen, ["f1"], "起来了：启动阶段结束时还在跑，不发");
+    unregisterRunningTask("f2");
+    assert.deepEqual(seen, ["f1", "f2"], "跑完发");
+
+    reserveTaskStart("f3");
+    registerRunningTask("f3", fakeRun());
+    releaseTaskStart("f3", { status: 200, message: "1 file to download" });
+    cancelRunningTask("f3");
+    unregisterRunningTask("f3");
+    assert.deepEqual(seen, ["f1", "f2", "f3"], "取消发一次，runner 收尾再 unregister 不重复发");
+
+    releaseTaskStart("never");
+    unregisterRunningTask("never");
+    assert.deepEqual(seen, ["f1", "f2", "f3"]);
+  } finally {
+    off();
+  }
 });

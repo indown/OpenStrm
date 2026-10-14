@@ -1,16 +1,21 @@
 /**
  * 快照式变更源：给没有事件流的网盘用（夸克）。
  *
- * 每轮把该账号每个同步任务的 originPath 整棵列一遍，和上一轮存在 drive_snapshots 里的对比，
+ * 每轮拿到该账号每个同步任务 originPath 的整棵树，和上一轮存在 drive_snapshots 里的对比，
  * 以网盘 id 为身份认出新增 / 删除 / 改名 / 移动。目录级的变化只报最上层那一条：新目录由处理器展开生成，
  * 移动 / 删除的目录本地整体搬 / 删，子项跟着走。事件按删除、搬动、新增的顺序交出去：同名替换（旧 id 没了、
  * 新 id 顶上）要先删旧的再建新的，目录搬进新建的目录要先搬再展开，反过来都会把刚生成的东西删掉或撞上非空目录。
  *
+ * 整棵树不是每轮都整棵列（见 fingerprint-walk.ts）：网盘能按路径批量取目录指纹的（夸克 path_list），每轮先比指纹、
+ * 只列变了的目录，没列的沿用快照；首轮、旧格式的快照、每隔 12 小时整棵列一次兜底，顺带自检增量有没有漏。
+ * 没有指纹接口的（测试里的假网盘）每轮整棵列。
+ *
  * 新快照要等这一轮的事件全部处理完才写库（PullResult.commit）：中途被中止或某条解析失败，下轮拿旧快照重新对比，
- * 重复出的事件处理器都能幂等地再来一遍。某个根列不了（目录改名 / 风控）只跳过它并记进 warnings，别的根照常。
+ * 重复出的事件处理器都能幂等地再来一遍。一个目录都没列的一轮不写。某个根列不了（目录改名 / 风控）只跳过它并记进 warnings，别的根照常。
  *
  * 安全阀：一轮里要删的超过快照的三成先不删，只告警；下一轮还是同样的结果才执行（真机上整个目录被删掉就是这样，
  * 只压不放会永远收敛不了）。列目录失败是抛错而不是回空，所以列到 0 条就是真的空了，照常对比。
+ * 快照里留着、这一轮却没看到的（压下的删除、处理失败放回去的），所在目录挂 recheck，下一轮一定重列再比。
  * 首轮：latest / last 只存快照不发事件，all 把现有文件全部当新增。
  */
 import type { LifePullMode } from "@openstrm/shared";
@@ -29,13 +34,15 @@ import {
   type ProbeResult,
   type PullOptions,
   type PullResult,
-  type SubtreeEntry,
 } from "../../drive/types.js";
+import { fullScan, hasFingerprints, incrementalWalk, markDiverged, type SnapEntry, type SnapMeta, type WalkResult } from "./fingerprint-walk.js";
 
 const log = moduleLogger("life");
 
-/** 快照里的一条：相对根的路径 + 网盘 id + 元数据 */
-export type SnapEntry = SubtreeEntry;
+export type { SnapEntry, SnapMeta } from "./fingerprint-walk.js";
+
+/** 增量之外每隔这么久整棵列一次兜底（它是安全网，不靠它发现变化） */
+const FULL_SCAN_MS = 12 * 3600_000;
 
 export interface SnapshotChange {
   kind: ChangeKind;
@@ -204,9 +211,13 @@ export function __test_resetQuarkSnapshotSource(): void {
 
 export class QuarkSnapshotSource implements ChangeSource {
   readonly label = "snapshot";
-  readonly minIntervalSeconds = 300;
 
   constructor(private readonly provider: DriveProvider) {}
+
+  /** 能比目录指纹的（夸克）没变化的一轮只有几个请求，60 秒一轮；只能整棵列的 5 分钟 */
+  get minIntervalSeconds(): number {
+    return this.provider.dirFingerprints ? 60 : 300;
+  }
 
   async prepare(signal: AbortSignal): Promise<PrepareResult> {
     try {
@@ -226,21 +237,32 @@ export class QuarkSnapshotSource implements ChangeSource {
   }
 
   async pull(cursor: ChangeCursor, opts: PullOptions): Promise<PullResult> {
-    const walk = this.provider.walkSubtree;
-    if (!walk) throw new Error("这个网盘不支持快照监控");
+    if (!this.provider.walkSubtree) throw new Error("这个网盘不支持快照监控");
     const account = this.provider.account.name;
     const scannedAt = Math.floor(Date.now() / 1000);
     const warnings: string[] = [];
-    /** 每个根这轮的结果：新快照（commit 时才写库）+ 发出去的变更，处理失败的要从新快照里剔掉 */
-    const rounds: Array<{ root: string; prev: SnapEntry[]; toStore: SnapEntry[]; emitted: Map<string, SnapshotChange> }> = [];
+    /**
+     * 每个根这轮的结果：新快照（commit 时才写库）+ 发出去的变更，处理失败的要从新快照里剔掉。
+     * observed 是这一轮实际看到的树（toStore 可能多留了压下的删除）；scanned：这一轮列过目录，没列过的快照原样不用写
+     */
+    const rounds: Array<{
+      root: string;
+      prev: SnapEntry[];
+      toStore: SnapEntry[];
+      observed: SnapEntry[];
+      meta: SnapMeta;
+      scanned: boolean;
+      emitted: Map<string, SnapshotChange>;
+    }> = [];
     const changes: ChangeEvent[] = [];
     const roots = [...new Set(opts.tasks.map((t) => normalizePath(t.originPath)))].filter((r) => r !== "/");
 
     for (const root of roots) {
       if (opts.signal.aborted) break;
-      let entries: SnapEntry[];
+      const prev = readDriveSnapshot<SnapEntry, SnapMeta>(account, root);
+      let scan: WalkResult & { full: boolean };
       try {
-        entries = await walk.call(this.provider, root, { signal: opts.signal });
+        scan = await this.scan(root, prev, opts);
       } catch (err) {
         if (opts.signal.aborted || isAbortError(err)) throw err;
         // cookie 失效 / 风控是账号的事，所有根都一样：原样抛出去让监控告警、退避
@@ -249,7 +271,8 @@ export class QuarkSnapshotSource implements ChangeSource {
         warnings.push(`${root} 列目录失败：${err instanceof Error ? err.message : String(err)}`);
         continue;
       }
-      const prev = readDriveSnapshot<SnapEntry>(account, root);
+      const entries = scan.entries;
+      const scanned = scan.full || scan.listed > 0;
       const emitted = new Map<string, SnapshotChange>();
       const emit = (list: SnapshotChange[]) => {
         for (const c of list) {
@@ -261,7 +284,7 @@ export class QuarkSnapshotSource implements ChangeSource {
       if (!prev) {
         if (cursor.id === "all") emit(diffSnapshot([], entries).changes);
         else opts.log?.("info", `${root} 首轮建立快照：${entries.length} 项记为现有`);
-        rounds.push({ root, prev: [], toStore: entries, emitted });
+        rounds.push({ root, prev: [], toStore: entries, observed: entries, meta: scan.meta, scanned: true, emitted });
         continue;
       }
       const { changes: diff, removed } = diffSnapshot(prev.entries, entries);
@@ -284,7 +307,7 @@ export class QuarkSnapshotSource implements ChangeSource {
         suppressedRoots.delete(key);
       }
       emit(list);
-      rounds.push({ root, prev: prev.entries, toStore, emitted });
+      rounds.push({ root, prev: prev.entries, toStore, observed: entries, meta: scan.meta, scanned, emitted });
     }
     return {
       changes: changes.map(resolvedChange),
@@ -299,10 +322,54 @@ export class QuarkSnapshotSource implements ChangeSource {
             // 这条没处理成：新快照里当它没发生过，下轮重新对比会再发一次
             entries = revertChange(entries, r.prev, c);
           }
-          writeDriveSnapshot(account, r.root, entries, scannedAt);
+          // 指纹全对上、一个目录都没列的一轮：快照原样，不写
+          if (!r.scanned && entries === r.observed) continue;
+          // 留在快照里、这轮却没看到的（压下的删除、放回去的失败变更）：所在目录挂 recheck，下一轮一定重列
+          const marked = markDiverged(entries, r.observed, r.meta);
+          writeDriveSnapshot(account, r.root, marked.entries, scannedAt, marked.meta);
         }
       },
     };
+  }
+
+  /**
+   * 拿一个根这一轮的整棵树：有指纹接口、上一份是带指纹的快照、离上次整棵对比不到 12 小时，就按指纹增量；
+   * 否则（首轮、旧格式、到点了、根自己按路径找不到或换了一个）整棵列。
+   */
+  private async scan(
+    root: string,
+    prev: { entries: SnapEntry[]; meta: SnapMeta | null } | null,
+    opts: PullOptions,
+  ): Promise<WalkResult & { full: boolean }> {
+    const p = this.provider;
+    const account = p.account.name;
+    if (p.dirFingerprints && prev && hasFingerprints(prev) && Date.now() - prev.meta.fullAt < FULL_SCAN_MS) {
+      const r = await incrementalWalk({ dirFingerprints: p.dirFingerprints.bind(p), listDir: p.listDir.bind(p) }, root, prev, {
+        signal: opts.signal,
+        onSkip: (dir, name) => log.warn({ account, root, dir, name }, "条目名字里带 /，按路径找不回来，跳过"),
+      });
+      if (r) {
+        if (r.listed > 0) {
+          const miss = r.missing.length > 0 ? `；按原路径没找到 ${r.missing.length} 个（${r.missing.slice(0, 3).join("、")}${r.missing.length > 3 ? " 等" : ""}）` : "";
+          opts.log?.("debug", `${root} 比了 ${r.asked} 个目录的指纹，列了 ${r.listed} 个${miss}`);
+        }
+        return { ...r, full: false };
+      }
+      opts.log?.("debug", `${root} 根目录按原路径找不到了或者换了一个，整棵重新对比`);
+    }
+    const periodic = !!prev && hasFingerprints(prev);
+    const r = await fullScan(p, root, prev, { signal: opts.signal });
+    if (p.dirFingerprints && !r.meta.rootId) opts.log?.("debug", `${root} 按路径取不到根目录的指纹（名字里有接口认不出的字符？），只能每轮整棵列`);
+    if (periodic) {
+      opts.log?.("info", `${root} 整棵对比（每 12 小时一次）：${r.listed} 个目录`);
+      if (r.misses.length > 0) {
+        const where = r.misses.slice(0, 3).map((m) => m || "根目录").join("、");
+        const msg = `${root} 整棵对比发现增量漏掉的变化：${r.misses.length} 个目录（${where}${r.misses.length > 3 ? " 等" : ""}），这一轮照常处理`;
+        opts.log?.("warn", msg);
+        log.warn({ account, root, misses: r.misses.slice(0, 20) }, msg);
+      }
+    }
+    return { ...r, full: true };
   }
 
   private toEvent(account: string, root: string, c: SnapshotChange, at: number): ChangeEvent {
@@ -323,10 +390,10 @@ export class QuarkSnapshotSource implements ChangeSource {
   async probe(_limit: number, signal?: AbortSignal): Promise<ProbeResult> {
     try {
       const entries = await this.provider.listDir(this.provider.rootId, signal);
-      return {
-        ok: true,
-        message: `cookie 有效，根目录 ${entries.length} 项；这个网盘没有事件流，监控靠定时对比任务目录（最短 ${this.minIntervalSeconds} 秒一轮）`,
-      };
+      const how = this.provider.dirFingerprints
+        ? `每轮先比任务目录里各个目录的指纹、只列变了的（最短 ${this.minIntervalSeconds} 秒一轮），每 12 小时整棵对比一次`
+        : `监控靠定时对比任务目录（最短 ${this.minIntervalSeconds} 秒一轮）`;
+      return { ok: true, message: `cookie 有效，根目录 ${entries.length} 项；这个网盘没有事件流，${how}` };
     } catch (err) {
       return { ok: false, message: err instanceof Error ? err.message : String(err) };
     }

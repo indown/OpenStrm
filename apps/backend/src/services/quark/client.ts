@@ -16,7 +16,7 @@ import axios, { type AxiosRequestConfig } from "axios";
 import { LRUCache } from "lru-cache";
 import type { AccountQuark } from "@openstrm/shared";
 import { updateAccountWith } from "../../db/repositories/accounts.js";
-import { scheduleForAccount } from "../throttle.js";
+import { scheduleForAccount, type ThrottleChannel } from "../throttle.js";
 import { PermanentError, isAbortError } from "../../lib/errors.js";
 import { DEFAULT_TIMEOUT_MS } from "../../lib/http.js";
 import { moduleLogger } from "../../lib/logger.js";
@@ -57,8 +57,10 @@ export interface QuarkEntry {
   size: number;
   /** 夸克的分类：1 = 视频 */
   category: number;
-  /** 毫秒 */
+  /** 毫秒。目录的这个时间在直接子项新增 / 移入 / 改名时刷新（删除、移出不刷新，孙辈不冒泡） */
   modifiedAt: number;
+  /** 目录的直接子项数（include_items，空目录不带这个字段就是 0）；文件是 0 */
+  items: number;
 }
 
 /** 下载直链和取它时必须带的头 */
@@ -162,6 +164,8 @@ interface RequestOptions {
   params?: Record<string, string | number>;
   data?: unknown;
   signal?: AbortSignal;
+  /** 限流通道，默认 normal；网盘监控的后台轮询走 life */
+  channel?: ThrottleChannel;
 }
 
 /**
@@ -172,11 +176,11 @@ export async function quarkRequest<T>(
   account: AccountQuark,
   method: "GET" | "POST",
   path: string,
-  { params, data, signal }: RequestOptions = {},
+  { params, data, signal, channel = "normal" }: RequestOptions = {},
 ): Promise<Envelope<T>> {
   return scheduleForAccount(
     account.name,
-    "normal",
+    channel,
     async () => {
       // 记住发这个请求时的 cookie：响应里轮换出来的 __puus 只属于它，中途换了 cookie 的话这份轮换作废
       const sent = account.cookie;
@@ -221,6 +225,7 @@ interface RawFile {
   size?: number;
   category?: number;
   updated_at?: number;
+  include_items?: number;
 }
 
 function toEntry(f: RawFile): QuarkEntry {
@@ -231,11 +236,17 @@ function toEntry(f: RawFile): QuarkEntry {
     size: Number(f.size ?? 0),
     category: Number(f.category ?? 0),
     modifiedAt: Number(f.updated_at ?? 0),
+    items: Number(f.include_items ?? 0),
   };
 }
 
 /** 列一个目录的全部内容，按 100 条翻页；显式排序，翻页期间目录变化才不至于漏掉或重复条目 */
-export async function quarkListDir(account: AccountQuark, fid: string, signal?: AbortSignal): Promise<QuarkEntry[]> {
+export async function quarkListDir(
+  account: AccountQuark,
+  fid: string,
+  signal?: AbortSignal,
+  opts: { channel?: ThrottleChannel } = {},
+): Promise<QuarkEntry[]> {
   const entries: QuarkEntry[] = [];
   for (let page = 1; ; page++) {
     const body = await quarkRequest<{ list?: RawFile[] }>(account, "GET", "/file/sort", {
@@ -249,6 +260,7 @@ export async function quarkListDir(account: AccountQuark, fid: string, signal?: 
         _sort: "file_type:asc,file_name:asc",
       },
       signal,
+      channel: opts.channel,
     });
     const list = body.data?.list ?? [];
     for (const f of list) {
@@ -266,19 +278,29 @@ export async function quarkListDir(account: AccountQuark, fid: string, signal?: 
   return entries;
 }
 
+/** path_list 一次最多带这么多路径：真机上 51 个就报 Bad Parameter: [fids size limit] */
+export const PATH_LIST_MAX = 50;
+
 /**
  * POST file/info/path_list {file_path:[...], namespace:"0"}：按绝对路径批量取条目，不存在的路径直接不回。
  * 真机验证过：只认目录，大小写和空格都要精确；文件路径拿不到（文件还是得列父目录）。
+ * 回的是完整条目（updated_at、include_items 和列目录看到的一致）；超过 50 个路径这里分批发。
  */
-export async function quarkPathList(account: AccountQuark, paths: string[], signal?: AbortSignal): Promise<Map<string, QuarkEntry>> {
+export async function quarkPathList(
+  account: AccountQuark,
+  paths: string[],
+  opts: { signal?: AbortSignal; channel?: ThrottleChannel } = {},
+): Promise<Map<string, QuarkEntry>> {
   const out = new Map<string, QuarkEntry>();
-  if (paths.length === 0) return out;
-  const body = await quarkRequest<Array<RawFile & { file_path?: string }>>(account, "POST", "/file/info/path_list", {
-    data: { file_path: paths, namespace: "0" },
-    signal,
-  });
-  for (const f of body.data ?? []) {
-    if (f.fid && f.file_path) out.set(f.file_path, toEntry(f));
+  for (let i = 0; i < paths.length; i += PATH_LIST_MAX) {
+    const body = await quarkRequest<Array<RawFile & { file_path?: string }>>(account, "POST", "/file/info/path_list", {
+      data: { file_path: paths.slice(i, i + PATH_LIST_MAX), namespace: "0" },
+      signal: opts.signal,
+      channel: opts.channel,
+    });
+    for (const f of body.data ?? []) {
+      if (f.fid && f.file_path) out.set(f.file_path, toEntry(f));
+    }
   }
   return out;
 }
@@ -332,7 +354,7 @@ export async function quarkResolvePath(
     const parent = `/${segments.slice(0, -1).join("/")}`;
     let hits: Map<string, QuarkEntry>;
     try {
-      hits = await quarkPathList(account, [full, parent], signal);
+      hits = await quarkPathList(account, [full, parent], { signal });
     } catch (err) {
       // path_list 只是省请求的捷径：它打不通就退回逐段列目录，真有登录态问题那边照样会报
       if (isAbortError(err)) throw err;

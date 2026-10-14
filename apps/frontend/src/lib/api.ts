@@ -234,18 +234,30 @@ export type HdhiveSearchResult = {
 };
 
 export type LifeEventMode = "create" | "move" | "rename" | "remove";
-export type LifeMonitorStats = { rounds: number; events: number; handled: number; skipped: number; failed: number };
+export type LifeMonitorStats = {
+  rounds: number;
+  events: number;
+  handled: number;
+  skipped: number;
+  failed: number;
+  /** 同步任务在跑、先记下等它跑完再补的（补上之后再算进 handled / skipped / failed） */
+  deferred: number;
+};
 /** 一个被监控账号的运行态；起不来的账号 running=false，原因在 lastError */
 export type LifeAccountStatus = {
   name: string;
   running: boolean;
   cursor: { time: number; id: string };
-  /** 变更来源：115 是 proapi / webapi（生活事件流），夸克是 snapshot（定时对比目录） */
+  /** 变更来源：115 是 proapi / webapi（生活事件流），夸克是 snapshot（按目录指纹对比） */
   source: string;
   startedAt: number | null;
   lastPollAt: number | null;
   lastError: string | null;
   stats: LifeMonitorStats;
+  /** 现在记下、还没补上的事件条数 */
+  backlog: number;
+  /** 这个账号里正在同步的任务目录：落在里面的变化先记下，跑完再补 */
+  syncing: string[];
 };
 export type LifeMonitorStatus = {
   /** 至少一个账号在跑 */

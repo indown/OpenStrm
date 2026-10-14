@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/table";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/page-header";
-import { StatusBadge } from "@/components/status-badge";
+import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { FormSkeleton } from "@/components/loading";
 import type { LifeMonitorSettings } from "@openstrm/shared";
 import { api, type LifeEventMode as EventMode, type LifeEventRow, type LifeMonitorStatus as Status } from "@/lib/api";
@@ -482,7 +482,8 @@ export default function LifeMonitorPage() {
                 一个都不勾时监控全部 115 / 夸克账号
                 <FieldHint label="账号是怎么监控的">
                   勾选的账号各跑一条轮询，互不影响。事件路径按该账号同步任务的原始路径前缀匹配。
-                  夸克没有事件流，靠每轮列一遍任务目录和上一轮对比，最短 5 分钟一轮。
+                  夸克没有事件流，靠每轮比对任务目录里各个目录的指纹、只列变了的目录，最短 1 分钟一轮，每 12 小时再整棵对比一次。
+                  同步任务在跑的目录，监控先把变化记下来，等它跑完再按先后补上，免得两边把对方刚改好的又改回去。
                 </FieldHint>
               </p>
             </div>
@@ -525,7 +526,7 @@ export default function LifeMonitorPage() {
                       <FormControl>
                         <Input inputMode="numeric" {...field} />
                       </FormControl>
-                      <FormDescription className="text-xs">默认 15 秒，太短容易触发 115 风控；夸克账号最短 5 分钟；每个账号各算各的</FormDescription>
+                      <FormDescription className="text-xs">默认 15 秒，太短容易触发 115 风控；夸克账号最短 1 分钟；每个账号各算各的</FormDescription>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -690,13 +691,34 @@ function accountNotice(
   monitorRunning: boolean,
 ): { tone: "danger" | "muted"; text: string } | null {
   if (a.lastError) return { tone: "danger", text: `最近错误：${a.lastError}` };
+  if (a.backlog > 0) {
+    // 监控停着就没人补；在跑的话要么等同步结束，要么下一轮接着补（上次补失败了）
+    const text = !a.running
+      ? `还有 ${a.backlog} 条同步期间记下的变化没补上，监控启动后补上`
+      : a.syncing.length > 0
+        ? `同步任务在跑（${a.syncing.join("、")}）：这里面的 ${a.backlog} 条变化先记下了，跑完自动补上`
+        : `还有 ${a.backlog} 条同步期间记下的变化没补上，下一轮接着补`;
+    return { tone: "muted", text };
+  }
   if (monitorRunning && !a.running) return { tone: "muted", text: "启动后才加进配置，重启监控后生效" };
   return null;
 }
 
+/** 事件处理结果：deferred 是同步任务在跑、先记下等它跑完再补的 */
+const EVENT_STATUS: Record<string, { label: string; tone: StatusTone }> = {
+  done: { label: "已处理", tone: "success" },
+  skipped: { label: "跳过", tone: "neutral" },
+  failed: { label: "失败", tone: "danger" },
+  deferred: { label: "等同步", tone: "info" },
+  pending: { label: "处理中", tone: "neutral" },
+};
+
 function EventBadge({ status }: { status: string }) {
+  const s = EVENT_STATUS[status] ?? { label: status, tone: "neutral" as const };
   return (
-    <StatusBadge tone={status === "done" ? "success" : status === "failed" ? "danger" : "neutral"}>{status}</StatusBadge>
+    <StatusBadge tone={s.tone} title={status}>
+      {s.label}
+    </StatusBadge>
   );
 }
 

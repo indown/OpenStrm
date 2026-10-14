@@ -1,10 +1,13 @@
 /**
  * 网盘变更监控：每个被监控的账号各跑一条循环（AccountMonitor）。
  *
- *   门禁（source.prepare）→ 循环 { source.pull 一批 → 落库 → 逐条交给 handlers → 存游标 → 等一轮 }
+ *   门禁（source.prepare）→ 循环 { 先补同步期间记下的 → source.pull 一批 → 落库 → 逐条交给 handlers → 存游标 → 等一轮 }
  *
  * 变更来源按网盘类型来（DriveProvider.changes）：115 是生活事件流（sources/cloud115.ts），
- * 夸克是定时快照对比（sources/quark.ts）。这里不认任何一家的接口，只认 ChangeSource 和 ChangeEvent。
+ * 夸克是按目录指纹的快照对比（sources/quark.ts）。这里不认任何一家的接口，只认 ChangeSource 和 ChangeEvent。
+ *
+ * 全量同步在跑的任务目录，监控不动本地：事件照常落库但先记下（deferred），同步一结束（task.finished 插一轮加急）
+ * 按原来的先后补上——同步拿着的远端清单可能比监控旧，两边同时改会把对方刚改好的改回去。判断在 deferral.ts。
  *
  * 启停是整体的：startLifeMonitor 把配置里的账号一起拉起来，stopLifeMonitor 全部停掉。
  * 一次启动共用一个 AbortController（generation）：stop 一掐，正在过门禁的请求被中止、睡着的醒来、
@@ -12,7 +15,7 @@
  * 某个账号起不来（cookie 失效）不影响其它账号，它会以 running=false + lastError 出现在状态里。
  * 游标按账号各存一份（KEY.lifeCursor(name)）；事件表和 Emby 刷新防抖全局共用。
  */
-import type { AccountInfo, LifeEventMode, LifeMonitorSettings, LifePullMode } from "@openstrm/shared";
+import type { AccountInfo, LifeEventMode, LifeMonitorSettings, LifePullMode, TaskDefinition } from "@openstrm/shared";
 import { KEY } from "../../db/keys.js";
 import { isAbortError } from "../../lib/errors.js";
 import { moduleLogger } from "../../lib/logger.js";
@@ -20,24 +23,30 @@ import { createPollingLoop, type PollingLoop } from "../../lib/polling.js";
 import { issueFromDrive, notify } from "../notify.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { getAccount, listAccounts } from "../../db/repositories/accounts.js";
-import { listTasks } from "../../db/repositories/tasks.js";
+import { getTask, listTasks } from "../../db/repositories/tasks.js";
 import {
+  countDeferredLifeEvents,
   countDriveSnapshots,
   countLifeEvents,
   countPathCache,
   isLifeEventHandled,
+  LIFE_EVENT_DEFERRED,
+  listDeferredLifeEvents,
   markLifeEvent,
   readKv,
   upsertLifeEvents,
   writeKv,
 } from "../../db/repositories/life.js";
+import type { LifeEventRow } from "../../db/schema.js";
 import { bumpOwnHit, findOwnOperation, getRun as getOrganizeRun } from "../../db/repositories/organize.js";
 import { enqueueCopy } from "../copy/service.js";
 import { copyOptionsFor } from "../copy/paths.js";
 import { events } from "../events.js";
 import { effectiveAutoMode } from "../organize/auto.js";
 import { providerFor } from "../drive/registry.js";
-import type { AccountIssue, ChangeCursor, ChangeEvent, ChangeKind, ChangeLog, ChangeSource, DriveProvider, ProbeResult } from "../drive/types.js";
+import { normalizePath, type AccountIssue, type ChangeCursor, type ChangeEvent, type ChangeKind, type ChangeLog, type ChangeSource, type DriveProvider, type ProbeResult } from "../drive/types.js";
+import { isTaskRunning } from "../task/registry.js";
+import { DeferralGate } from "./deferral.js";
 import { flushEmbyRefresh, getEmbyRefreshState, scheduleEmbyRefresh } from "../media-server.js";
 import {
   handleCreate,
@@ -56,6 +65,10 @@ const ALL_EVENT_MODES: LifeEventMode[] = ["create", "move", "rename", "remove"];
 const LOG_LIMIT = 500;
 const ZERO_CURSOR: ChangeCursor = { time: 0, id: "0" };
 const CANCELLED = "启动已取消";
+/** 同步期间记下的事件补处理连着失败这么多次就记失败，不再挡着后面同一处的事件 */
+const MAX_REPLAY_ATTEMPTS = 3;
+/** 同步任务结束后过这么久插一轮加急，把它跑的时候记下的变化补上 */
+const REPLAY_NUDGE_MS = 500;
 
 /** 事件表里 type 列的通用编码：故意用负数，避开 115 的 behavior type（115 的事件保留它自己的） */
 export const KIND_CODE: Record<ChangeKind, number> = { create: -1, move: -2, rename: -3, remove: -4, folder: -5 };
@@ -67,8 +80,10 @@ export interface MonitorStats {
   handled: number;
   skipped: number;
   failed: number;
+  /** 同步任务在跑、先记下等它跑完再补的（补上之后再算进 handled / skipped / failed） */
+  deferred: number;
 }
-const zeroStats = (): MonitorStats => ({ rounds: 0, events: 0, handled: 0, skipped: 0, failed: 0 });
+const zeroStats = (): MonitorStats => ({ rounds: 0, events: 0, handled: 0, skipped: 0, failed: 0, deferred: 0 });
 
 export interface AccountMonitorStatus {
   name: string;
@@ -80,6 +95,10 @@ export interface AccountMonitorStatus {
   lastPollAt: number | null;
   lastError: string | null;
   stats: MonitorStats;
+  /** 现在记下、还没补上的事件条数 */
+  backlog: number;
+  /** 这个账号里正在同步的任务目录（网盘绝对路径）：落在这里面的变化先记下，跑完再补 */
+  syncing: string[];
 }
 
 export interface MonitorStatus {
@@ -206,6 +225,28 @@ function toRow(accountName: string, ev: ChangeEvent) {
   };
 }
 
+/** 这批任务里正在同步（含启动阶段——拉远端目录树）的任务目录，网盘绝对路径 */
+function syncingScopes(tasks: TaskDefinition[]): string[] {
+  return [...new Set(tasks.filter((t) => isTaskRunning(t.id)).map((t) => normalizePath(t.originPath)))];
+}
+
+/** 事件表的一行还原成处理器要的事件：toRow 反过来，补同步期间记下的事件时用 */
+function eventFromRow(row: LifeEventRow): ChangeEvent {
+  return {
+    id: row.id,
+    kind: row.kind as ChangeKind,
+    path: row.path,
+    oldPath: row.oldPath || null,
+    isDir: row.fileCategory === 0,
+    nodeId: row.fileId,
+    ...(row.fileSize ? { size: row.fileSize } : {}),
+    ...(row.sha1 ? { hash: row.sha1 } : {}),
+    ...(row.pickCode ? { token: row.pickCode } : {}),
+    at: row.updateTime,
+    rawType: row.type,
+  };
+}
+
 class AccountMonitor {
   running = false;
   cursor: ChangeCursor;
@@ -221,6 +262,10 @@ class AccountMonitor {
   private retired = false;
   private readonly log: ChangeLog;
   private source: ChangeSource | null = null;
+  /** 补同步期间记下的事件失败了几次（按事件 id）：只在内存里，重启从头数，最多多试三次 */
+  private readonly replayAttempts = new Map<string, number>();
+  /** 注销「同步任务结束了」的监听 */
+  private offTaskFinished: (() => void) | null = null;
 
   constructor(
     readonly name: string,
@@ -242,6 +287,8 @@ class AccountMonitor {
       lastPollAt: this.lastPollAt,
       lastError: this.lastError,
       stats: { ...this.stats },
+      backlog: countDeferredLifeEvents(this.name),
+      syncing: syncingScopes(listTasks().filter((t) => t.account === this.name)),
     };
   }
 
@@ -302,6 +349,11 @@ class AccountMonitor {
       shouldContinue: () => !this.retired && !this.signal.aborted,
       onExit: () => this.exited(),
     });
+    // 这个账号的同步任务一结束，它跑的时候记下的变化马上补，不用等到下一轮
+    this.offTaskFinished = events.on("task.finished", ({ taskId }) => {
+      if (getTask(taskId)?.account !== this.name || countDeferredLifeEvents(this.name) === 0) return;
+      this.loop?.nudge(REPLAY_NUDGE_MS);
+    });
     this.loop.start();
     return { ok: true, message: "已启动" };
   }
@@ -339,6 +391,8 @@ class AccountMonitor {
 
   /** 循环退出（自己退的、被 stop 的都走这里，只走一次）：游标落库，最后一条退出时把攒着的 Emby 刷新发掉 */
   private exited(): void {
+    this.offTaskFinished?.();
+    this.offTaskFinished = null;
     writeKv(KEY.lifeCursor(this.name), this.cursor);
     this.running = false;
     // 文件已经落盘了，攒着的 Emby 刷新不能丢；但别的账号还在跑就留给它们继续攒，最后一条退出时才发
@@ -348,11 +402,30 @@ class AccountMonitor {
     this.resolveDone = null;
   }
 
+  /** 这一轮的处理上下文：每轮现读设置（事件模式、白名单在设置页改了下一轮就生效） */
+  private context(provider: DriveProvider, tasks: TaskDefinition[], signal: AbortSignal): LifeContext {
+    const settings = readAppSettings();
+    return {
+      provider,
+      tasks,
+      settings,
+      eventModes: new Set<LifeEventMode>(settings.lifeMonitor?.eventModes ?? ALL_EVENT_MODES),
+      log: this.log,
+      signal,
+    };
+  }
+
   /** 返回这轮的告警文案（部分根没拉到）；全好返回 null */
   private async runOnce(provider: DriveProvider, signal: AbortSignal): Promise<string | null> {
     const source = provider.changes!;
     this.source = source;
     const tasks = listTasks().filter((t) => t.account === this.name);
+    // 一轮一个闸：正在同步的任务目录每次现查。先补同步期间记下的，补不成的挡住后面同一处的新事件，先后不乱
+    const gate = new DeferralGate(() => syncingScopes(tasks));
+    let ctx: LifeContext | null = null;
+    const context = (): LifeContext => (ctx ??= this.context(provider, tasks, signal));
+    if (countDeferredLifeEvents(this.name) > 0 && !(await this.replayDeferred(context(), gate))) return null;
+
     const pulled = await source.pull(this.cursor, { tasks, signal, log: this.log });
     this.lastPollAt = Date.now();
     this.stats.rounds++;
@@ -369,17 +442,8 @@ class AccountMonitor {
     this.stats.events += changes.length;
     this.log("info", `拉到 ${changes.length} 条新事件`);
 
-    const settings = readAppSettings();
-    const ctx: LifeContext = {
-      provider,
-      tasks,
-      settings,
-      eventModes: new Set<LifeEventMode>(settings.lifeMonitor?.eventModes ?? ALL_EVENT_MODES),
-      log: this.log,
-      signal,
-    };
-
     const failedIds: string[] = [];
+    let deferred = 0;
     for (const item of changes) {
       // 被中止就不 commit：快照式来源下轮拿旧快照重新对比，事件流来源从游标接着拉
       if (signal.aborted) return warning;
@@ -390,57 +454,19 @@ class AccountMonitor {
       upsertLifeEvents([toRow(this.name, ev)]);
 
       const name = KIND_NAME[ev.kind];
+      const wait = ev.problem ? null : gate.check(ev);
       if (ev.problem) {
         markLifeEvent(id, "skipped", ev.problem);
         this.stats.skipped++;
         this.log("debug", `${name} 跳过：${ev.problem}`);
+      } else if (wait) {
+        // 同步任务正在跑这个目录：先记下不动本地，它跑完再按先后补（事件已经落库，游标、快照照常往前走）
+        markLifeEvent(id, LIFE_EVENT_DEFERRED, wait);
+        this.stats.deferred++;
+        deferred++;
       } else {
         try {
-          // 整理自己做的改名 / 移动 / 建目录 / 删空目录会以事件的形式再回来一遍：本地已经镜像过了，跳过。
-          // 两种本地没跟上的不跳，让事件照常处理把本地补回来：本地镜像失败的（errorKind = mirror，放弃了也算）、
-          // 撤销时挪回来了但改回原名那步失败的（done 带 curPath：镜像要等改完名才做）。
-          // 撤销在网盘那步失败、文件没动过的项（done 带别的类别、没有 curPath）本地和网盘仍一致，照常跳过
-          const own = findOwnOperation(ev.nodeId, ev.path, ev.at, ev.kind === "remove" ? "remove" : "other");
-          // 挪回来了、还没改回原名（done 带 cur_path）：撤销还在跑就是正常的中间状态（改完名撤销自己镜像本地），跳过；
-          // 撤销已经结束还是这样，才是改名那步失败了、本地没跟上，照常处理
-          const halfBack = own !== null && own.status === "done" && own.curPath !== "" && getOrganizeRun(own.runId)?.status !== "reverting";
-          const ownOk = own !== null && own.errorKind !== "mirror" && !halfBack;
-          if (ownOk) bumpOwnHit(own.id);
-          const res: HandleResult = ownOk ? { status: "skipped", detail: "整理已处理，本地已镜像", changed: false } : await dispatch(ctx, ev);
-          markLifeEvent(id, res.status, res.detail);
-          if (res.status === "done") {
-            this.stats.handled++;
-            // 防抖攒着：事件一条一条来，逐条触发全库扫描会把 Emby 打瘫
-            if (res.changed) scheduleEmbyRefresh();
-            this.log("info", `${name} ${res.detail}`);
-            // 新落进任务的才交给自动整理：新增，或者从任务外挪进来（从云下载、最近接收挪进剧集目录是常见的来路）；任务里挪来挪去的不算
-            if (res.arrived && res.changed) {
-              const m = matchTask(ctx, ev.path);
-              if (m?.relPath) {
-                events.emit("files.landed", { task: m.task, paths: [m.relPath], trigger: "monitor", debounce: true });
-                // 整理自己造成的事件走的是上面的 ownOk 分支，进不到这里，所以不会把整理搬过的文件再复制一遍
-                const copyOpts = copyOptionsFor(m.task, undefined);
-                if (copyOpts.blocked) this.log("info", `${name} 没复制到 OpenList：${copyOpts.blocked}`);
-                if (copyOpts.enabled) {
-                  enqueueCopy({
-                    account: this.name,
-                    sources: [{ path: ev.path, isDir: ev.isDir, nodeId: ev.nodeId }],
-                    rootPath: m.task.originPath,
-                    taskId: m.task.id,
-                    dstDir: copyOpts.dstDir,
-                    trigger: "monitor",
-                    // 监控是一个文件一条事件：删源 / 归档只对「整条目复制」开（转存 / 追更 / 云下载），
-                    // 不然自动整理还没来得及动那个文件，它就已经被删掉或挪走了
-                    afterCopy: "keep",
-                    holdForOrganize: effectiveAutoMode(m.task) === "auto",
-                  });
-                }
-              }
-            }
-          } else {
-            this.stats.skipped++;
-            this.log("debug", `${name} 跳过：${res.detail}`);
-          }
+          await this.apply(context(), id, ev);
         } catch (err) {
           // 处理到一半被中止：这条不算处理过，游标不动、不 commit，下次启动重来
           if (signal.aborted || isAbortError(err)) return warning;
@@ -459,12 +485,104 @@ class AccountMonitor {
         writeKv(KEY.lifeCursor(this.name), this.cursor);
       }
     }
+    if (deferred > 0) this.log("info", `同步任务在跑：先记下 ${deferred} 条变化，等它跑完再补上`);
     this.cursor = pulled.cursor;
     writeKv(KEY.lifeCursor(this.name), this.cursor);
     pulled.commit?.(failedIds);
     return warning;
   }
 
+  /**
+   * 处理一条事件并记下结果。实时的和同步结束后补的都走这里：整理自己做的跳过、分派给处理器、攒 Emby 刷新、交给自动整理和复制。
+   * 出错原样抛出：实时的记失败，补的下一轮再试
+   */
+  private async apply(ctx: LifeContext, id: string, ev: ChangeEvent): Promise<void> {
+    const name = KIND_NAME[ev.kind];
+    // 整理自己做的改名 / 移动 / 建目录 / 删空目录会以事件的形式再回来一遍：本地已经镜像过了，跳过。
+    // 两种本地没跟上的不跳，让事件照常处理把本地补回来：本地镜像失败的（errorKind = mirror，放弃了也算）、
+    // 撤销时挪回来了但改回原名那步失败的（done 带 curPath：镜像要等改完名才做）。
+    // 撤销在网盘那步失败、文件没动过的项（done 带别的类别、没有 curPath）本地和网盘仍一致，照常跳过
+    const own = findOwnOperation(ev.nodeId, ev.path, ev.at, ev.kind === "remove" ? "remove" : "other");
+    // 挪回来了、还没改回原名（done 带 cur_path）：撤销还在跑就是正常的中间状态（改完名撤销自己镜像本地），跳过；
+    // 撤销已经结束还是这样，才是改名那步失败了、本地没跟上，照常处理
+    const halfBack = own !== null && own.status === "done" && own.curPath !== "" && getOrganizeRun(own.runId)?.status !== "reverting";
+    const ownOk = own !== null && own.errorKind !== "mirror" && !halfBack;
+    if (ownOk) bumpOwnHit(own.id);
+    const res: HandleResult = ownOk ? { status: "skipped", detail: "整理已处理，本地已镜像", changed: false } : await dispatch(ctx, ev);
+    markLifeEvent(id, res.status, res.detail);
+    if (res.status !== "done") {
+      this.stats.skipped++;
+      this.log("debug", `${name} 跳过：${res.detail}`);
+      return;
+    }
+    this.stats.handled++;
+    // 防抖攒着：事件一条一条来，逐条触发全库扫描会把 Emby 打瘫
+    if (res.changed) scheduleEmbyRefresh();
+    this.log("info", `${name} ${res.detail}`);
+    // 新落进任务的才交给自动整理：新增，或者从任务外挪进来（从云下载、最近接收挪进剧集目录是常见的来路）；任务里挪来挪去的不算
+    if (!res.arrived || !res.changed) return;
+    const m = matchTask(ctx, ev.path);
+    if (!m?.relPath) return;
+    events.emit("files.landed", { task: m.task, paths: [m.relPath], trigger: "monitor", debounce: true });
+    // 整理自己造成的事件走的是上面的 ownOk 分支，进不到这里，所以不会把整理搬过的文件再复制一遍
+    const copyOpts = copyOptionsFor(m.task, undefined);
+    if (copyOpts.blocked) this.log("info", `${name} 没复制到 OpenList：${copyOpts.blocked}`);
+    if (copyOpts.enabled) {
+      enqueueCopy({
+        account: this.name,
+        sources: [{ path: ev.path, isDir: ev.isDir, nodeId: ev.nodeId }],
+        rootPath: m.task.originPath,
+        taskId: m.task.id,
+        dstDir: copyOpts.dstDir,
+        trigger: "monitor",
+        // 监控是一个文件一条事件：删源 / 归档只对「整条目复制」开（转存 / 追更 / 云下载），
+        // 不然自动整理还没来得及动那个文件，它就已经被删掉或挪走了
+        afterCopy: "keep",
+        holdForOrganize: effectiveAutoMode(m.task) === "auto",
+      });
+    }
+  }
+
+  /**
+   * 补同步期间记下的事件：按记下的先后，还在忙的范围里（或者和前面没补成的交叠）的接着等，其余和实时事件走同一条处理。
+   * 补失败的这一处这一轮先停、下一轮再试，连着三次还失败就记失败（和实时处理失败一样）。被中止返回 false
+   */
+  private async replayDeferred(ctx: LifeContext, gate: DeferralGate): Promise<boolean> {
+    let replayed = 0;
+    for (const row of listDeferredLifeEvents(this.name)) {
+      if (ctx.signal?.aborted) return false;
+      const ev = eventFromRow(row);
+      const wait = gate.check(ev);
+      if (wait) {
+        // 原因变了（换了一个同步、或者被前面补失败的挡住）就更新说明，界面上看到的是现在为什么还在等
+        if (wait !== row.detail) markLifeEvent(row.id, LIFE_EVENT_DEFERRED, wait);
+        continue;
+      }
+      try {
+        await this.apply(ctx, row.id, ev);
+        this.replayAttempts.delete(row.id);
+        replayed++;
+      } catch (err) {
+        if (ctx.signal?.aborted || isAbortError(err)) return false;
+        const name = KIND_NAME[ev.kind];
+        const msg = describeFileFailure(err, { relPath: ev.path, kind: "strm", provider: ctx.provider });
+        const attempts = (this.replayAttempts.get(row.id) ?? 0) + 1;
+        if (attempts >= MAX_REPLAY_ATTEMPTS) {
+          this.replayAttempts.delete(row.id);
+          this.stats.failed++;
+          markLifeEvent(row.id, "failed", `同步期间记下的变化补了 ${attempts} 次都没成：${msg}`);
+          this.log("error", `${name} ${ev.path} 补处理失败：${msg}`);
+        } else {
+          this.replayAttempts.set(row.id, attempts);
+          gate.hold(ev);
+          markLifeEvent(row.id, LIFE_EVENT_DEFERRED, `补处理失败（第 ${attempts} 次），下一轮再试：${msg}`);
+          this.log("warn", `${name} ${ev.path} 补处理失败（第 ${attempts} 次），下一轮再试：${msg}`);
+        }
+      }
+    }
+    if (replayed > 0) this.log("info", `同步结束了：补上了同步期间记下的 ${replayed} 条变化`);
+    return true;
+  }
 }
 
 /* --------------------------------- 生命周期 --------------------------------- */
@@ -590,6 +708,8 @@ function idleStatus(name: string): AccountMonitorStatus {
     lastPollAt: null,
     lastError: null,
     stats: zeroStats(),
+    backlog: countDeferredLifeEvents(name),
+    syncing: syncingScopes(listTasks().filter((t) => t.account === name)),
   };
 }
 

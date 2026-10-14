@@ -13,7 +13,7 @@ import { after, before, beforeEach, test } from "node:test";
 import type { AccountInfo, TaskDefinition } from "@openstrm/shared";
 import { KEY } from "../../db/keys.js";
 import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
-import { deleteDriveSnapshots, deleteKv, deleteLifeEventsBefore, listRecentLifeEvents, readKv } from "../../db/repositories/life.js";
+import { deleteDriveSnapshots, deleteKv, deleteLifeEventsBefore, listRecentLifeEvents, readDriveSnapshot, readKv } from "../../db/repositories/life.js";
 import {
   __test_resetOrganize,
   insertRun as insertOrganizeRun,
@@ -23,12 +23,17 @@ import {
 } from "../../db/repositories/organize.js";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
 import { listTasks, replaceTasks } from "../../db/repositories/tasks.js";
+import { eq } from "drizzle-orm";
+import { db } from "../../db/client.js";
+import { lifeEvents } from "../../db/schema.js";
 import { DATA_DIR } from "../../paths.js";
 import { setDriveProviderFactory } from "../drive/registry.js";
 import type { ChangeEvent } from "../drive/types.js";
 import { FakeDrive } from "../../test/fake-drive.js";
 import { __test_flushAutoOrganize, __test_resetAutoOrganize, setAutoOrganizeDeps, startAutoOrganize } from "../organize/auto.js";
 import { __test_resetCopy, listCopies } from "../copy/service.js";
+import { events } from "../events.js";
+import { releaseTaskStart, reserveTaskStart } from "../task/registry.js";
 import { QuarkSnapshotSource } from "./sources/quark.js";
 import { getLifeMonitorStatus, probeLifeEvents, startLifeMonitor, stopLifeMonitor } from "./monitor.js";
 
@@ -37,6 +42,8 @@ const acctA: AccountInfo = { accountType: "115", name: "A", cookie: "cookie-A" }
 const acctQ: AccountInfo = { accountType: "quark", name: "Q", cookie: "cookie-Q" };
 const taskA: TaskDefinition = { id: "m-a", account: "A", accountType: "115", originPath: "tv", targetPath: "monitor-itest/tv", strmPrefix: "/mnt/pan" };
 const taskQ: TaskDefinition = { id: "m-q", account: "Q", accountType: "quark", originPath: "kk", targetPath: "monitor-itest/kk", strmPrefix: "/mnt/kk" };
+/** A 账号的第二个任务：同步只占 tv 时，movie 里的变化照常处理 */
+const taskA2: TaskDefinition = { id: "m-a2", account: "A", accountType: "115", originPath: "movie", targetPath: "monitor-itest/movie", strmPrefix: "/mnt/pan" };
 const localRoot = path.join(DATA_DIR, "monitor-itest");
 
 let dA: FakeDrive;
@@ -458,3 +465,152 @@ test("来源报 warnings（某个根列不了）：记进 lastError 让人看见
   }
 });
 
+/* ------------------------- 全量同步在跑时：先记下，跑完再补 ------------------------- */
+
+const rowOf = (id: string) => listRecentLifeEvents(500).find((r) => r.id === id);
+/** 前一条用例中途失败会留下待补的事件，串进后面的用例：每条开头清掉 */
+const clearBacklog = () => db.update(lifeEvents).set({ status: "skipped" }).where(eq(lifeEvents.status, "deferred")).run();
+
+test("同步任务在跑：它目录里的变化先记下、不动本地，别的任务目录照常；同步一结束不等下一轮就补上，先后不乱", async () => {
+  clearBacklog();
+  configure({ accounts: ["A"], pullMode: "latest", intervalSeconds: 5 });
+  replaceTasks([taskA, taskA2, taskQ]);
+  reserveTaskStart("m-a");
+  dA.changes!.queue.push(
+    ev({ id: "sync-d1", kind: "create", path: "/tv/Show/ep1.mkv" }),
+    ev({ id: "sync-d2", kind: "rename", path: "/tv/Show/ep1 v2.mkv", oldPath: "/tv/Show/ep1.mkv" }),
+    ev({ id: "sync-d3", kind: "create", path: "/movie/m.mkv" }),
+  );
+  const r = await startLifeMonitor();
+  try {
+    assert.equal(r.ok, true, r.message);
+    await waitFor(() => statusOf("A")?.stats.handled === 1 && statusOf("A")?.stats.deferred === 2, "第一轮：movie 处理了，tv 两条记下");
+    assert.ok(fs.existsSync(path.join(localRoot, "movie", "m.strm")), "别的任务目录照常");
+    assert.ok(!fs.existsSync(path.join(localRoot, "tv")), "同步在跑的目录不动本地");
+    const st = statusOf("A")!;
+    assert.equal(st.backlog, 2);
+    assert.deepEqual(st.syncing, ["/tv"]);
+    assert.equal(rowOf("sync-d1")?.status, "deferred");
+    assert.match(rowOf("sync-d1")?.detail ?? "", /同步任务在跑（\/tv）/);
+    assert.ok(getLifeMonitorStatus().logs.some((l) => l.includes("先记下 2 条变化")));
+
+    // 5 秒一轮：3 秒内补上，说明是同步结束的事件插的加急，不是等到了下一轮
+    releaseTaskStart("m-a", { status: 200, message: "no files to download", idle: true });
+    await waitFor(() => statusOf("A")?.backlog === 0, "同步一结束就补", 3000);
+    assert.ok(fs.existsSync(path.join(localRoot, "tv", "Show", "ep1 v2.strm")), "先建后改名，本地是改名后的");
+    assert.ok(!fs.existsSync(path.join(localRoot, "tv", "Show", "ep1.strm")));
+    assert.equal(rowOf("sync-d1")?.status, "done");
+    assert.equal(rowOf("sync-d2")?.status, "done");
+    assert.deepEqual(statusOf("A")?.syncing, []);
+    assert.ok(getLifeMonitorStatus().logs.some((l) => l.includes("补上了同步期间记下的 2 条变化")));
+  } finally {
+    releaseTaskStart("m-a");
+    await stopLifeMonitor();
+    replaceTasks([taskA, taskQ]);
+  }
+});
+
+test("补失败：这一处这一轮先停、下一轮再试，连着三次还不行记失败；后面同一处的跟着等，不相干的照常补", async () => {
+  clearBacklog();
+  configure({ accounts: ["A"], pullMode: "latest", intervalSeconds: 5 });
+  reserveTaskStart("m-a");
+  // info.nfo 要下载，网盘上又没有这个文件：补的时候取直链会失败
+  dA.changes!.queue.push(
+    ev({ id: "sync-f1", kind: "create", path: "/tv/Show/info.nfo" }),
+    ev({ id: "sync-f2", kind: "remove", path: "/tv/Show/info.nfo" }),
+    ev({ id: "sync-f3", kind: "create", path: "/tv/Other/ok.mkv" }),
+  );
+  const r = await startLifeMonitor();
+  try {
+    assert.equal(r.ok, true, r.message);
+    await waitFor(() => statusOf("A")?.stats.deferred === 3, "三条都记下");
+    releaseTaskStart("m-a", { status: 500, message: "读取115目录失败" });
+    await waitFor(() => (rowOf("sync-f1")?.detail ?? "").includes("第 1 次"), "第一次补失败");
+    assert.equal(rowOf("sync-f1")?.status, "deferred");
+    assert.equal(rowOf("sync-f2")?.status, "deferred", "同一个文件后面的删除跟着等");
+    assert.match(rowOf("sync-f2")?.detail ?? "", /按先后跟着等/);
+    await waitFor(() => rowOf("sync-f3")?.status === "done", "不相干的照常补");
+    assert.ok(fs.existsSync(path.join(localRoot, "tv", "Other", "ok.strm")));
+    // 「同步结束」再发两次，各插一轮加急：第三次还失败就记失败，后面的删除接着补
+    events.emit("task.finished", { taskId: "m-a" });
+    await waitFor(() => (rowOf("sync-f1")?.detail ?? "").includes("第 2 次"), "第二次补失败");
+    events.emit("task.finished", { taskId: "m-a" });
+    await waitFor(() => rowOf("sync-f1")?.status === "failed", "第三次还失败就记失败");
+    assert.match(rowOf("sync-f1")?.detail ?? "", /补了 3 次都没成/);
+    await waitFor(() => rowOf("sync-f2")?.status === "skipped", "删除接着补（本地本来就没有，跳过）");
+    assert.equal(statusOf("A")?.backlog, 0);
+  } finally {
+    releaseTaskStart("m-a");
+    await stopLifeMonitor();
+  }
+});
+
+test("监控停了再起：记下待补的在库里，重新启动后第一轮就补上", async () => {
+  clearBacklog();
+  configure({ accounts: ["A"], pullMode: "latest", intervalSeconds: 5 });
+  reserveTaskStart("m-a");
+  dA.changes!.queue.push(ev({ id: "sync-s1", kind: "create", path: "/tv/later.mkv" }));
+  assert.equal((await startLifeMonitor()).ok, true);
+  try {
+    await waitFor(() => statusOf("A")?.stats.deferred === 1, "记下");
+    await stopLifeMonitor();
+    releaseTaskStart("m-a", { status: 200, message: "no files to download", idle: true });
+    assert.equal(rowOf("sync-s1")?.status, "deferred", "监控停着没人补");
+    assert.equal(getLifeMonitorStatus().accounts.find((a) => a.name === "A")?.backlog, 1, "停着的账号状态里也看得到");
+    assert.equal((await startLifeMonitor()).ok, true);
+    await waitFor(() => rowOf("sync-s1")?.status === "done", "重启后第一轮补上");
+    assert.ok(fs.existsSync(path.join(localRoot, "tv", "later.strm")));
+  } finally {
+    releaseTaskStart("m-a");
+    await stopLifeMonitor();
+  }
+});
+
+test("记下待补的事件被重拉到（115 重启后游标没跟上）：不再处理第二遍，补的时候只处理一次", async () => {
+  clearBacklog();
+  configure({ accounts: ["A"], pullMode: "latest", intervalSeconds: 5 });
+  reserveTaskStart("m-a");
+  dA.changes!.queue.push(ev({ id: "sync-x1", kind: "create", path: "/tv/dup.mkv" }));
+  assert.equal((await startLifeMonitor()).ok, true);
+  try {
+    await waitFor(() => statusOf("A")?.stats.deferred === 1, "记下");
+    const rounds = statusOf("A")!.stats.rounds;
+    dA.changes!.queue.push(ev({ id: "sync-x1", kind: "create", path: "/tv/dup.mkv" }));
+    // 同步还在跑：插一轮加急，这一轮重拉到同一条
+    events.emit("task.finished", { taskId: "m-a" });
+    await waitFor(() => (statusOf("A")?.stats.rounds ?? 0) > rounds, "又跑了一轮");
+    assert.equal(statusOf("A")?.stats.deferred, 1, "重拉到的那条没再记一遍");
+    releaseTaskStart("m-a", { status: 200, message: "no files to download", idle: true });
+    await waitFor(() => rowOf("sync-x1")?.status === "done", "补上");
+    assert.equal(statusOf("A")?.stats.handled, 1, "只处理了一次");
+  } finally {
+    releaseTaskStart("m-a");
+    await stopLifeMonitor();
+  }
+});
+
+test("快照来源一样：同步在跑时变化先记下、快照照常往前走（跑完补上之后不会再报一遍）", async () => {
+  clearBacklog();
+  configure({ accounts: ["Q"], pullMode: "latest", intervalSeconds: 5 });
+  // 只能整棵列的快照来源最短 5 分钟一轮：测试里压到 1 秒（实际按设置的 5 秒），好看到后面几轮
+  Object.defineProperty(dQ.changes, "minIntervalSeconds", { get: () => 1, configurable: true });
+  dQ.tree.addFile("/kk/Show/ep1.mkv");
+  assert.equal((await startLifeMonitor()).ok, true);
+  try {
+    await waitFor(() => (statusOf("Q")?.stats.rounds ?? 0) >= 1, "首轮建快照");
+    reserveTaskStart("m-q");
+    dQ.tree.addFile("/kk/Show/ep2.mkv");
+    await waitFor(() => statusOf("Q")?.stats.deferred === 1, "下一轮看到 ep2，先记下", 8000);
+    assert.ok(!fs.existsSync(path.join(localRoot, "kk", "Show", "ep2.strm")));
+    assert.ok(readDriveSnapshot<{ path: string }>("Q", "/kk")?.entries.some((e) => e.path === "Show/ep2.mkv"), "快照照常往前走");
+    releaseTaskStart("m-q", { status: 200, message: "no files to download", idle: true });
+    await waitFor(() => fs.existsSync(path.join(localRoot, "kk", "Show", "ep2.strm")), "跑完补上", 3000);
+    const rounds = statusOf("Q")!.stats.rounds;
+    await waitFor(() => (statusOf("Q")?.stats.rounds ?? 0) > rounds, "再跑一轮", 8000);
+    assert.equal(statusOf("Q")?.stats.events, 1, "快照已经往前走了，不会再报一遍");
+    assert.equal(statusOf("Q")?.stats.handled, 1);
+  } finally {
+    releaseTaskStart("m-q");
+    await stopLifeMonitor();
+  }
+});

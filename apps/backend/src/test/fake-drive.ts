@@ -37,6 +37,8 @@ import {
   type ShareUpdateSignal,
   type ShareUpdates,
   type WriteNode,
+  type DirFingerprint,
+  type ReadOptions,
 } from "../services/drive/types.js";
 
 export interface FakeNode {
@@ -59,15 +61,45 @@ const parentOf = (p: string): string => norm(p.split("/").filter(Boolean).slice(
 const baseOf = (p: string): string => splitPath(p).pop() ?? "";
 const isUnder = (p: string, dir: string): boolean => dir === "/" ? p !== "/" : p.startsWith(`${dir}/`);
 
+/**
+ * 夸克式目录指纹（测试开了才模拟，见 FakeDriveOptions.fingerprints）：真机实测的规则——
+ * 新建 / 移入 / 改名刷新父目录的 modifiedAt，删除 / 移出不刷新，孙辈不冒泡；被改名 / 移动的条目自己的时间也刷新。
+ * 子项数不存，列的时候现数。
+ */
+export interface FakeFingerprintOptions {
+  /** 父目录刷新后这么多毫秒内的变化不再刷新它（真机约 5500）；默认 0 = 每次都刷新 */
+  throttleMs?: number;
+  /** 时钟（毫秒）；默认从 2026-01-01 起每读一次加一秒，每次变化的时间都不一样 */
+  clock?: () => number;
+}
+
 /** 一棵以路径为键的树 */
 export class FakeTree {
   readonly nodes = new Map<string, FakeNode>();
   private seq = 0;
+  /** 开了就按夸克的规则维护目录的 modifiedAt */
+  fingerprints: { throttleMs: number; clock: () => number } | null = null;
 
   constructor(private readonly prefix: string) {}
 
   private nextId(): string {
     return `${this.prefix}${++this.seq}`;
+  }
+
+  /** 父目录的时间刷新（受节流窗口限制）；根没有节点，不管 */
+  private touchParent(path: string, at: number): void {
+    const parent = this.nodes.get(parentOf(path));
+    if (!parent || !this.fingerprints) return;
+    if (parent.modifiedAt !== undefined && at - parent.modifiedAt < this.fingerprints.throttleMs) return;
+    parent.modifiedAt = at;
+  }
+
+  /** 新加一个节点：开了指纹的话它自己带上当前时间（显式给了 modifiedAt 的照用），父目录刷新 */
+  private stamp(p: string, node: FakeNode, explicit: number | undefined): void {
+    if (!this.fingerprints) return;
+    const at = this.fingerprints.clock();
+    node.modifiedAt = explicit ?? at;
+    this.touchParent(p, at);
   }
 
   addDir(path: string, extra: Partial<FakeNode> = {}): FakeNode {
@@ -78,6 +110,7 @@ export class FakeTree {
     this.addDir(parentOf(p));
     const node: FakeNode = { id: this.nextId(), isDir: true, ...extra };
     this.nodes.set(p, node);
+    this.stamp(p, node, extra.modifiedAt);
     return node;
   }
 
@@ -86,15 +119,17 @@ export class FakeTree {
     this.addDir(parentOf(p));
     const node: FakeNode = { id: this.nextId(), isDir: false, size: 1, ...extra };
     this.nodes.set(p, node);
+    this.stamp(p, node, extra.modifiedAt);
     return node;
   }
 
+  /** 删除：夸克上删除不刷新父目录的时间（子项数自然少了） */
   remove(path: string): void {
     const p = norm(path);
     for (const key of [...this.nodes.keys()]) if (key === p || isUnder(key, p)) this.nodes.delete(key);
   }
 
-  /** 改名 / 移动：整棵子树跟着走，id 不变 */
+  /** 改名 / 移动：整棵子树跟着走，id 不变；开了指纹的话目标父目录刷新、源父目录不刷新、被挪的这一项自己刷新 */
   move(from: string, to: string): void {
     const a = norm(from);
     const b = norm(to);
@@ -105,6 +140,17 @@ export class FakeTree {
     this.remove(a);
     this.addDir(parentOf(b));
     for (const [key, node] of moved) this.nodes.set(key, node);
+    const top = this.nodes.get(b);
+    if (top && this.fingerprints) {
+      const at = this.fingerprints.clock();
+      top.modifiedAt = at;
+      this.touchParent(b, at);
+    }
+  }
+
+  /** 目录的直接子项数（夸克 include_items） */
+  itemCount(dir: string): number {
+    return this.children(dir).length;
   }
 
   pathOf(id: string): string | null {
@@ -330,6 +376,14 @@ export interface FakeDriveOptions {
   /** 直链的前缀：`${linkBase}/dl<path>` */
   linkBase?: string;
   notes?: { verify?: string };
+  /** 模拟夸克的目录指纹：目录的 modifiedAt 按真机规则刷新、列表带子项数、实现 dirFingerprints（快照源因此按指纹增量） */
+  fingerprints?: boolean | FakeFingerprintOptions;
+}
+
+/** 默认时钟：从 2026-01-01 起每读一次加一秒 */
+function steppingClock(): () => number {
+  let t = Date.UTC(2026, 0, 1);
+  return () => (t += 1000);
 }
 
 /**
@@ -347,7 +401,20 @@ export class FakeDrive implements DriveProvider {
   readonly notes?: { verify?: string };
   readonly withHash: boolean;
   readonly linkBase: string;
-  readonly calls = { resolvePath: 0, listDir: 0, listSubtree: 0, walkSubtree: 0, downloadLink: 0, mkdir: 0, rename: 0, move: 0, rmdir: 0, remove: 0 };
+  readonly calls = {
+    resolvePath: 0,
+    listDir: 0,
+    listSubtree: 0,
+    walkSubtree: 0,
+    downloadLink: 0,
+    mkdir: 0,
+    rename: 0,
+    move: 0,
+    rmdir: 0,
+    remove: 0,
+    /** dirFingerprints 发的「请求」数：50 个路径算一个，和夸克 path_list 一样 */
+    fingerprints: 0,
+  };
   /** 每次网盘调用记一行 `<方法> <参数>`，测试断言调用顺序 / 次数用 */
   readonly log: string[] = [];
   /** 设了就让所有网盘调用抛这个错（模拟 cookie 失效 / 风控） */
@@ -356,6 +423,10 @@ export class FakeDrive implements DriveProvider {
   beforeCall: (() => Promise<void>) | null = null;
   /** 写操作前先问它：返回错误就让这次写失败（模拟某个文件改不了名） */
   failWriteOn: ((op: "mkdir" | "rename" | "move" | "rmdir" | "remove", path: string) => Error | null) | null = null;
+  /** dirFingerprints 对它返回 true 的路径不回（模拟 path_list 认不出某些名字） */
+  fingerprintMiss: ((path: string) => boolean) | null = null;
+  /** 开了 fingerprints 才有：按路径批量取目录指纹（精确匹配，不 trim，和 path_list 一样） */
+  readonly dirFingerprints?: (paths: string[], opts?: ReadOptions) => Promise<Map<string, DirFingerprint>>;
 
   constructor(
     readonly kind: DriveKind,
@@ -371,6 +442,32 @@ export class FakeDrive implements DriveProvider {
     if (opts.changes) this.changes = new FakeChanges();
     if (write) this.write = new FakeWrite(this);
     this.notes = opts.notes;
+    if (opts.fingerprints) {
+      const fp = opts.fingerprints === true ? {} : opts.fingerprints;
+      this.tree.fingerprints = { throttleMs: fp.throttleMs ?? 0, clock: fp.clock ?? steppingClock() };
+      this.dirFingerprints = (paths, o) => this.fingerprintsOf(paths, o);
+    }
+  }
+
+  private async fingerprintsOf(paths: string[], opts?: ReadOptions): Promise<Map<string, DirFingerprint>> {
+    opts?.signal?.throwIfAborted();
+    for (let i = 0; i < paths.length; i += 50) {
+      this.calls.fingerprints++;
+      await this.guard("fingerprints", `${Math.min(50, paths.length - i)}`);
+    }
+    const out = new Map<string, DirFingerprint>();
+    for (const p of paths) {
+      if (this.fingerprintMiss?.(p)) continue;
+      const key = norm(p);
+      const node = key === "/" ? undefined : this.tree.nodes.get(key);
+      if (node?.isDir) out.set(p, { id: node.id, modifiedAt: node.modifiedAt ?? 0, items: this.tree.itemCount(key) });
+    }
+    return out;
+  }
+
+  /** 开了指纹时目录条目带子项数 */
+  private itemsOf(path: string, node: FakeNode): { items?: number } {
+    return node.isDir && this.tree.fingerprints ? { items: this.tree.itemCount(path) } : {};
   }
 
   async guard(method: string, arg: string): Promise<void> {
@@ -387,7 +484,7 @@ export class FakeDrive implements DriveProvider {
     return node ? { id: node.id, isDir: node.isDir } : null;
   }
 
-  async listDir(id: string, signal?: AbortSignal): Promise<DriveEntry[]> {
+  async listDir(id: string, signal?: AbortSignal, _opts?: { fresh?: boolean; background?: boolean }): Promise<DriveEntry[]> {
     this.calls.listDir++;
     signal?.throwIfAborted();
     await this.guard("listDir", id);
@@ -401,6 +498,7 @@ export class FakeDrive implements DriveProvider {
       hash: this.withHash ? node.hash : undefined,
       token: node.id,
       modifiedAt: node.modifiedAt,
+      ...this.itemsOf(path, node),
     }));
   }
 
@@ -422,7 +520,7 @@ export class FakeDrive implements DriveProvider {
     return syncViewFromPaths(this.tree.descendants(root).map(({ path: p }) => p.slice(root === "/" ? 0 : root.length).split("/").filter(Boolean)));
   }
 
-  async walkSubtree(path: string, opts?: { id?: string; signal?: AbortSignal }): Promise<SubtreeEntry[]> {
+  async walkSubtree(path: string, opts?: { id?: string } & ReadOptions): Promise<SubtreeEntry[]> {
     this.calls.walkSubtree++;
     opts?.signal?.throwIfAborted();
     await this.guard("walkSubtree", opts?.id ?? path);
@@ -433,6 +531,7 @@ export class FakeDrive implements DriveProvider {
       isDir: node.isDir,
       size: node.size,
       modifiedAt: node.modifiedAt,
+      ...this.itemsOf(p, node),
     }));
   }
 

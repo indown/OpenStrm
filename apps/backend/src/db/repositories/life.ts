@@ -169,19 +169,49 @@ export function countLifeEvents(): number {
   return row?.n ?? 0;
 }
 
-/** 只在事件表已存在该 id 且已处理成功时返回 true，用于跨重启去重 */
+/** 同步任务在跑时监控先记下、等同步结束再补的事件的状态 */
+export const LIFE_EVENT_DEFERRED = "deferred";
+
+/**
+ * 事件表里已经有这个 id、而且已经接手了（处理成功 / 跳过，或者记下了等着补）时返回 true，用于跨重启去重。
+ * 记下待补的也算：115 重拉到同一条不能再处理一遍，补的那边会按先后处理它
+ */
 export function isLifeEventHandled(id: string): boolean {
   const row = db
     .select({ status: lifeEvents.status })
     .from(lifeEvents)
     .where(eq(lifeEvents.id, id))
     .get();
-  return row?.status === "done" || row?.status === "skipped";
+  return row?.status === "done" || row?.status === "skipped" || row?.status === LIFE_EVENT_DEFERRED;
+}
+
+/** 这个账号记下待补的事件，按记下的先后（rowid） */
+export function listDeferredLifeEvents(accountName: string): LifeEventRow[] {
+  return db
+    .select()
+    .from(lifeEvents)
+    .where(and(eq(lifeEvents.accountName, accountName), eq(lifeEvents.status, LIFE_EVENT_DEFERRED)))
+    .orderBy(sql`rowid`)
+    .all();
+}
+
+/** 记下待补的事件条数；不给账号就是全部 */
+export function countDeferredLifeEvents(accountName?: string): number {
+  const deferred = eq(lifeEvents.status, LIFE_EVENT_DEFERRED);
+  const row = db
+    .select({ n: sql<number>`count(*)` })
+    .from(lifeEvents)
+    .where(accountName === undefined ? deferred : and(eq(lifeEvents.accountName, accountName), deferred))
+    .get();
+  return row?.n ?? 0;
 }
 
 /* -------------------------------- 留存清理 -------------------------------- */
 
-/** 删掉 115 侧 update_time 早于 cutoff（unix 秒）的事件，返回条数 */
+/**
+ * 删掉 115 侧 update_time 早于 cutoff（unix 秒）的事件，返回条数。
+ * 记下待补的也一样删：同步跑不了这么久，30 天还没补上的（监控停了一个月、账号已经删了）早就没意义了，下一次全量同步会把本地对齐
+ */
 export function deleteLifeEventsBefore(cutoffSec: number): number {
   return db.delete(lifeEvents).where(lt(lifeEvents.updateTime, cutoffSec)).run().changes;
 }
@@ -193,13 +223,24 @@ export function deletePathCacheNotTouchedSince(cutoffSec: number): number {
 
 /* ------------------------------- drive_snapshots ------------------------------- */
 
-export interface DriveSnapshot<T = unknown> {
+export interface DriveSnapshot<T = unknown, M = unknown> {
   entries: T[];
   /** unix 秒 */
   scannedAt: number;
+  /** 快照源自己的附加信息（夸克：根目录的指纹、上次整棵对比的时间）；没写过（老的行是 {}）或读不出来是 null */
+  meta: M | null;
 }
 
-export function readDriveSnapshot<T = unknown>(accountName: string, rootPath: string): DriveSnapshot<T> | null {
+function parseMeta<M>(raw: string): M | null {
+  try {
+    const v: unknown = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length > 0 ? (v as M) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readDriveSnapshot<T = unknown, M = unknown>(accountName: string, rootPath: string): DriveSnapshot<T, M> | null {
   const row = db
     .select()
     .from(driveSnapshots)
@@ -207,19 +248,18 @@ export function readDriveSnapshot<T = unknown>(accountName: string, rootPath: st
     .get();
   if (!row) return null;
   try {
-    return { entries: JSON.parse(row.entries) as T[], scannedAt: row.scannedAt };
+    return { entries: JSON.parse(row.entries) as T[], scannedAt: row.scannedAt, meta: parseMeta<M>(row.meta) };
   } catch {
     return null;
   }
 }
 
-export function writeDriveSnapshot(accountName: string, rootPath: string, entries: unknown[], scannedAt: number): void {
+/** meta 不给就写 {}（下一轮读出来是 null） */
+export function writeDriveSnapshot(accountName: string, rootPath: string, entries: unknown[], scannedAt: number, meta?: object): void {
+  const values = { entries: JSON.stringify(entries), scannedAt, meta: JSON.stringify(meta ?? {}) };
   db.insert(driveSnapshots)
-    .values({ accountName, rootPath, entries: JSON.stringify(entries), scannedAt })
-    .onConflictDoUpdate({
-      target: [driveSnapshots.accountName, driveSnapshots.rootPath],
-      set: { entries: JSON.stringify(entries), scannedAt },
-    })
+    .values({ accountName, rootPath, ...values })
+    .onConflictDoUpdate({ target: [driveSnapshots.accountName, driveSnapshots.rootPath], set: values })
     .run();
 }
 

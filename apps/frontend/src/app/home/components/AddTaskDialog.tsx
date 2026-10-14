@@ -210,6 +210,39 @@ function useCronPreview(expression: string): { next: string[]; error: string } {
   return state;
 }
 
+/** 正在被网盘监控的账号（只拉一次，弹框打开时）。拿不到就当没有，提示不出来也不影响建任务 */
+function useMonitoredAccounts(open: boolean): Set<string> {
+  const [names, setNames] = React.useState<Set<string>>(() => new Set());
+  React.useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    api.life
+      .status()
+      .then((s) => {
+        if (alive) setNames(new Set(s.accounts.filter((a) => a.running).map((a) => a.name)));
+      })
+      .catch(() => {
+        if (alive) setNames(new Set());
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
+  return names;
+}
+
+/**
+ * 账号开着网盘监控时，定时执行那栏的提示：网盘上的变化监控会自动同步，定时全量同步只是兜底。
+ * 定得比 6 小时还密就点明只会多跑几遍全量（夸克要逐个目录列，115 要导出整棵目录树）；next 是试算出来的接下来几次
+ */
+function monitorCronHint(cron: string, next: string[]): string {
+  if (!cron.trim()) return "这个账号开着网盘监控，网盘上的变化会自动同步过来；建议再每天定时跑一次全量当兜底。";
+  const gaps = next.slice(1).map((t, i) => Date.parse(t) - Date.parse(next[i]!));
+  return gaps.length > 0 && Math.min(...gaps) < 6 * 3600_000
+    ? "这个账号开着网盘监控，变化已经会自动同步；定时执行只是兜底，每天一次就够，定得太密只会多跑几遍全量。"
+    : "这个账号开着网盘监控，变化会自动同步，定时执行当兜底正合适。";
+}
+
 /**
  * 路径编码只对 http(s) 前缀有意义：strm 内容是 URL 时空格、# 之类才是问题（开不开 302 都一样，代理那头会解码）。
  * 前缀是本地挂载路径时 strm 是文件路径，编码了反而对不上文件。
@@ -292,6 +325,7 @@ export function AddTaskDialog({
   const copyDefaultDst = normTargetDir(copySettings?.dstDir);
   const cronExpression = useWatch({ control: form.control, name: "cronExpression" }) ?? "";
   const cronPreview = useCronPreview(cronExpression);
+  const monitoredAccounts = useMonitoredAccounts(open);
 
   const accountType = accounts.find((acc) => acc.name === account)?.accountType ?? "";
   const is115Account = accountType === "115";
@@ -577,6 +611,10 @@ export function AddTaskDialog({
                     {/* 只在"看起来已经打完"时才报错，否则每敲一个字符都红一下 */}
                     {cronPreview.error && CRON_SHAPE.test(value.trim()) && (
                       <p className="text-xs text-destructive">{cronPreview.error}</p>
+                    )}
+                    {/* 开着网盘监控的账号，定时全量同步只是兜底：告诉用户多密合适 */}
+                    {account && monitoredAccounts.has(account) && (
+                      <p className="text-xs text-muted-foreground">{monitorCronHint(value, cronPreview.next)}</p>
                     )}
                     <FormMessage />
                   </FormItem>

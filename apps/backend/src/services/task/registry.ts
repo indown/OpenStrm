@@ -6,6 +6,7 @@
  */
 import type { Subject, Subscription } from "rxjs";
 import type { FailedFileBrief, FileFailureAction, FileFailureKind, TaskStopInfo } from "@openstrm/shared";
+import { events } from "../events.js";
 
 /**
  * 任务进度事件。SSE 原样推给页面，历史里也按行存同一种 JSON，页面用一套解析。
@@ -106,14 +107,25 @@ export function reserveTaskStart(id: string): boolean {
   return true;
 }
 
+/**
+ * 任务从「在跑」变成「不在跑」的那一刻：起不来 / 无事可做（启动阶段就结束）、跑完、被取消。
+ * 只在真的有过占位时发：取消之后 runner 收尾还会再 unregister 一次，不能发两遍
+ */
+function finished(id: string): void {
+  if (running.has(id) || starting.has(id)) return;
+  events.emit("task.finished", { taskId: id });
+}
+
 /** 启动阶段结束：放掉占位，把结果交给等在 waitForTaskStart 上的人（起来了的话此时 running 里已经有了） */
 export function releaseTaskStart(id: string, outcome?: StartOutcome): void {
-  starting.delete(id);
+  const had = starting.delete(id);
   if (outcome) lastStarts.set(id, { ...outcome, at: Date.now() });
   const waiters = startWaiters.get(id);
-  if (!waiters) return;
-  startWaiters.delete(id);
-  for (const settle of waiters) settle(outcome);
+  if (waiters) {
+    startWaiters.delete(id);
+    for (const settle of waiters) settle(outcome);
+  }
+  if (had) finished(id);
 }
 
 /**
@@ -142,7 +154,7 @@ export function registerRunningTask(id: string, task: RunningTask): void {
 }
 
 export function unregisterRunningTask(id: string): void {
-  running.delete(id);
+  if (running.delete(id)) finished(id);
 }
 
 /**
@@ -163,6 +175,7 @@ export function cancelRunningTask(id: string, reason = "用户取消"): boolean 
   }
   task.subject.next({ done: true, cancelled: true, status: "cancelled", message: `任务已取消：${reason}`, at: Date.now() });
   task.subject.complete();
+  finished(id);
   return true;
 }
 

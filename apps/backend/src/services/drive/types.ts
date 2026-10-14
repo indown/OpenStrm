@@ -26,6 +26,8 @@ export interface DriveEntry {
   token?: string;
   /** 毫秒 */
   modifiedAt?: number;
+  /** 目录的直接子项数（夸克 include_items）；别家不填 */
+  items?: number;
 }
 
 export interface DriveNode {
@@ -46,6 +48,24 @@ export interface SubtreeEntry {
   isDir: boolean;
   size?: number;
   modifiedAt?: number;
+  /** 目录的直接子项数（夸克 include_items）；别家不填 */
+  items?: number;
+}
+
+/**
+ * 目录的指纹：夸克上直接子项新增 / 移入 / 改名会刷新目录的 updated_at（modifiedAt），删除 / 移出不刷新但子项数会变。
+ * 两样合起来和上次一样，就说明这个目录的直接子项没变（刷新后约 5.5 秒内的改名会被节流吞掉，快照源另有兜底）
+ */
+export interface DirFingerprint {
+  id: string;
+  modifiedAt: number;
+  items: number;
+}
+
+/** 读操作的附加选项。background：网盘监控这类后台轮询发的请求，走账号的 life 通道，不占界面和同步用的 normal 并发 */
+export interface ReadOptions {
+  signal?: AbortSignal;
+  background?: boolean;
 }
 
 export type AccountIssue = "auth" | "blocked" | "gone";
@@ -93,15 +113,23 @@ export interface DriveProvider {
   /** 根目录 id：115 / 夸克是 "0"，OpenList 是 "/" */
   readonly rootId: string;
   resolvePath(path: string, signal?: AbortSignal): Promise<DriveNode | null>;
-  /** fresh：绕过网盘客户端自己的目录缓存（115 进程内缓存 5 分钟），整理动手前看目标目录有没有同名文件时用 */
-  listDir(id: string, signal?: AbortSignal, opts?: { fresh?: boolean }): Promise<DriveEntry[]>;
+  /**
+   * fresh：绕过网盘客户端自己的目录缓存（115 进程内缓存 5 分钟），整理动手前看目标目录有没有同名文件时用。
+   * background：后台监控发的（夸克走 life 通道）；别家忽略
+   */
+  listDir(id: string, signal?: AbortSignal, opts?: { fresh?: boolean; background?: boolean }): Promise<DriveEntry[]>;
   /**
    * 子树里的文件 + 没有文件的顶层空目录，相对 path（同步任务对照、重生成、转存后建 strm 都用它）。
    * 目录不存在抛 RemoteDirNotFoundError。已知目录 id 时传 id 省一次解析。
    */
   listSubtree(path: string, opts?: { id?: string; signal?: AbortSignal }): Promise<string[]>;
   /** 子树里的每一个节点（目录也在）及其元数据；只有能做快照监控的网盘实现 */
-  walkSubtree?(path: string, opts?: { id?: string; signal?: AbortSignal }): Promise<SubtreeEntry[]>;
+  walkSubtree?(path: string, opts?: { id?: string } & ReadOptions): Promise<SubtreeEntry[]>;
+  /**
+   * 按绝对路径批量取目录的指纹（夸克 path_list，一次 50 个，这里内部分批）。只回找得到的目录，键是传进来的路径；
+   * 文件、不存在的路径不回。只有能做指纹增量监控的网盘实现，没有它快照源每轮整棵列
+   */
+  dirFingerprints?(paths: string[], opts?: ReadOptions): Promise<Map<string, DirFingerprint>>;
   downloadLink(path: string, opts?: { token?: string; signal?: AbortSignal }): Promise<DriveLink>;
   classifyError(err: unknown): AccountIssue | null;
   /** 列过某个目录后把结果告诉网盘（115 借它维护 id → 路径缓存，变更监控靠它找移动前的旧路径）；别家不用实现 */

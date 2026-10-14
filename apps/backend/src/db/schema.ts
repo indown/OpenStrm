@@ -297,9 +297,11 @@ export const lifeEvents = sqliteTable(
     handledAt: integer("handled_at"),
   },
   // 只按 update_time 查（listRecent / 留存清理）。file_id 和 type 上的索引没有任何查询用到，
-  // 这张表又是写得最多的一张，白白放大写入量，0008 迁移里删掉了
+  // 这张表又是写得最多的一张，白白放大写入量，0008 迁移里删掉了。
+  // 同步期间记下、等着补的事件（status = deferred）每轮都要按账号查一遍：部分索引只收这几行，不拖累写入
   (t) => ({
     updateTimeIdx: index("life_events_update_time_idx").on(t.updateTime),
+    deferredIdx: index("life_events_deferred_idx").on(t.accountName).where(sql`${t.status} = 'deferred'`),
   }),
 );
 
@@ -309,6 +311,7 @@ export type LifeEventRow = typeof lifeEvents.$inferSelect;
 /**
  * 没有事件流的网盘（夸克）的监控快照：每个账号的每个任务根目录一份，entries 是整棵子树的 JSON。
  * 下一轮扫描和它对比得出新增 / 删除 / 改名 / 移动。
+ * meta 是根目录自己的指纹和上次整棵对比的时间（JSON，旧行是 {}）：目录的指纹在 entries 里各自带着。
  */
 export const driveSnapshots = sqliteTable(
   "drive_snapshots",
@@ -317,6 +320,7 @@ export const driveSnapshots = sqliteTable(
     rootPath: text("root_path").notNull(),
     entries: text("entries").notNull().default("[]"),
     scannedAt: integer("scanned_at").notNull().default(0),
+    meta: text("meta").notNull().default("{}"),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.accountName, t.rootPath] }),
