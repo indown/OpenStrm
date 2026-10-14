@@ -7,12 +7,14 @@
  *   - 一条循环每分钟挑到期的订阅顺序跑，条与条之间隔两秒（分享接口打得太密会被封 IP）；
  *     没有开着的订阅时循环自己停，建订阅 / 恢复时再起。
  *   - 状态全在 share_follows 表里，重启接着跑。
+ *   - 整理结果（organized）：转存来的文件整理过之后，记下分享里每个目录整理成了什么（作品 / 季 / 集偏移），
+ *     以后这个目录来的新文件交给整理时带上提示照着用；整理页又动了这批文件就跟着改，撤销那次整理就退回去。
  *
  * 网盘的差异全在 DriveProvider 里：订阅不存网盘类型，任务的账号是哪家就按哪家列分享和转存（建订阅时校验同类）。
  */
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { AppSettings, ShareFollow, ShareFollowRun, ShareFollowSummary, TaskDefinition } from "@openstrm/shared";
+import type { AppSettings, OrganizeHint, ShareFollow, ShareFollowOrganized, ShareFollowRun, ShareFollowSummary, TaskDefinition } from "@openstrm/shared";
 import { getTask } from "../../db/repositories/tasks.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import {
@@ -39,7 +41,8 @@ import { withAfterCopy, type CopyOutcome } from "../copy/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
 import { normalizeSubPath } from "../strm/naming.js";
 import { issueFromDrive, notify, type NotifyEvent } from "../notify.js";
-import { baseName, diffShareListing, groupByParent, mergeKnown, scopeIsWhole, type ListedEntry } from "./diff.js";
+import { baseName, diffShareListing, groupByParent, mergeKnown, parentOf, scopeIsWhole, type ListedEntry } from "./diff.js";
+import type { OrganizedVideo } from "../organize/hints.js";
 import { describeFileFailure } from "../download/failure.js";
 
 const log = moduleLogger("follow");
@@ -290,6 +293,7 @@ export async function createFollow(input: CreateFollowInput): Promise<ShareFollo
     nextCheckAt: 0,
     known: [],
     recent: [],
+    organized: [],
     createdAt: sec,
     updatedAt: sec,
   };
@@ -329,6 +333,8 @@ export interface UpdateFollowInput {
   taskId?: string;
   subPath?: string;
   receiveCode?: string;
+  /** 不再沿用整理结果：新文件交给整理时重新识别 */
+  clearOrganized?: boolean;
 }
 
 export function updateFollow(id: string, input: UpdateFollowInput): ShareFollowSummary {
@@ -347,7 +353,10 @@ export function updateFollow(id: string, input: UpdateFollowInput): ShareFollowS
       throw new HttpError(400, `这个订阅盯的是 ${KIND_LABEL[kind]} 的分享，不能换到 ${KIND_LABEL[target.provider.kind]} 账号的任务`);
     }
     patch.taskId = target.task.id;
+    // 整理结果里的目录是按旧任务记的
+    patch.organized = [];
   }
+  if (input.clearOrganized) patch.organized = [];
   if (input.subPath !== undefined) patch.subPath = normalizeSubPath(input.subPath);
   if (input.receiveCode !== undefined) patch.receiveCode = input.receiveCode.trim();
   if (input.intervalMinutes !== undefined) {
@@ -392,6 +401,12 @@ export function listFollows(): { follows: ShareFollowSummary[]; watcher: FollowW
 
 const checking = new Set<string>();
 
+/**
+ * 正在检查的订阅这一轮已经转存、还没写进快照的条目（相对被盯目录）：一轮好几组时，前一组交给整理的那次可能在这一轮写快照之前
+ * 就执行完了，记整理结果（learnFollowOrganized）时要认得出它们。检查结束就清掉
+ */
+const inFlight = new Map<string, Set<string>>();
+
 export interface CheckResult {
   follow: ShareFollowSummary;
   /** 这次有动静才有；什么都没发生是 null */
@@ -414,6 +429,7 @@ export async function checkFollow(id: string): Promise<CheckResult> {
     return { follow: toSummary(latest), run, ...(sink.copy ? { copy: sink.copy } : {}) };
   } finally {
     checking.delete(id);
+    inFlight.delete(id);
   }
 }
 
@@ -535,6 +551,9 @@ async function runCheck(f: ShareFollow, sink: CheckSink): Promise<ShareFollowRun
         log.info(`追更「${f.name}」的落点不在了，建了 ${task.originPath}/${made}`);
       }
       const createdDir = createdInRound.find((d) => subPath === d || subPath.startsWith(`${d}/`));
+      // 这个目录上次整理成了什么：新文件（不含目录）带着交给整理，照着认、季和集偏移照着套
+      const done = f.organized.find((o) => o.dir === group.parent);
+      const organizeHints = done ? group.items.filter((i) => !i.isDir).map((i) => hintOf(done, subPath ? `${subPath}/${baseName(i.path)}` : baseName(i.path), f.name)) : [];
       const r = await saveSelectionToTask({
         task,
         provider,
@@ -547,11 +566,19 @@ async function runCheck(f: ShareFollow, sink: CheckSink): Promise<ShareFollowRun
         // 交给整理也在这里（每组转存完、strm 生成好就交），整理记录里记成「追更」
         organizeTrigger: "follow",
         ...(createdDir ? { createdDir } : {}),
+        ...(organizeHints.length ? { organizeHints } : {}),
         settings,
       });
       if (r.copy) copies.push(r.copy);
       if ("generatedCount" in r) generated += r.generatedCount;
       received.push(...group.items.map((i) => i.path));
+      // 交给整理的那次可能比这一轮写快照还早办完：先记下这一组转存了哪些文件（目录连同里面的）
+      const flying = inFlight.get(f.id) ?? new Set<string>();
+      for (const i of group.items) {
+        if (!i.isDir) flying.add(i.path);
+        else for (const e of listing.entries) if (!e.isDir && e.path.startsWith(`${i.path}/`)) flying.add(e.path);
+      }
+      inFlight.set(f.id, flying);
     } catch (err) {
       // 转存成了、strm 没生成好：复制已经登记了，照样算进去
       const copy = err instanceof HttpError ? (err.extra as { copy?: CopyOutcome } | undefined)?.copy : undefined;
@@ -672,25 +699,180 @@ export async function tickFollows(): Promise<void> {
   lastTickAt = deps.now();
 }
 
+type DirMapping = { from: string; to: string };
+
+/** 路径按目录映射改写：等于或位于某个 from 之下的换成 to（映射按 from 从长到短排好），没命中是 null */
+function mapPath(p: string, mappings: DirMapping[]): string | null {
+  const m = mappings.find((x) => p === x.from || p.startsWith(`${x.from}/`));
+  return m ? (p === m.from ? m.to : `${m.to}${p.slice(m.from.length)}`) : null;
+}
+
 /**
- * 整理把任务下的目录挪走后，订阅的落点跟着改：sub_path 等于或位于 from 之下的改成 to。
+ * 整理把任务下的目录挪走后，订阅的落点跟着改：sub_path 等于或位于 from 之下的改成 to；整理结果里记的作品目录 / 视频所在目录也一样。
  * dryRun 只返回会受影响的 subPath（预览里显示「被 N 条追更引用」）。返回改过（或会改）的 subPath 列表
  */
-export function rewriteFollowSubPaths(taskId: string, mappings: Array<{ from: string; to: string }>, dryRun = false): string[] {
+export function rewriteFollowSubPaths(taskId: string, mappings: DirMapping[], dryRun = false): string[] {
   const hit: string[] = [];
   for (const f of listShareFollows()) {
-    if (f.taskId !== taskId || !f.subPath) continue;
+    if (f.taskId !== taskId) continue;
     if (dryRun) {
-      hit.push(f.subPath);
+      if (f.subPath) hit.push(f.subPath);
       continue;
     }
-    const m = mappings.find((x) => f.subPath === x.from || f.subPath.startsWith(`${x.from}/`));
-    if (!m) continue;
-    const next = f.subPath === m.from ? m.to : `${m.to}${f.subPath.slice(m.from.length)}`;
-    updateShareFollow(f.id, { subPath: normalizeSubPath(next) });
-    hit.push(f.subPath);
+    const patch: Partial<ShareFollow> = {};
+    const sub = f.subPath ? mapPath(f.subPath, mappings) : null;
+    if (sub !== null) {
+      patch.subPath = normalizeSubPath(sub);
+      hit.push(f.subPath);
+    }
+    const organized = f.organized.map((o) => mapOrganized(o, mappings));
+    if (organized.some((o, i) => o !== f.organized[i])) patch.organized = organized;
+    if (Object.keys(patch).length > 0) updateShareFollow(f.id, patch);
   }
   return hit;
+}
+
+/* ------------------------------- 整理结果 ------------------------------- */
+
+const ORGANIZED_TITLES_KEEP = 20;
+/** 撤销能往回退几版 */
+const ORGANIZED_HISTORY_KEEP = 5;
+
+/** 上一版的链只留这么多层 */
+function trimHistory(o: ShareFollowOrganized, depth = 1): ShareFollowOrganized {
+  if (!o.prev) return o;
+  return { ...o, prev: depth >= ORGANIZED_HISTORY_KEEP ? null : trimHistory(o.prev, depth + 1) };
+}
+
+/** 一条记录连同上一版们的目录按映射改写；没变就原样返回 */
+function mapOrganized(o: ShareFollowOrganized, mappings: DirMapping[]): ShareFollowOrganized {
+  const workDir = mapPath(o.workDir, mappings);
+  const filesDir = mapPath(o.filesDir, mappings);
+  const prev = o.prev ? mapOrganized(o.prev, mappings) : null;
+  return workDir === null && filesDir === null && prev === o.prev ? o : { ...o, workDir: workDir ?? o.workDir, filesDir: filesDir ?? o.filesDir, prev };
+}
+
+function hintOf(o: ShareFollowOrganized, path: string, label: string): OrganizeHint {
+  return { path, mediaType: o.mediaType, tmdbId: o.tmdbId, season: o.season, episodeOffset: o.episodeOffset, seasonFallback: o.seasonFallback, titles: o.titles, label };
+}
+
+/** 都一样才算数，有一个不一样或者一个都没有是 null */
+function uniform<T>(values: T[]): T | null {
+  return values.length > 0 && values.every((v) => v === values[0]) ? values[0] : null;
+}
+
+const dirOf = (p: string): string => parentOf(p);
+
+type OrganizedValues = Omit<ShareFollowOrganized, "dir" | "titles" | "runId" | "prev" | "at">;
+
+const sameValues = (a: OrganizedValues, b: OrganizedValues): boolean =>
+  a.tmdbId === b.tmdbId &&
+  a.season === b.season &&
+  a.seasonFallback === b.seasonFallback &&
+  a.episodeOffset === b.episodeOffset &&
+  a.workDir === b.workDir &&
+  a.filesDir === b.filesDir;
+
+/**
+ * 记下 / 改一条：值没变只补片名，不动 runId / prev（追更每来一集就整理一次，不能把「最后一次真改了它的整理」刷掉）；
+ * 变了记下这次的 runId，原来那条放进 prev，撤销这次整理就退回去
+ */
+function upsert(list: ShareFollowOrganized[], dir: string, values: OrganizedValues, titles: string[], runId: string, now: number): boolean {
+  const idx = list.findIndex((o) => o.dir === dir);
+  const cur = idx === -1 ? null : list[idx];
+  const mergedTitles = [...new Set([...(cur?.titles ?? []), ...titles])].slice(0, ORGANIZED_TITLES_KEEP);
+  if (cur && sameValues(cur, values)) {
+    if (mergedTitles.length === cur.titles.length) return false;
+    list[idx] = { ...cur, titles: mergedTitles };
+    return true;
+  }
+  const next = trimHistory({ dir, ...values, titles: mergedTitles, runId, prev: cur, at: now });
+  if (idx === -1) list.push(next);
+  else list[idx] = next;
+  return true;
+}
+
+/**
+ * 整理执行完：这次挪过 / 改过名的视频里，有追更转存来的，就记下分享里那个目录整理成了什么（只记剧集）。
+ *   1. 源路径去掉订阅的 subPath 后在快照里：是这条追更转存来的原样文件，按它在分享里的目录记。同一个目录的进了不同作品就不猜。
+ *   2. 动了某条记录里那批视频（filesDir：整理页换匹配、改季、改模板重整）：跟着改——人定了季就换季，集偏移累加（新偏移是在上次结果上再偏的）。
+ * 要在改写追更落点之前调：按整理前的路径对快照（这一轮刚转存、还没写进快照的也算）。返回改了几条订阅
+ */
+export function learnFollowOrganized(taskId: string, runId: string, videos: OrganizedVideo[]): number {
+  if (videos.length === 0) return 0;
+  const now = deps.now();
+  let touched = 0;
+  for (const f of listShareFollows()) {
+    if (f.taskId !== taskId) continue;
+    const base = f.subPath ? `${f.subPath}/` : "";
+    const known = new Set([...f.known.filter((e) => !e.isDir).map((e) => e.path), ...(inFlight.get(f.id) ?? [])]);
+    const byDir = new Map<string, OrganizedVideo[]>();
+    const raw = new Set<OrganizedVideo>();
+    for (const v of videos) {
+      if (!v.src.startsWith(base)) continue;
+      const rel = v.src.slice(base.length);
+      if (!known.has(rel)) continue;
+      const dir = parentOf(rel);
+      byDir.set(dir, [...(byDir.get(dir) ?? []), v]);
+      raw.add(v);
+    }
+    const list = [...f.organized];
+    let changed = false;
+    for (const [dir, vs] of byDir) {
+      const u = vs[0].unit;
+      if (u.mediaType !== "tv" || vs.some((v) => v.unit.tmdbId !== u.tmdbId || v.unit.mediaType !== u.mediaType)) continue;
+      const values: OrganizedValues = {
+        mediaType: "tv",
+        tmdbId: u.tmdbId,
+        title: u.title,
+        year: u.year,
+        season: u.seasonOverride,
+        seasonFallback: u.seasonOverride === null ? uniform(vs.map((v) => v.season)) : null,
+        episodeOffset: u.episodeOffset,
+        workDir: u.dstRoot,
+        filesDir: uniform(vs.map((v) => dirOf(v.dst))) ?? u.dstRoot,
+      };
+      changed = upsert(list, dir, values, vs.flatMap((v) => v.titles), runId, now) || changed;
+    }
+    for (const cur of [...list]) {
+      if (byDir.has(cur.dir)) continue;
+      // 这条追更这次刚送来的原样文件不算（上面按分享里的目录记过了），只看原来就整理好、这次又被挪的
+      const vs = videos.filter((v) => !raw.has(v) && dirOf(v.src) === cur.filesDir);
+      if (vs.length === 0) continue;
+      const u = vs[0].unit;
+      if (u.mediaType !== "tv" || vs.some((v) => v.unit.tmdbId !== u.tmdbId || v.unit.mediaType !== u.mediaType)) continue;
+      const values: OrganizedValues = {
+        mediaType: "tv",
+        tmdbId: u.tmdbId,
+        title: u.title,
+        year: u.year,
+        season: u.seasonOverride ?? cur.season,
+        seasonFallback: u.seasonOverride !== null ? null : (uniform(vs.map((v) => v.season)) ?? cur.seasonFallback),
+        episodeOffset: cur.episodeOffset + u.episodeOffset,
+        workDir: u.dstRoot,
+        filesDir: uniform(vs.map((v) => dirOf(v.dst))) ?? u.dstRoot,
+      };
+      changed = upsert(list, cur.dir, values, [], runId, now) || changed;
+    }
+    if (changed) {
+      updateShareFollow(f.id, { organized: list });
+      touched++;
+    }
+  }
+  if (touched > 0) log.info({ taskId, runId, follows: touched }, "追更记下了整理结果");
+  return touched;
+}
+
+/** 撤销一次整理：这次记下 / 改过的整理结果退回上一版（没有上一版就删掉） */
+export function revertFollowOrganized(taskId: string, runId: string): number {
+  let touched = 0;
+  for (const f of listShareFollows()) {
+    if (f.taskId !== taskId || !f.organized.some((o) => o.runId === runId)) continue;
+    const list = f.organized.flatMap((o) => (o.runId !== runId ? [o] : o.prev ? [o.prev] : []));
+    updateShareFollow(f.id, { organized: list });
+    touched++;
+  }
+  return touched;
 }
 
 /** 仅供测试：清掉所有订阅并停循环 */
@@ -698,6 +880,7 @@ export async function __test_resetFollows(): Promise<void> {
   await stopFollowWatcher();
   replaceShareFollows([]);
   checking.clear();
+  inFlight.clear();
   signalSkips.clear();
   lastTickAt = null;
   loop.noteError(null);

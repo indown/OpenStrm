@@ -99,6 +99,8 @@ export const shareFollowPatchSchema = z.object({
   taskId: z.string().min(1).optional(),
   subPath: z.string().optional(),
   receiveCode: z.string().optional(),
+  /** 不再沿用整理结果 */
+  clearOrganized: z.boolean().optional(),
 });
 
 const account115Schema = z.looseObject({

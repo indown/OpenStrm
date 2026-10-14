@@ -8,7 +8,7 @@
  *
  * 只是触发，不是请求 / 应答：要拿结果的（复制登记要知道排上几条）照旧直接调用。
  */
-import type { OrganizeTrigger, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeHint, OrganizeTrigger, TaskDefinition } from "@openstrm/shared";
 import { createEmitter } from "../lib/events.js";
 import { moduleLogger } from "../lib/logger.js";
 
@@ -21,6 +21,8 @@ export interface FilesLandedEvent {
   debounce?: boolean;
   /** 这一次强制按这个策略整理（转存弹框勾了「转存后整理」）；不给就按任务的设置 */
   mode?: "review" | "auto";
+  /** 新文件带的识别提示（追更按上次整理同一个目录的结果给，见 OrganizeHint） */
+  hints?: OrganizeHint[];
 }
 
 export interface TaskFinishedEvent {

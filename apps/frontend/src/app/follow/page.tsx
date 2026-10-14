@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Loader2, Pause, Pencil, Play, RefreshCw, Rss, Telescope, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -46,7 +47,7 @@ import { TableSkeleton } from "@/components/loading";
 import { api, type FollowListResponse } from "@/lib/api";
 import { usePolling } from "@/hooks/use-polling";
 import { apiErrorMessage } from "@/lib/axios";
-import { FOLLOW_INTERVALS, intervalLabel, scopeLabel } from "@/lib/follow";
+import { FOLLOW_INTERVALS, intervalLabel, organizedLabel, organizedParts, scopeLabel } from "@/lib/follow";
 import { keywordFromName, searchHref } from "@/lib/resource";
 
 /** 有订阅正在检查时的刷新间隔 */
@@ -366,6 +367,32 @@ function AltSearchLink({ follow: f, className }: { follow: ShareFollowSummary; c
   );
 }
 
+/** 一条整理沿用：片名照常换行，「· 第 2 季」「· 集偏移 -12」各自不断开 */
+function OrganizedText({ parts }: { parts: string[] }) {
+  return (
+    <>
+      {parts.map((p, i) => (
+        <span key={p} className={i > 0 ? "whitespace-nowrap" : undefined}>
+          {i > 0 ? ` · ${p}` : p}
+        </span>
+      ))}
+    </>
+  );
+}
+
+/** 整理沿用：新集交给整理时照着认的作品 / 季 / 集偏移；分享里好几个目录各有一条时只写第一条，其余放悬停提示 */
+function OrganizedLine({ follow: f }: { follow: ShareFollowSummary }) {
+  if (f.organized.length === 0) return null;
+  const labels = f.organized.map((o) => `${o.dir ? `${o.dir}：` : ""}${organizedLabel(o)}`);
+  return (
+    <div className="break-words text-xs text-muted-foreground" title={`新集交给整理时照着认：\n${labels.join("\n")}`}>
+      整理沿用：
+      <OrganizedText parts={organizedParts(f.organized[0])} />
+      {f.organized.length > 1 && <span className="whitespace-nowrap">{` 等 ${f.organized.length} 个目录`}</span>}
+    </div>
+  );
+}
+
 /** 最近一次有动静的检查：新增了什么、跳过了什么 */
 function FollowRecent({ last }: { last: ShareFollowRun | undefined }) {
   if (!last) return <span className="text-xs text-muted-foreground">订阅以来还没有新增</span>;
@@ -477,7 +504,10 @@ function FollowRow(props: FollowItemProps) {
           {scope !== "整个目录" && ` · 只追：${scope}`}
         </div>
       </TableCell>
-      <TableCell className="break-all text-xs text-muted-foreground">→ {target}</TableCell>
+      <TableCell className="break-all text-xs text-muted-foreground">
+        <div>→ {target}</div>
+        <OrganizedLine follow={f} />
+      </TableCell>
       <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
         <div>{intervalLabel(f.intervalMinutes)}</div>
         <div title={`上次：${fmtTime(f.lastCheckedAt)}`}>上次 {relativePast(f.lastCheckedAt)}</div>
@@ -518,6 +548,7 @@ function FollowCard(props: FollowItemProps) {
             {scope !== "整个目录" && ` · 只追：${scope}`}
           </div>
           <div className="break-all text-xs text-muted-foreground">→ {target}</div>
+          <OrganizedLine follow={f} />
         </div>
         <StatusBadge tone={meta.tone} pulse={meta.pulse} className="shrink-0">
           {meta.label}
@@ -550,19 +581,27 @@ function EditFollowDialog({
 }) {
   const [name, setName] = useState("");
   const [interval, setIntervalMin] = useState("360");
+  const [clearOrganized, setClearOrganized] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!target) return;
     setName(target.name);
     setIntervalMin(String(target.intervalMinutes));
+    setClearOrganized(false);
   }, [target]);
 
   const save = async () => {
     if (!target) return;
     setSaving(true);
     try {
-      onSaved(await api.follow.update(target.id, { name: name.trim() || target.name, intervalMinutes: Number(interval) }));
+      onSaved(
+        await api.follow.update(target.id, {
+          name: name.trim() || target.name,
+          intervalMinutes: Number(interval),
+          ...(clearOrganized ? { clearOrganized: true } : {}),
+        }),
+      );
       toast.success("已保存");
     } catch (err) {
       toast.error(apiErrorMessage(err, "保存失败"));
@@ -601,6 +640,23 @@ function EditFollowDialog({
               </SelectContent>
             </Select>
           </div>
+          {target && target.organized.length > 0 && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">整理沿用</label>
+              <ul className="space-y-0.5 text-xs text-muted-foreground">
+                {target.organized.map((o) => (
+                  <li key={o.dir} className="break-words">
+                    {o.dir ? `${o.dir}：` : ""}
+                    <OrganizedText parts={organizedParts(o)} />
+                  </li>
+                ))}
+              </ul>
+              <label className="flex cursor-pointer items-center gap-2 text-sm">
+                <Checkbox checked={clearOrganized} onCheckedChange={(v) => setClearOrganized(v === true)} />
+                不再沿用，新集交给整理时重新识别
+              </label>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>

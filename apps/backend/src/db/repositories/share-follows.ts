@@ -1,5 +1,5 @@
 import { and, asc, eq, getTableColumns, lte, notInArray, sql } from "drizzle-orm";
-import type { ShareFollow, ShareFollowEntry, ShareFollowRun, ShareFollowStatus, ShareFollowSummary } from "@openstrm/shared";
+import type { ShareFollow, ShareFollowEntry, ShareFollowOrganized, ShareFollowRun, ShareFollowStatus, ShareFollowSummary } from "@openstrm/shared";
 import { db } from "../client.js";
 import { shareFollows } from "../schema.js";
 
@@ -43,6 +43,7 @@ function deserialize(row: Row): ShareFollow {
     nextCheckAt: row.nextCheckAt,
     known: parseJson<ShareFollowEntry[]>(row.known, []),
     recent: parseJson<ShareFollowRun[]>(row.recent, []),
+    organized: parseJson<ShareFollowOrganized[]>(row.organized, []),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -71,6 +72,7 @@ function columns(f: ShareFollow) {
     nextCheckAt: f.nextCheckAt,
     known: JSON.stringify(f.known),
     recent: JSON.stringify(f.recent),
+    organized: JSON.stringify(f.organized),
   };
 }
 

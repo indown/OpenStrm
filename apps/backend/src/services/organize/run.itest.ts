@@ -202,7 +202,7 @@ test("执行：网盘改名移动、本地 strm 跟着挪并重写内容、字�
   insertShareFollow({
     id: "f1", name: "BEEF", libraryId: null, shareUrl: "", shareCode: "abc", receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
     taskId: "t1", subPath: "inbox/BEEF.S01.1080p", enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
   });
   writeKv(KEY.offlineFollowups, [
     { kind: "strm", infoHash: "h1", account: "acc", taskId: "t1", subPath: "inbox/BEEF.S01.1080p", name: "x", addedAt: Date.now(), status: "pending", detail: "", attempts: 0, misses: 0 },
@@ -266,7 +266,7 @@ test("撤销：按流水账逆序退回，网盘和本地都恢复，追更落�
   insertShareFollow({
     id: "f2", name: "BEEF", libraryId: null, shareUrl: "", shareCode: "abd", receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
     taskId: "t1", subPath: "inbox/BEEF.S01.1080p", enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
   });
   const run = await createRun({ taskId: "t1", subPath: "inbox" });
   await untilStatus(run.id, ["ready"]);
@@ -806,7 +806,7 @@ test("手动 / 智能体整理完删掉作品独占的空目录：范围是只�
   insertShareFollow({
     id: "fr", name: "BEEF", libraryId: null, shareUrl: "", shareCode: "abr", receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
     taskId: "t1", subPath: "BEEF", enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
   });
   run = await createRun({ taskId: "t1", subPath: "BEEF/Season 1", trigger: "manual" });
   await untilStatus(run.id, ["ready"]);
@@ -914,7 +914,7 @@ test("撤销：删掉的剧目录和季目录建回来，文件退回原处；�
   insertShareFollow({
     id: "fb", name: "BEEF", libraryId: null, shareUrl: "", shareCode: "abc", receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
     taskId: "t1", subPath: "BEEF/Season 1", enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
   });
   const runId = await organizeNow({ taskId: "t1", subPath: "BEEF/Season 1", trigger: "agent" });
   assert.equal(drive.tree.get("/tv/BEEF"), undefined);
@@ -932,7 +932,7 @@ test("撤销不拽错：落进原来就有的作品目录的，指着作品目�
     insertShareFollow({
       id, name: id, libraryId: null, shareUrl: "", shareCode: id, receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
       taskId: "t1", subPath, enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-      lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+      lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
     });
   // 作品目录原来就有（里面有第 5 集），一条追更本来就指着它
   drive.tree.addFile(`/tv/${work}/Season 01/怒呛人生 - S01E05.mkv`);
@@ -1575,7 +1575,7 @@ test("进程重启时 run 停在 applying 但清单上已经没事：收口成 d
   insertShareFollow({
     id: "f5", name: "BEEF", libraryId: null, shareUrl: "", shareCode: "abe", receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
     taskId: "t1", subPath: "inbox/BEEF.S01.1080p", enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
   });
   const run = await createRun({ taskId: "t1", subPath: "inbox" });
   await untilStatus(run.id, ["ready"]);
@@ -1685,7 +1685,7 @@ test("范围直接选在季目录上：季号按目录认、标题按剧目录�
     insertShareFollow({
       id, name: "僵尸", libraryId: null, shareUrl: "", shareCode, receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
       taskId: "t1", subPath, enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-      lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+      lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
     });
   follow("f3", "abe", "我和僵尸有个约会/season2");
   follow("f4", "abf", "我和僵尸有个约会");
@@ -1723,7 +1723,7 @@ test("整理整部剧：腾空删掉的季目录有自己的映射，指着 seas
     insertShareFollow({
       id, name: "僵尸", libraryId: null, shareUrl: "", shareCode, receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
       taskId: "t1", subPath, enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-      lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+      lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
     });
   follow("f5", "abg", "我和僵尸有个约会/season2");
   follow("f6", "abh", "我和僵尸有个约会");
@@ -1864,7 +1864,7 @@ test("撤销中途取消：退回的进统计；追更只在有文件真退回�
   insertShareFollow({
     id: "f9", name: "BEEF", libraryId: null, shareUrl: "", shareCode: "abz", receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
     taskId: "t1", subPath: "inbox/BEEF.S01.1080p", enabled: true, intervalMinutes: 60, status: "idle", lastError: "", errorStreak: 0,
-    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 1, updatedAt: 1,
+    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 1, updatedAt: 1,
   });
   const run = await createRun({ taskId: "t1", subPath: "inbox" });
   await untilStatus(run.id, ["ready"]);

@@ -413,6 +413,7 @@ const follow = (over: Partial<ShareFollow>): ShareFollow => ({
   nextCheckAt: 0,
   known: [],
   recent: [],
+  organized: [],
   createdAt: 0,
   updatedAt: 0,
   ...over,

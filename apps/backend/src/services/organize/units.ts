@@ -106,6 +106,12 @@ function parseWithRules(name: string, rules: ParsedRule[], subtitle = false): { 
   return { parsed, direct: r.direct };
 }
 
+/** 文件名里的片名（套识别词、归一过，去掉空的）：和分单元时的解析一个口径，追更记整理结果、核对提示时用 */
+export function titlesOfName(name: string, rules: ParsedRule[]): string[] {
+  const ext = extOf(name);
+  return parseWithRules(ext ? name.slice(0, -ext.length) : name, rules).parsed.titles.map(normalizeTitle).filter(Boolean);
+}
+
 /**
  * 从文件所在目录往上找单元根：季目录 / 花絮目录 / 艺术图目录归上一级，最多走到 boundary
  * （范围目录；范围本身是季目录时是它的上一级，见 buildUnits）

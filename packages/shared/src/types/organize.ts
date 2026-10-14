@@ -202,6 +202,26 @@ export interface OrganizeProgress {
   message: string;
 }
 
+/**
+ * 交给整理的新文件附带的识别提示：追更按上次整理同一个目录的结果给（见 ShareFollowOrganized）。
+ * 一个单元里的视频全被同一条提示覆盖、片名也对得上时，照它认作品、套季和集偏移
+ */
+export interface OrganizeHint {
+  /** 文件，相对任务 originPath */
+  path: string;
+  mediaType: OrganizeMediaType;
+  tmdbId: number;
+  /** 人定的季 / 集偏移：强制套用 */
+  season: number | null;
+  episodeOffset: number;
+  /** 只补空的季：文件自己什么季都没给时才用 */
+  seasonFallback: number | null;
+  /** 片名（归一过）：文件名写了片名、又对不上就不沿用 */
+  titles: string[];
+  /** 从哪来，写进识别理由和单元说明：追更名 */
+  label: string;
+}
+
 export interface OrganizeRun {
   id: string;
   taskId: string;

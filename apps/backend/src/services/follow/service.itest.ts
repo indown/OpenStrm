@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
-import type { AccountInfo, AppSettings, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AppSettings, OrganizeHint, ShareFollowOrganized, TaskDefinition } from "@openstrm/shared";
 import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
-import { getShareFollow } from "../../db/repositories/share-follows.js";
+import { getShareFollow, updateShareFollow } from "../../db/repositories/share-follows.js";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
 import { listTasks, replaceTasks } from "../../db/repositories/tasks.js";
 import { __test_resetCopy, listCopies } from "../copy/service.js";
@@ -26,7 +26,10 @@ import {
   deleteFollow,
   FOLLOW,
   getFollowWatcherStatus,
+  learnFollowOrganized,
   listFollows,
+  revertFollowOrganized,
+  rewriteFollowSubPaths,
   setFollowServiceDeps,
   startFollowWatcher,
   stopFollowWatcher,
@@ -294,14 +297,16 @@ test("转存失败：记错误、退避、失败的下次再试；连续 3 次�
 });
 
 /** 看交给自动整理的是什么：任务开 auto、配上 TMDB，createRun 换成记账的假函数，不真建 run */
-async function withOrganizeCalls(fn: (calls: Array<{ paths: string[]; trigger: string }>) => Promise<void>): Promise<void> {
+type OrganizeCall = { paths: string[]; trigger: string; hints?: OrganizeHint[] };
+
+async function withOrganizeCalls(fn: (calls: OrganizeCall[]) => Promise<void>): Promise<void> {
   const settings = readAppSettings();
   replaceAppSettings({ ...settings, tmdb: { apiKey: "x" } });
   replaceTasks([{ ...task, organize: { mode: "auto" } }]);
-  const calls: Array<{ paths: string[]; trigger: string }> = [];
+  const calls: OrganizeCall[] = [];
   setAutoOrganizeDeps({
     createRun: async (input) => {
-      calls.push({ paths: input.paths ?? [], trigger: input.trigger ?? "" });
+      calls.push({ paths: input.paths ?? [], trigger: input.trigger ?? "", ...(input.hints?.length ? { hints: input.hints } : {}) });
       return {} as never;
     },
   });
@@ -613,4 +618,111 @@ test("改订阅的任务：旧任务已经删了也能换到同类的新任务",
   const s = await subscribe();
   replaceTasks([sibling]);
   assert.equal(updateFollow(s.id, { taskId: "t1b" }).taskId, "t1b");
+});
+
+/* ------------------------------- 整理结果 ------------------------------- */
+
+const organizedRec = (over: Partial<ShareFollowOrganized> = {}): ShareFollowOrganized => ({
+  dir: "",
+  mediaType: "tv",
+  tmdbId: 7,
+  title: "The Show",
+  year: "2020",
+  season: null,
+  seasonFallback: null,
+  episodeOffset: 0,
+  workDir: "The Show (2020)",
+  filesDir: "The Show (2020)/Season 01",
+  titles: ["the show"],
+  runId: "r0",
+  prev: null,
+  at: 1,
+  ...over,
+});
+
+test("整理结果：这个目录的新文件（不含目录）带上提示交给整理，别的目录不带；不再沿用、换任务都清掉", async () => {
+  await withOrganizeCalls(async (calls) => {
+    const s = await subscribe();
+    updateShareFollow(s.id, { organized: [organizedRec({ season: 2, episodeOffset: -12 })] });
+    share.addFile("/E03.mkv", { hash: "c" });
+    share.addFile("/Season 3/S03E01.mkv", { hash: "s31" });
+    share.addFile("/Extras/bts.mkv", { hash: "f" });
+    drive.tree.addDir("/tv/The Show/Extras");
+    now += HOUR;
+    const r = await checkFollow(s.id);
+    assert.equal(r.follow.status, "idle", r.follow.lastError);
+    await __test_flushAutoOrganize();
+    const hints = calls.flatMap((c) => c.hints ?? []);
+    assert.deepEqual(hints.map((h) => h.path), ["The Show/E03.mkv"], "只给直接放在记录目录里的文件：新目录、别的目录都不带");
+    assert.deepEqual(
+      [hints[0].tmdbId, hints[0].season, hints[0].episodeOffset, hints[0].seasonFallback, hints[0].titles, hints[0].label],
+      [7, 2, -12, null, ["the show"], "The Show"],
+    );
+  });
+  const s = listFollows().follows[0];
+  assert.equal(updateFollow(s.id, { clearOrganized: true }).organized.length, 0, "不再沿用");
+  updateShareFollow(s.id, { organized: [organizedRec()] });
+  replaceTasks([task, { ...task, id: "t2", originPath: "tv2" }]);
+  drive.tree.addDir("/tv2");
+  assert.equal(updateFollow(s.id, { taskId: "t2" }).organized.length, 0, "换了任务，按旧任务记的目录用不上了");
+});
+
+test("记整理结果：快照里的原样文件按分享里的目录记，进了不同作品 / 是电影不记；值没变不刷 runId；整理页又动了这批文件就跟着改、偏移累加；撤销退回上一版；目录改写跟着走", async () => {
+  const s = await subscribe();
+  const unit = (over: Record<string, unknown> = {}) => ({ mediaType: "tv" as const, tmdbId: 7, title: "The Show", year: "2020", seasonOverride: null, episodeOffset: 0, dstRoot: "The Show (2020)", ...over });
+  const video = (src: string, dst: string, season: number | null, over: Record<string, unknown> = {}, titles = ["the show"]) => ({ src, dst, season, titles, unit: unit(over) });
+  const rows = () => getShareFollow(s.id)!.organized;
+  const S2 = "The Show (2020)/Season 02";
+
+  // 另一条记录的视频目录碰巧就是这次原样文件所在的目录：原样文件只按分享里的目录记，不当成在改那一条
+  updateShareFollow(s.id, { organized: [organizedRec({ dir: "Extras", filesDir: "The Show", season: 5, runId: "r0" })] });
+  // 第一次整理：人把季改成 2
+  learnFollowOrganized("t1", "r1", [
+    video("The Show/E01.mkv", `${S2}/The Show - S02E01.mkv`, 2, { seasonOverride: 2 }),
+    video("The Show/E02.mkv", `${S2}/The Show - S02E02.mkv`, 2, { seasonOverride: 2 }),
+    video("别处/E01.mkv", `${S2}/x.mkv`, 2, { seasonOverride: 2 }),
+  ]);
+  assert.deepEqual(rows().map((o) => [o.dir, o.season, o.seasonFallback, o.episodeOffset, o.workDir, o.filesDir, o.titles, o.runId, o.prev]), [
+    ["Extras", 5, null, 0, "The Show (2020)", "The Show", ["the show"], "r0", null],
+    ["", 2, null, 0, "The Show (2020)", S2, ["the show"], "r1", null],
+  ]);
+  updateShareFollow(s.id, { organized: rows().slice(1) });
+
+  // 追更每来一集整理一次，值一样：不刷 runId，片名照样补
+  learnFollowOrganized("t1", "r2", [video("The Show/E01.mkv", `${S2}/The Show - S02E01.mkv`, 2, { seasonOverride: 2 }, ["the show", "show"])]);
+  assert.deepEqual([rows()[0].runId, rows()[0].titles], ["r1", ["the show", "show"]]);
+
+  // 同一个目录的文件进了不同作品、或者认成电影：不猜，原来的留着
+  learnFollowOrganized("t1", "r3", [video("The Show/E01.mkv", "A/x.mkv", 1, { tmdbId: 8 }), video("The Show/E02.mkv", "B/y.mkv", 1)]);
+  learnFollowOrganized("t1", "r3", [video("The Show/E01.mkv", "Movie (2020)/m.mkv", null, { mediaType: "movie", tmdbId: 9 })]);
+  assert.equal(rows()[0].runId, "r1");
+
+  // 整理页又动了这批文件（改成第 3 季、集数 +5）：跟着改，偏移在上次的基础上累加；原来那条放进 prev
+  learnFollowOrganized("t1", "r4", [
+    video(`${S2}/The Show - S02E01.mkv`, "The Show (2020)/Season 03/The Show - S03E06.mkv", 3, { seasonOverride: 3, episodeOffset: 5 }),
+  ]);
+  const moved = rows()[0];
+  assert.deepEqual([moved.season, moved.episodeOffset, moved.filesDir, moved.runId, moved.prev?.runId, moved.prev?.season], [3, 5, "The Show (2020)/Season 03", "r4", "r1", 2]);
+  learnFollowOrganized("t1", "r5", [video("The Show (2020)/Season 03/The Show - S03E06.mkv", "The Show (2020)/Season 03/x.mkv", 3, { episodeOffset: 2 })]);
+  assert.deepEqual([rows()[0].season, rows()[0].episodeOffset], [3, 7], "人没定季就留着原来的季，偏移累加");
+
+  // 目录改写：作品目录挪走了，记的目录跟着走
+  rewriteFollowSubPaths("t1", [{ from: "The Show (2020)", to: "剧集/The Show (2020)" }]);
+  assert.deepEqual([rows()[0].workDir, rows()[0].filesDir], ["剧集/The Show (2020)", "剧集/The Show (2020)/Season 03"]);
+  assert.equal(getShareFollow(s.id)!.subPath, "The Show", "订阅落点不在映射里，不动");
+
+  // 撤销：退回上一版；最早那次也撤了就删掉
+  assert.equal(revertFollowOrganized("t1", "r5"), 1);
+  assert.deepEqual([rows()[0].season, rows()[0].episodeOffset, rows()[0].runId], [3, 5, "r4"]);
+  revertFollowOrganized("t1", "r4");
+  assert.deepEqual([rows()[0].season, rows()[0].runId, rows()[0].prev], [2, "r1", null]);
+  assert.equal(revertFollowOrganized("t1", "r9"), 0, "别的整理不动它");
+  revertFollowOrganized("t1", "r1");
+  assert.deepEqual(rows(), []);
+
+  // 没人定季：记的是落到的季（只补空）；落到几个季就不记
+  learnFollowOrganized("t1", "r6", [video("The Show/E01.mkv", `${S2}/a.mkv`, 2), video("The Show/E02.mkv", `${S2}/b.mkv`, 2)]);
+  assert.deepEqual([rows()[0].season, rows()[0].seasonFallback], [null, 2]);
+  learnFollowOrganized("t1", "r7", [video("The Show/E01.mkv", "The Show (2020)/Season 01/a.mkv", 1), video("The Show/E02.mkv", `${S2}/b.mkv`, 2)]);
+  assert.deepEqual([rows()[0].seasonFallback, rows()[0].filesDir], [null, "The Show (2020)"], "视频落到几个目录：认作品目录");
 });

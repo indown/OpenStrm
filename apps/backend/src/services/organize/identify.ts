@@ -194,6 +194,8 @@ export interface KnownId {
 
 export interface IdEvidence {
   direct?: DirectSpec;
+  /** 追更给的提示（这条追更上次整理同一个目录的结果，见 hints.ts）：识别词直指之后、记忆之前 */
+  follow?: { tmdbId: number; mediaType: OrganizeMediaType; source: string } | null;
   memory?: OrganizeMatchMemory | null;
   /** 目录名 id 标签 / 本地 nfo / 影库条目里的 tmdbid：按顺序试，第一条核对得上的用 */
   known?: KnownId | Array<KnownId | null> | null;
@@ -283,6 +285,9 @@ export async function identifyUnit(opts: IdentifyOptions, tmdb: TmdbApi): Promis
   if (direct) {
     const kind = direct.mediaType ?? (unit.kindHint === "movie" ? "movie" : "tv");
     match = await fromDetails(tmdb, kind, direct.tmdbId, "high", "识别词直接指定");
+  }
+  if (!match && evidence.follow) {
+    match = await fromDetails(tmdb, evidence.follow.mediaType, evidence.follow.tmdbId, "high", `沿用${evidence.follow.source}`);
   }
   if (!match && evidence.memory) {
     match = await fromDetails(tmdb, evidence.memory.mediaType, evidence.memory.tmdbId, "high", "上次确认过的识别结果");

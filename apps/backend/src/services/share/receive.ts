@@ -5,7 +5,7 @@
  *   sync  → 转存完立刻按条目生成 strm（目录按子树列，夸克能拿到转存后的顶层 id 就直接按 id 列）
  *   async → 转存完交给全量任务引擎在后台跑
  */
-import type { AppSettings, OrganizeTrigger, TaskDefinition } from "@openstrm/shared";
+import type { AppSettings, OrganizeHint, OrganizeTrigger, TaskDefinition } from "@openstrm/shared";
 import { HttpError } from "../../lib/http-error.js";
 import { driveErrorToHttp } from "../drive/errors.js";
 import { assertSameKind, providerForTask } from "../drive/registry.js";
@@ -60,6 +60,8 @@ export interface SaveSelectionOpts {
   createdDir?: string;
   /** 整理记录里的来源，不给就是「转存」；追更复用这条路时写成「追更」 */
   organizeTrigger?: Extract<OrganizeTrigger, "share" | "follow">;
+  /** 交给整理时带上的识别提示（追更按上次整理同一个目录的结果给），按落地后的文件路径对 */
+  organizeHints?: OrganizeHint[];
 }
 
 /**
@@ -230,7 +232,13 @@ export async function saveSelectionToTask(opts: SaveSelectionOpts): Promise<Save
       const { generatedCount, skippedCount, invalidNames } = await generateStrmForSelected({ task, provider, selectedItems, settings, subPath });
       // 刚转存进来的这些条目交给整理，识别失败或没开都不影响这次转存
       if (opts.organize !== false) {
-        events.emit("files.landed", { task, paths: organizePathsOf(subPath, items, opts.createdDir), trigger: opts.organizeTrigger ?? "share", mode: organizeMode });
+        events.emit("files.landed", {
+          task,
+          paths: organizePathsOf(subPath, items, opts.createdDir),
+          trigger: opts.organizeTrigger ?? "share",
+          mode: organizeMode,
+          ...(opts.organizeHints?.length ? { hints: opts.organizeHints } : {}),
+        });
       }
       return { mode: "sync", generatedCount, skippedCount, invalidNames, ...withCopy };
     } catch (err) {

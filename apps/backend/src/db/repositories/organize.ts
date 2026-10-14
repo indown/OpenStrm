@@ -8,6 +8,7 @@ import type {
   OrganizeConfidence,
   OrganizeErrorKind,
   OrganizeFileKind,
+  OrganizeHint,
   OrganizeItem,
   OrganizeItemStatus,
   OrganizeMatch,
@@ -153,6 +154,8 @@ export interface NewRun {
   accountName: string;
   scopePath: string;
   scopePaths: string[];
+  /** 新增路径带的识别提示（追更给的），预览 / 重新预览照用；不放进 OrganizeRun，界面用不着 */
+  hints?: OrganizeHint[];
   mode: OrganizeRunMode;
   trigger: OrganizeTrigger;
 }
@@ -166,6 +169,7 @@ export function insertRun(run: NewRun): OrganizeRun {
       accountName: run.accountName,
       scopePath: run.scopePath,
       scopePaths: JSON.stringify(run.scopePaths),
+      hints: JSON.stringify(run.hints ?? []),
       mode: run.mode,
       trigger: run.trigger,
       status: "planning",
@@ -174,6 +178,11 @@ export function insertRun(run: NewRun): OrganizeRun {
     })
     .run();
   return getRun(run.id)!;
+}
+
+export function getRunHints(id: string): OrganizeHint[] {
+  const row = db.select({ hints: organizeRuns.hints }).from(organizeRuns).where(eq(organizeRuns.id, id)).get();
+  return row ? parseJson<OrganizeHint[]>(row.hints, []) : [];
 }
 
 export function getRun(id: string): OrganizeRun | null {

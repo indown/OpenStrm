@@ -62,6 +62,7 @@ export type {
 export type {
   ShareFollow,
   ShareFollowEntry,
+  ShareFollowOrganized,
   ShareFollowRun,
   ShareFollowStatus,
   ShareFollowSummary,
@@ -72,6 +73,7 @@ export type {
   OrganizeAttentionReason,
   OrganizeAutoMode,
   OrganizeCandidate,
+  OrganizeHint,
   OrganizeCategoryRule,
   OrganizeCategorySettings,
   OrganizeColonStyle,

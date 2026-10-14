@@ -349,7 +349,7 @@ test("订过追更的分享带 following：active 还在追、stopped 停了；�
   const row = (over: Partial<ShareFollow>): ShareFollow => ({
     id: "f", name: "沙丘2", libraryId: null, shareUrl: "", shareCode: "", receiveCode: "", watchCid: "0", watchPath: "", scope: [""],
     taskId: "t115", subPath: "", enabled: true, intervalMinutes: 360, status: "idle", lastError: "", errorStreak: 0,
-    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], createdAt: 0, updatedAt: 0, ...over,
+    lastCheckedAt: null, lastChangeAt: null, nextCheckAt: 0, known: [], recent: [], organized: [], createdAt: 0, updatedAt: 0, ...over,
   });
   replaceTasks([{ id: "t115", account: "a", accountType: "115", originPath: "tv", targetPath: "resource-itest", strmPrefix: "/m" }]);
   replaceShareFollows([

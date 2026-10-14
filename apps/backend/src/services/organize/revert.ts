@@ -9,7 +9,7 @@ import { isAbortError } from "../../lib/errors.js";
 import { HttpError } from "../../lib/http-error.js";
 import { providerForTask } from "../drive/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
-import { rewriteFollowSubPaths } from "../follow/service.js";
+import { revertFollowOrganized, rewriteFollowSubPaths } from "../follow/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
 import { rewriteOfflineSubPaths } from "../offline/service.js";
 import { rewriteCopyPaths } from "../copy/queue.js";
@@ -278,8 +278,11 @@ function finishRevert(job: Job, runId: string, outcome: { fatal: string | null; 
   }
 }
 
-/** 撤销的收尾：腾空过的源目录退回来了，追更 / 云下载回执的目录和识别记忆也改回去 */
+/** 撤销的收尾：腾空过的源目录退回来了，追更 / 云下载回执的目录和识别记忆也改回去；追更这次记下的整理结果退回上一版 */
 export function afterRevert(task: TaskDefinition, provider: DriveProvider, units: OrganizeUnit[], items: OrganizeItem[]): void {
+  // 一个视频都没退回（撤销被取消、在网盘上失败）：文件还在整理后的位置，追更照旧沿用
+  const runId = units[0]?.runId ?? items[0]?.runId;
+  if (runId && items.some((it) => it.kind === "video" && it.status === "reverted")) revertFollowOrganized(task.id, runId);
   // 只认执行时真删了、撤销时退回了的源目录：删目录那条没成（目录没空、失败了）的，源目录一直在，没有落点从它挪走过
   const removedDirs = new Set(items.filter((it) => it.action === "rmdir" && it.status === "reverted").map((it) => relOf(task, it.srcPath)));
   // 只认这次新建、撤销时又删掉了的目标目录：原来就有（或者撤销后还留着东西）的目录，别的追更本来就可能指着它，不能拽回来——单元根那条也一样

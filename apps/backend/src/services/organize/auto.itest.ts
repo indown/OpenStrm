@@ -121,3 +121,25 @@ test("有攒着的自动整理（把握大的直接执行）时 autoOrganizeBusy
     setAutoOrganizeDeps(null);
   }
 });
+
+test("追更带的识别提示：攒着的按文件合并（同一个文件留后来的）；任务正有整理在跑（409）重排时也带着", async () => {
+  const hint = (path: string, season: number) => ({ path, mediaType: "tv" as const, tmdbId: 1, season, episodeOffset: 0, seasonFallback: null, titles: [], label: "某剧" });
+  const seen: Array<{ paths: string[]; hints: string[] }> = [];
+  let busy = true;
+  setAutoOrganizeDeps({
+    createRun: async (input) => {
+      seen.push({ paths: input.paths ?? [], hints: (input.hints ?? []).map((h) => `${h.path}:${h.season}`) });
+      if (busy) throw new HttpError(409, "任务已有一次整理在进行中");
+      return {} as never;
+    },
+    retryMs: 60_000,
+  });
+  events.emit("files.landed", { task, paths: ["某剧"], trigger: "follow", hints: [hint("某剧/E01.mkv", 2)] });
+  events.emit("files.landed", { task, paths: ["某剧/E02.mkv"], trigger: "follow", hints: [hint("某剧/E02.mkv", 2), hint("某剧/E01.mkv", 3)] });
+  await __test_flushAutoOrganize();
+  busy = false;
+  await __test_flushAutoOrganize();
+  const want = { paths: ["某剧", "某剧/E02.mkv"], hints: ["某剧/E01.mkv:3", "某剧/E02.mkv:2"] };
+  assert.deepEqual(seen, [want, want]);
+  __test_resetAutoOrganize();
+});

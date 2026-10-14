@@ -2,9 +2,9 @@
  * 预览：建 run → 列范围 → 分单元 → 识别（TMDB）→ 规划 → 落库；预览里改单元 / 换匹配；换匹配弹框的 TMDB 搜索。
  */
 import { randomUUID } from "node:crypto";
-import type { OrganizeCandidate, OrganizeConflictResolution, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
-import { getRun, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
+import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { isAbortError } from "../../lib/errors.js";
@@ -20,6 +20,7 @@ import type { TmdbDetails, TmdbSearchResult } from "../tmdb.js";
 import { messageOf } from "./failures.js";
 import { idTagFromName, identifyUnit, type IdEvidence, type KnownId, type TmdbApi } from "./identify.js";
 import { nfoEvidence } from "./nfo.js";
+import { hintFor, hintSource } from "./hints.js";
 import { duplicatePathFor, isStagingDir } from "../strm/staging.js";
 import { finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan } from "./plan.js";
 import { parseRules } from "./rules.js";
@@ -38,6 +39,8 @@ export interface CreateRunInput {
   subPath?: string;
   /** 只整理这些路径（相对任务 originPath）；自动触发时用 */
   paths?: string[];
+  /** 新文件带的识别提示（追更给的，见 hints.ts）；重新预览把原来的带过来 */
+  hints?: OrganizeHint[];
   mode?: OrganizeRunMode;
   trigger?: OrganizeTrigger;
 }
@@ -56,6 +59,10 @@ export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
   for (const p of [scopePath, ...scopePaths]) {
     if (splitPath(p).some((seg) => seg === "." || seg === "..")) throw new HttpError(400, `范围路径不合法：${p}`);
   }
+  // 提示只按路径对文件，路径不合法的直接丢掉，同一个文件留最后一条
+  const hints = [...new Map((input.hints ?? []).map((h) => [splitPath(h.path).join("/"), h] as const)).entries()]
+    .filter(([p]) => p && !splitPath(p).some((seg) => seg === "." || seg === ".."))
+    .map(([path, h]) => ({ ...h, path }));
   const trigger = input.trigger ?? "manual";
   if (handPicked(trigger)) {
     // 手动选的多个范围：套在别的范围里面的去掉（已经整个包含了）
@@ -85,6 +92,7 @@ export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
     accountName: provider.account.name,
     scopePath,
     scopePaths,
+    hints,
     mode: input.mode ?? "manual",
     trigger,
   });
@@ -510,6 +518,7 @@ async function preview(job: Job, runId: string): Promise<void> {
   };
   state.refPaths = [...rewriteFollowSubPaths(task.id, [], true), ...state.offlineRefs, ...rewriteCopyPaths(task.id, task.originPath, [], true)];
   const library = listLibraryEntries();
+  const hints = getRunHints(runId);
   const rows: OrganizeUnit[] = [];
   const plans: UnitPlan[] = [];
   let i = 0;
@@ -517,7 +526,9 @@ async function preview(job: Job, runId: string): Promise<void> {
     signal.throwIfAborted();
     setProgress(job, "identify", i++, units.length, `识别 ${unit.rawName}`);
     const absRoot = absOf(task, unit.rootPath);
+    const followed = hintFor(unit, hints);
     const evidence: IdEvidence = {
+      follow: followed.hint ? { tmdbId: followed.hint.tmdbId, mediaType: followed.hint.mediaType, source: hintSource(followed.hint) } : null,
       memory: recallMatch(provider.account.name, absRoot),
       // 目录名里的 [tmdbid=…] 多半是整理自己写的，排最前；本地 nfo 可能是上传者的刮削器写的，识别时要核对标题；影库条目最后
       known: [idTagFromName(unit.rawName, unit.kindHint), await nfoEvidence(resolveInDataDir(task.targetPath), unit), libraryEvidence(unit, library)],
@@ -535,11 +546,23 @@ async function preview(job: Job, runId: string): Promise<void> {
       if (isAbortError(err) || signal.aborted) throw err;
       jobLog(job, `识别「${unit.rawName}」失败：${messageOf(err)}`);
     }
+    // 追更的提示用上了（认出来的就是提示里的作品）：人定的季 / 集偏移照样强制，补空季只补空，不再看记忆
+    const hint = followed.hint && match && match.tmdbId === followed.hint.tmdbId && match.mediaType === followed.hint.mediaType ? followed.hint : null;
+    const hintNote = followed.note ?? (followed.hint && match && !hint ? `认出来的不是${hintSource(followed.hint)}里的作品，季和集偏移没沿用` : "");
+    if (hintNote) {
+      identifyNotes = [...identifyNotes, hintNote];
+      jobLog(job, `「${unit.rawName}」${hintNote}`);
+    }
     state.episodeTitles.set(unit.key, episodeTitles);
     state.identifyNotes.set(unit.key, identifyNotes);
     // 引用数等删空目录的边界定了再算（refsOf）
     const row = toUnitRow(runId, unit, match, null, 0);
-    const fill = memoryFill(evidence.memory, match);
+    let fill: EpisodeFill | null;
+    if (hint) {
+      row.seasonOverride = hint.season;
+      row.episodeOffset = hint.episodeOffset;
+      fill = hint.seasonFallback !== null ? { season: hint.seasonFallback, episodeOffset: 0, from: `沿用${hintSource(hint)}` } : null;
+    } else fill = memoryFill(evidence.memory, match);
     if (fill) state.fills.set(unit.key, fill);
     const plan = planUnit(
       { unit, match, seasonOverride: row.seasonOverride, episodeOffset: row.episodeOffset, fill, episodeTitles, selected: row.selected },

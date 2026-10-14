@@ -939,6 +939,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "clearOrganized": {
+          "type": "boolean",
+          "const": true
         }
       },
       "required": [

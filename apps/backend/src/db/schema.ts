@@ -357,6 +357,8 @@ export const shareFollows = sqliteTable(
     nextCheckAt: integer("next_check_at").notNull().default(0),
     known: text("known").notNull().default("[]"),
     recent: text("recent").notNull().default("[]"),
+    /** 整理结果（JSON，ShareFollowOrganized[]）：新文件交给整理时照着用 */
+    organized: text("organized").notNull().default("[]"),
     createdAt: integer("created_at").notNull().default(sql`(unixepoch())`),
     updatedAt: integer("updated_at").notNull().default(sql`(unixepoch())`),
   },
@@ -382,6 +384,8 @@ export const organizeRuns = sqliteTable(
     accountName: text("account_name").notNull().default(""),
     scopePath: text("scope_path").notNull().default(""),
     scopePaths: text("scope_paths").notNull().default("[]"),
+    /** 新增路径带的识别提示（JSON，OrganizeHint[]，追更给的）：重新预览也照用 */
+    hints: text("hints").notNull().default("[]"),
     mode: text("mode").notNull().default("manual"),
     trigger: text("trigger").notNull().default("manual"),
     status: text("status").notNull().default("planning"),

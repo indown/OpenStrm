@@ -533,6 +533,8 @@ export type FollowPatch = Partial<{
   taskId: string;
   subPath: string;
   receiveCode: string;
+  /** 不再沿用整理结果：新集交给整理时重新识别 */
+  clearOrganized: boolean;
 }>;
 
 export type TelegramNotifyPrefs = Required<TelegramNotifySettings>;

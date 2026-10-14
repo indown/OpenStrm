@@ -6,7 +6,7 @@
  *   - 任务已有一次整理在进行中（409）就过一分钟再试，路径合并进去。
  *   - 任何失败只记日志：自动整理是锦上添花，不能把转存 / 追更本身搞失败。
  */
-import type { OrganizeRun, OrganizeTrigger, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeHint, OrganizeRun, OrganizeTrigger, TaskDefinition } from "@openstrm/shared";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { HttpError } from "../../lib/http-error.js";
@@ -28,6 +28,8 @@ interface Pending {
   trigger: OrganizeTrigger;
   /** 合并进来的请求里只要有一个要 review，整个 run 就 review */
   mode: "review" | "auto";
+  /** 新文件带的识别提示，按文件路径合并 */
+  hints: Map<string, OrganizeHint>;
   timer: NodeJS.Timeout;
   /** 等着看建出来的是哪一条的（智能体转存完要把 runId 带回去）：建成回 run，建不成回 null */
   waiters: Array<(run: OrganizeRun | null) => void>;
@@ -78,7 +80,7 @@ function onFilesLanded(input: FilesLandedEvent): void {
     if ((input.mode ?? taskAutoMode(input.task, settings)) !== "off") log.debug({ taskId: input.task.id }, "任务开了自动整理但没配 TMDB，跳过");
     return;
   }
-  schedule(input.task.id, paths, input.trigger, mode, input.debounce ? deps.debounceMs : 0);
+  schedule(input.task.id, paths, input.trigger, mode, input.debounce ? deps.debounceMs : 0, [], input.hints ?? []);
 }
 
 function schedule(
@@ -88,10 +90,12 @@ function schedule(
   mode: "review" | "auto",
   delayMs: number,
   waiters: Pending["waiters"] = [],
+  hints: readonly OrganizeHint[] = [],
 ): void {
   const existing = pending.get(taskId);
   if (existing) {
     for (const p of paths) existing.paths.add(p);
+    for (const h of hints) existing.hints.set(h.path, h);
     if (mode === "review") existing.mode = "review";
     existing.waiters.push(...waiters);
     clearTimeout(existing.timer);
@@ -99,7 +103,7 @@ function schedule(
     existing.timer.unref?.();
     return;
   }
-  const entry: Pending = { paths: new Set(paths), trigger, mode, timer: setTimeout(() => fire(taskId), delayMs), waiters };
+  const entry: Pending = { paths: new Set(paths), trigger, mode, hints: new Map(hints.map((h) => [h.path, h])), timer: setTimeout(() => fire(taskId), delayMs), waiters };
   entry.timer.unref?.();
   pending.set(taskId, entry);
 }
@@ -111,15 +115,16 @@ async function fire(taskId: string): Promise<void> {
   const task = getTask(taskId);
   if (!task) return;
   const paths = [...entry.paths];
+  const hints = [...entry.hints.values()];
   try {
-    const run = await deps.createRun({ taskId, paths, mode: entry.mode, trigger: entry.trigger });
+    const run = await deps.createRun({ taskId, paths, mode: entry.mode, trigger: entry.trigger, ...(hints.length ? { hints } : {}) });
     log.info({ taskId, runId: run.id, paths: paths.length, trigger: entry.trigger, mode: entry.mode }, "自动整理已建 run");
     lastCreated.set(taskId, { run, at: Date.now() });
     for (const w of entry.waiters) w(run);
   } catch (err) {
     if (err instanceof HttpError && err.status === 409) {
       log.debug({ taskId }, "任务有整理在进行中，一分钟后再试");
-      schedule(taskId, paths, entry.trigger, entry.mode, deps.retryMs, entry.waiters);
+      schedule(taskId, paths, entry.trigger, entry.mode, deps.retryMs, entry.waiters, hints);
       return;
     }
     log.warn({ err, taskId }, "自动整理建 run 失败");

@@ -1,11 +1,11 @@
 /**
- * 追更工具集：列订阅、立即检查、改（间隔 / 暂停 / 恢复 / 改名）、删。
+ * 追更工具集：列订阅、立即检查、改（间隔 / 暂停 / 恢复 / 改名 / 不再沿用整理结果）、删。
  * 订阅由 share_save(follow: true) 建；这里是之后的管理，和界面上的「追更」页一样。
  *
  * 引用订阅可以用 id 或名字（名字重复时报错并列出候选）。分享链接里的提取码不回给模型：用不着，也不该到处传。
  */
 import { z } from "zod";
-import type { ShareFollowRun, ShareFollowStatus, ShareFollowSummary } from "@openstrm/shared";
+import type { ShareFollowOrganized, ShareFollowRun, ShareFollowStatus, ShareFollowSummary } from "@openstrm/shared";
 import { getShareFollow } from "../../../db/repositories/share-follows.js";
 import { getTask } from "../../../db/repositories/tasks.js";
 import { FOLLOW, checkFollow, deleteFollow, listFollows, updateFollow } from "../../follow/service.js";
@@ -35,6 +35,15 @@ const runView = (r: ShareFollowRun) => ({
   ...(r.error ? { error: r.error } : {}),
 });
 
+/** 整理沿用：新文件交给整理时照着认的作品、季、集偏移 */
+const organizedView = (o: ShareFollowOrganized) => ({
+  ...(o.dir ? { shareDir: o.dir } : {}),
+  work: `${o.title}${o.year ? ` (${o.year})` : ""}`,
+  tmdbId: o.tmdbId,
+  ...(o.season !== null ? { season: o.season } : o.seasonFallback !== null ? { seasonIfMissing: o.seasonFallback } : {}),
+  ...(o.episodeOffset ? { episodeOffset: o.episodeOffset } : {}),
+});
+
 function followView(f: ShareFollowSummary, detail = false) {
   const task = getTask(f.taskId);
   return {
@@ -55,6 +64,7 @@ function followView(f: ShareFollowSummary, detail = false) {
     known: f.knownCount,
     ...(detail ? { link: shareLinkWithoutPassword(f.shareUrl) } : {}),
     ...(f.recent.length ? { recent: f.recent.slice(0, detail ? 5 : 2).map(runView) } : {}),
+    ...(f.organized.length ? { organized: f.organized.map(organizedView) } : {}),
   };
 }
 
@@ -86,7 +96,7 @@ const LIST_MAX = 50;
 export const followListTool = defineTool({
   name: "follow_list",
   title: "追更订阅",
-  description: `列出追更订阅：盯住一个网盘分享里的目录，定时把新增的文件转存到某个同步任务并生成 strm。每条带状态（正常 / 出错 / 分享失效 / 很久没更新自动暂停）、检查间隔、上次检查和上次有更新的时间、最近几次有动静的检查。可按名字或任务过滤、只看出了问题的；默认 ${LIST_DEFAULT} 条，最多 ${LIST_MAX} 条。给了 follow 就只看这一条的详情。`,
+  description: `列出追更订阅：盯住一个网盘分享里的目录，定时把新增的文件转存到某个同步任务并生成 strm。每条带状态（正常 / 出错 / 分享失效 / 很久没更新自动暂停）、检查间隔、上次检查和上次有更新的时间、最近几次有动静的检查；整理过的带 organized：分享里各目录的新文件交给整理时照着认的作品、季（season 强制，seasonIfMissing 只给没写季的文件）、集偏移。可按名字或任务过滤、只看出了问题的；默认 ${LIST_DEFAULT} 条，最多 ${LIST_MAX} 条。给了 follow 就只看这一条的详情。`,
   scope: "read",
   toolset: "follow",
   annotations: LOCAL_READ,
@@ -166,7 +176,7 @@ export const followCheckTool = defineTool({
 export const followUpdateTool = defineTool({
   name: "follow_update",
   title: "修改追更",
-  description: `改一条追更订阅：暂停 / 恢复（enabled）、检查间隔（分钟，${FOLLOW.MIN_INTERVAL_MIN} 到 ${FOLLOW.MAX_INTERVAL_MIN}）、名字。恢复一条出错、失效或自动暂停的订阅会清掉错误、尽快检查一次。**这会改订阅的设置，调用前先把要改什么告诉用户，得到同意再调用。**`,
+  description: `改一条追更订阅：暂停 / 恢复（enabled）、检查间隔（分钟，${FOLLOW.MIN_INTERVAL_MIN} 到 ${FOLLOW.MAX_INTERVAL_MIN}）、名字、不再沿用整理结果（clearOrganized：新文件交给整理时重新识别，沿用的作品 / 季认错了时用）。恢复一条出错、失效或自动暂停的订阅会清掉错误、尽快检查一次。**这会改订阅的设置，调用前先把要改什么告诉用户，得到同意再调用。**`,
   scope: "write",
   toolset: "follow",
   annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: false },
@@ -175,16 +185,18 @@ export const followUpdateTool = defineTool({
     enabled: z.boolean().optional().describe("false 暂停、true 恢复"),
     intervalMinutes: z.number().int().min(FOLLOW.MIN_INTERVAL_MIN).max(FOLLOW.MAX_INTERVAL_MIN).optional().describe(`检查间隔（分钟），${FOLLOW.MIN_INTERVAL_MIN} 到 ${FOLLOW.MAX_INTERVAL_MIN}`),
     name: z.string().min(1).max(200).optional().describe("新名字"),
+    clearOrganized: z.literal(true).optional().describe("true：不再沿用整理结果，新文件交给整理时重新识别"),
   }),
   async run(args) {
-    if (args.enabled === undefined && args.intervalMinutes === undefined && args.name === undefined) {
-      throw new ToolError("VALIDATION", "enabled、intervalMinutes、name 至少给一个");
+    if (args.enabled === undefined && args.intervalMinutes === undefined && args.name === undefined && !args.clearOrganized) {
+      throw new ToolError("VALIDATION", "enabled、intervalMinutes、name、clearOrganized 至少给一个");
     }
     const f = resolveFollow(args.follow);
     const updated = updateFollow(f.id, {
       ...(args.enabled !== undefined ? { enabled: args.enabled } : {}),
       ...(args.intervalMinutes !== undefined ? { intervalMinutes: args.intervalMinutes } : {}),
       ...(args.name !== undefined ? { name: args.name } : {}),
+      ...(args.clearOrganized ? { clearOrganized: true } : {}),
     });
     return { follow: followView(updated) };
   },

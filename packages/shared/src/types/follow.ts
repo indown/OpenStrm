@@ -29,6 +29,36 @@ export interface ShareFollowRun {
   error?: string;
 }
 
+/**
+ * 追更转存来的文件整理过之后记下的结果。分享里这个目录以后来的新文件交给整理时照着用（作品、季、集偏移），
+ * 不用再认一遍，改过的季也不会丢；之后在整理页又动了这批文件（换匹配、改季）就跟着改，撤销那次整理就退回去。只记剧集
+ */
+export interface ShareFollowOrganized {
+  /** 分享里的目录（相对被盯目录，"" 是被盯目录本身）：只管直接放在这一层的文件 */
+  dir: string;
+  mediaType: "tv";
+  tmdbId: number;
+  title: string;
+  year: string;
+  /** 整理时人定的季：新文件照样强制用 */
+  season: number | null;
+  /** 没人定季时，这批文件最后落到的季（都一样才记）：新文件自己什么季都没给时才用 */
+  seasonFallback: number | null;
+  /** 整理时的集偏移：新文件照样加 */
+  episodeOffset: number;
+  /** 作品目录（相对任务 originPath） */
+  workDir: string;
+  /** 这批视频现在所在的目录（相对任务 originPath）：之后整理页挪走这里的视频，就是在改这条记录 */
+  filesDir: string;
+  /** 这批文件原名里的片名（归一过）：新文件写了片名、又对不上的不沿用（同一个目录里混着别的剧） */
+  titles: string[];
+  /** 最后一次真改了它的整理；撤销那次整理就退回 prev（上一版，往前最多留几层），没有 prev 就删 */
+  runId: string;
+  prev: ShareFollowOrganized | null;
+  /** ms */
+  at: number;
+}
+
 export interface ShareFollow {
   id: string;
   name: string;
@@ -64,6 +94,8 @@ export interface ShareFollow {
   known: ShareFollowEntry[];
   /** 最近 20 次有动静的检查，新的在前 */
   recent: ShareFollowRun[];
+  /** 整理结果：分享里各目录的新文件交给整理时照着用（见 ShareFollowOrganized） */
+  organized: ShareFollowOrganized[];
   /** unix 秒 */
   createdAt: number;
   updatedAt: number;

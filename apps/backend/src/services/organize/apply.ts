@@ -9,7 +9,7 @@ import { isAbortError } from "../../lib/errors.js";
 import { HttpError } from "../../lib/http-error.js";
 import { providerForTask } from "../drive/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
-import { rewriteFollowSubPaths } from "../follow/service.js";
+import { learnFollowOrganized, rewriteFollowSubPaths } from "../follow/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
 import { rewriteOfflineSubPaths } from "../offline/service.js";
 import { rewriteCopyPaths } from "../copy/queue.js";
@@ -18,6 +18,9 @@ import { classifyFailure, FAILURE_LABEL, messageOf, OrganizeFailure, retryableIt
 import { mirrorDelete, mirrorRelocate, mirrorRmdir } from "../strm/mirror.js";
 import { copyLayout, log, deps, type Job, jobs, beginOp, assertNoOps, jobLog, setProgress, baseOf, dirOf, absOf, relOf, computeStats, startJob, planStates, WORK_ACTIONS, activeItemFilter, intermediateOf, releaseHeldCopies, applicability, failureGroups, dirMappings, movedFiles, accountTasks } from "./run-state.js";
 import { type DirEntryRef, type ListCtx, type ExecCtx, listCtx, noteRenamed, noteRemoved, noteMoved, dirIdOf, namesIn, nodeOf, occupied, clashError, withRetry } from "./exec-ctx.js";
+import { organizedVideos } from "./hints.js";
+import { parseRules } from "./rules.js";
+import { resolveOrganizeSettings } from "./settings.js";
 
 async function execute(job: Job, runId: string, only: Set<string> | null): Promise<void> {
   const run = getRun(runId)!;
@@ -442,10 +445,15 @@ function finishApply(job: Job, runId: string, outcome: { fatal: string | null; a
   }
 }
 
-/** 收尾：追更 / 云下载回执的目录改写、识别记忆（先把旧记忆挪到新路径，再写这次确认的，新的才不会被旧的盖掉） */
+/**
+ * 收尾：追更记下整理结果、追更 / 云下载回执的目录改写、识别记忆（先把旧记忆挪到新路径，再写这次确认的，新的才不会被旧的盖掉）。
+ * 追更按整理前的路径对快照，要在改写追更落点之前
+ */
 export function afterApply(task: TaskDefinition, provider: DriveProvider, units: OrganizeUnit[], items: OrganizeItem[]): void {
   const removedDirs = new Set(items.filter((it) => it.action === "rmdir" && it.status === "done").map((it) => relOf(task, it.srcPath)));
   const mappings = dirMappings(task, units, items, removedDirs);
+  const runId = units[0]?.runId ?? items[0]?.runId;
+  if (runId) learnFollowOrganized(task.id, runId, organizedVideos(task, units, items, parseRules(resolveOrganizeSettings(readAppSettings()).rules).rules));
   for (const m of mappings) if (m.root) repathMatches(provider.account.name, absOf(task, m.from), absOf(task, m.to));
   for (const u of units) {
     if (!u.match || !u.dstRoot || !u.remember) continue;

@@ -11,7 +11,7 @@ import { idParamsSchema, shareFollowCreateSchema, shareFollowPatchSchema } from 
  * 分享追更订阅。转存接口（/api/115/share、/api/library/:id/save-to-task）带 follow 参数时会顺手建订阅，
  * 这里是之后的管理：列表、改、删、立即检查。
  *
- * 对智能体令牌开放的档位和追更工具一致：看是 read、改（名字 / 开关 / 间隔）和立即检查是 write（检查会把新增转存进网盘）、删是 danger。
+ * 对智能体令牌开放的档位和追更工具一致：看是 read、改（名字 / 开关 / 间隔 / 不再沿用整理结果）和立即检查是 write（检查会把新增转存进网盘）、删是 danger。
  * 令牌不能建订阅、不能改订阅转存到哪（任务 / 子目录）和提取码：那等于一个新的转存入口，只有转存那一组（share_save）能做；
  * 列表里给令牌的不带提取码
  */
@@ -22,8 +22,8 @@ function forToken({ receiveCode: _receiveCode, ...f }: ShareFollowSummary): Omit
   return { ...f, shareUrl: shareLinkWithoutPassword(f.shareUrl) };
 }
 
-/** 令牌能改的字段：名字、开关、检查间隔 */
-const TOKEN_PATCH_FIELDS = new Set(["name", "enabled", "intervalMinutes"]);
+/** 令牌能改的字段：名字、开关、检查间隔、不再沿用整理结果 */
+const TOKEN_PATCH_FIELDS = new Set(["name", "enabled", "intervalMinutes", "clearOrganized"]);
 
 export default async function (fastify: FastifyInstance) {
   fastify.get("/api/follow", { preHandler: [fastify.authenticate], config: { agentScope: "read", agentToolset: "follow" } }, async (request) => {
@@ -41,7 +41,7 @@ export default async function (fastify: FastifyInstance) {
     const patch = parse(shareFollowPatchSchema, request.body);
     if (isToken(request)) {
       const denied = Object.keys(patch).filter((k) => !TOKEN_PATCH_FIELDS.has(k));
-      if (denied.length) throw new HttpError(403, `令牌只能改订阅的名字、开关和检查间隔，${denied.join("、")} 要在管理界面上改`, { code: "FIELD_NOT_ALLOWED", fields: denied });
+      if (denied.length) throw new HttpError(403, `令牌只能改订阅的名字、开关、检查间隔和不再沿用整理结果，${denied.join("、")} 要在管理界面上改`, { code: "FIELD_NOT_ALLOWED", fields: denied });
     }
     const updated = updateFollow(id, patch);
     return isToken(request) ? forToken(updated) : updated;
