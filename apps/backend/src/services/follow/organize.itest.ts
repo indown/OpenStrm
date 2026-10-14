@@ -218,6 +218,7 @@ test("整理页给作品目录改季、加集偏移：追更的记录跟着改�
   await untilStatus(fix.id, ["reverted"]);
   const back = getShareFollow(f.id)!.organized[0];
   assert.deepEqual([back.season, back.seasonFallback, back.episodeOffset, back.runId], [null, 1, 0, first.id]);
+  assert.equal(back.filesDir, `${WORK}/Season 01`, "退回的是改季之前的样子：这次整理的目录映射不套到上一版上");
 });
 
 test("同一个分享目录里来了别的剧（片名对不上）：不沿用，照常识别，说一句为什么；不再沿用之后照常识别", async () => {

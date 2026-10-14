@@ -708,7 +708,7 @@ function mapPath(p: string, mappings: DirMapping[]): string | null {
 }
 
 /**
- * 整理把任务下的目录挪走后，订阅的落点跟着改：sub_path 等于或位于 from 之下的改成 to；整理结果里记的作品目录 / 视频所在目录也一样。
+ * 整理把任务下的目录挪走后，订阅的落点跟着改：sub_path 等于或位于 from 之下的改成 to；整理结果里记的作品目录 / 视频所在目录也一样（只改当前版，见 mapOrganized）。
  * dryRun 只返回会受影响的 subPath（预览里显示「被 N 条追更引用」）。返回改过（或会改）的 subPath 列表
  */
 export function rewriteFollowSubPaths(taskId: string, mappings: DirMapping[], dryRun = false): string[] {
@@ -744,12 +744,15 @@ function trimHistory(o: ShareFollowOrganized, depth = 1): ShareFollowOrganized {
   return { ...o, prev: depth >= ORGANIZED_HISTORY_KEEP ? null : trimHistory(o.prev, depth + 1) };
 }
 
-/** 一条记录连同上一版们的目录按映射改写；没变就原样返回 */
+/**
+ * 一条记录的目录按映射改写；没变就原样返回。只改当前这一版：上一版是那次整理之前的样子，撤销那次整理时原样退回去——
+ * 这次整理自己的目录映射（`Season 02` → `Season 03`）套到上一版上，撤销后就指着已经不在的目录了。
+ * 上一版不会被后来的整理挪走：动过这批文件的整理得先撤销，才能撤销更早的那次
+ */
 function mapOrganized(o: ShareFollowOrganized, mappings: DirMapping[]): ShareFollowOrganized {
   const workDir = mapPath(o.workDir, mappings);
   const filesDir = mapPath(o.filesDir, mappings);
-  const prev = o.prev ? mapOrganized(o.prev, mappings) : null;
-  return workDir === null && filesDir === null && prev === o.prev ? o : { ...o, workDir: workDir ?? o.workDir, filesDir: filesDir ?? o.filesDir, prev };
+  return workDir === null && filesDir === null ? o : { ...o, workDir: workDir ?? o.workDir, filesDir: filesDir ?? o.filesDir };
 }
 
 function hintOf(o: ShareFollowOrganized, path: string, label: string): OrganizeHint {
