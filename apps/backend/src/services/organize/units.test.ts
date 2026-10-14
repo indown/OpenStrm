@@ -224,3 +224,14 @@ test("多个范围：每个范围照单一范围的规则来——两个季目�
   const inbox = units.filter((u) => u.rootPath === "inbox");
   assert.deepEqual(inbox.map((u) => u.parsed.title).sort(), ["Avatar", "Inception"], "范围根的名字（inbox）不当标题，按文件标题拆");
 });
+
+test("范围直接选在「某剧 第二季」上、文件名带片名：标题用文件的，文件没写季就用目录名里的季；tv / inbox 这种范围照旧", () => {
+  const names = ["我和僵尸有个约会 第二季/我和僵尸有个约会.EP01.mkv", "我和僵尸有个约会 第二季/我和僵尸有个约会.EP02.mkv"];
+  const [scoped] = buildUnits(files(names), { ...opts, scopePath: "我和僵尸有个约会 第二季" });
+  assert.equal(scoped.parsed.title, "我和僵尸有个约会");
+  assert.equal(scoped.parsed.season, 2, "目录名里的季");
+  const [auto] = buildUnits(files(names), { ...opts, scopes: [""] });
+  assert.equal(auto.parsed.season, 2, "自动整理按新增路径走时本来就认得，两边一致");
+  const [inbox] = buildUnits(files(["inbox/我和僵尸有个约会.EP01.mkv", "inbox/我和僵尸有个约会.EP02.mkv"]), { ...opts, scopePath: "inbox" });
+  assert.equal(inbox.parsed.season, undefined, "范围目录名里没有季");
+});

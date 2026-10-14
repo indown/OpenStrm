@@ -275,6 +275,8 @@ export function buildUnits(entries: ScopeEntry[], opts: BuildUnitsOptions): Unit
       // 范围根用文件的标题；任务根（""）的名字是任务目录名，文件没标题也不能拿它去搜；用户选的那一层文件没标题时才退回目录名
       const useFiles = !dirTitleOk || root === "" || (atScopeRoot && !!common);
       const parsed: ParsedName = useFiles ? { ...fileParsed } : { ...rootParsed.parsed };
+      // 范围直接选在「某剧 第二季」上、文件名又带片名：标题用文件的，文件没写季就用目录名里的季（不然规划成第 1 季）
+      if (useFiles && root !== "" && dirTitleOk && parsed.season === undefined && rootParsed.parsed.season !== undefined) parsed.season = rootParsed.parsed.season;
       // 另一边的标题也留作搜索候选（目录叫「怒呛人生」、文件叫 BEEF，两个都该试）
       const extra = (useFiles ? (dirTitleOk ? rootParsed.parsed.titles : []) : fileParsed.titles).filter((t) => t && !parsed.titles.includes(t));
       parsed.titles = [...parsed.titles, ...extra];
