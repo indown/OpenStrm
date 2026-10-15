@@ -1,6 +1,6 @@
 # 追更与整理：新集沿用上次的整理结果 —— 分析与计划
 
-> 状态：**四块都已实施、提交，2026-10-14 115 / 夸克真机验过**（真机发现的问题已修）；评审、推送、发版等用户定。最后更新：2026-10-14
+> 状态：**已随 v2.17.0-rc.2 发出**（2026-10-14，de1b7c9；四块 + 真机修补，115 / 夸克真机验过）。最后更新：2026-10-14
 
 ## 起因
 
@@ -301,3 +301,15 @@ interface ShareFollowOrganized {
 - 回归：`follow/organize.itest.ts` 撤销那条加了目录断言（修之前失败、修之后通过）；实验库重启后重做「改季 → 撤销」，上一版保持 `Season 02`，撤销后退回 `Season 02`、10 项全部退回。
 
 实验后端日志里，除了改临时口令之前那句「仍在使用默认密码」，没有别的告警和报错。
+
+## 发布
+
+2026-10-14：用户说「发个 rc 吧」。
+
+- 先单独提交上次留在工作区的 rc.1 发布记录（e9b7f6e，docs(plans)）。
+- `de1b7c9 chore(release): v2.17.0-rc.2`，tag `v2.17.0-rc.2`，只推 v2 和 tag，main 未动（还在 aac3367 = v2.16.0）。
+- 这次带的提交：e3f16ad / d13fb27 / 39e6414 / 8a3959b / 763ff21，含迁移 0023。
+- Release 四个作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）和 CI@v2 全绿。
+- Docker Hub `v2.17.0-rc.2` = `66113196a38f`（amd64 + arm64），latest 仍是 v2.16.0 的 `1e98f156001d`。
+- GitHub Release 是 prerelease，仓库最新仍是 v2.16.0。
+- 升级说明交用户手动贴。
