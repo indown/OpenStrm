@@ -23,7 +23,7 @@ import { jobs, assertNoOps, planStates } from "./run-state.js";
 import { createRun } from "./preview.js";
 
 export { ORGANIZE_LIMITS, handPicked, setOrganizeDeps, waitForRun, isRunBusy, runDone, runProgress, relOf, planFingerprint, applicability, revertability, failureGroups } from "./run-state.js";
-export { createRun, readyRunsWithin, collapseStaleReadyRuns, patchPlan, patchUnit, patchUnits, patchItems, searchCandidates, lookupWork, lookupCandidate } from "./preview.js";
+export { createRun, readyRunsWithin, collapseStaleReadyRuns, patchPlan, patchUnit, patchUnits, patchItems, searchCandidates, lookupWork, lookupCandidate, probeUnits, decorateItemsWithProbes } from "./preview.js";
 export type { CreateRunInput, PlanPatch, ItemsPatch } from "./preview.js";
 export { applyRun, skipItems } from "./apply.js";
 export { revertRun } from "./revert.js";

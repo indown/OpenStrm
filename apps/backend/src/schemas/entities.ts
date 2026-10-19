@@ -172,6 +172,7 @@ export const organizeSettingsSchema = z
     cleanupEmptyDirs: z.boolean().optional(),
     extras: z.enum(["keep", "move"]).optional(),
     auto: z.enum(["off", "review", "auto"]).optional(),
+    probe: z.enum(["off", "missing"]).optional(),
   });
 
 /** PUT /api/settings 的 body：只校验认识的键的类型，多出来的顶层键原样存 */

@@ -35,6 +35,7 @@ import type { OrganizeNaming,
   OrganizeItem,
   OrganizeMatchMemory,
   OrganizeRun,
+  OrganizeProbeResult,
   OrganizeRunDetail,
   OrganizeRunSummary,
   OrganizeSkipResult,
@@ -764,6 +765,12 @@ export const api = {
      */
     patchItems: (id: string, ids: string[], patch: { selected?: boolean; resolve?: OrganizeConflictResolution | null }) =>
       data(axiosInstance.put<{ changed: number }>(`/api/organize/runs/${encodeURIComponent(id)}/items`, { ids, ...patch }, { timeout: 60_000 })),
+    /**
+     * 探测视频编码（读文件头）：key 探这个单元的全部视频（连上次失败的一起重试）；keys 探这些单元里文件名缺模板标签的视频。
+     * 每个文件读几 MB，一部剧几十个文件要等一会儿
+     */
+    probe: (id: string, body: { key?: string; keys?: string[]; missing?: boolean; retryFailed?: boolean }) =>
+      data(axiosInstance.post<OrganizeProbeResult>(`/api/organize/runs/${encodeURIComponent(id)}/probe`, body, { timeout: 600_000 })),
     /** 换匹配弹框：按关键词搜（可限类型、年份） */
     tmdbSearch: (q: { query: string; type?: "movie" | "tv"; year?: string }) =>
       data(axiosInstance.post<{ results: OrganizeCandidate[] }>("/api/organize/tmdb/search", q)),

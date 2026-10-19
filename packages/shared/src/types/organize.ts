@@ -118,6 +118,29 @@ export interface OrganizeSettings {
   extras?: OrganizeExtrasMode;
   /** 没在任务上单独设置时的默认自动整理策略 */
   auto?: OrganizeAutoMode;
+  /** 预览时自动探测编码：missing 是文件名里缺模板要用的标签的视频才探（每个文件读几 MB 文件头，大库第一次会慢）；默认 off */
+  probe?: "off" | "missing";
+}
+
+/** 探测出来的、模板能用的标签（services/media/probe.ts）：文件名里没有对应标签时回退用 */
+export interface MediaProbeTags {
+  resolution?: string;
+  videoCodec?: string;
+  audio?: string;
+  hdr?: string;
+}
+
+/** 探测编码的结果（POST /api/organize/runs/:id/probe） */
+export interface OrganizeProbeResult {
+  /** 读到了的视频数（含直接用缓存的） */
+  probed: number;
+  /** 其中直接用缓存、没碰网盘的 */
+  cached: number;
+  failed: number;
+  /** 按探测结果重新规划后，清单真的变了的单元数 */
+  units: number;
+  /** 每个文件读到了什么（path 是网盘绝对路径）；summary 和 error 二选一 */
+  files: Array<{ path: string; unitKey: string; summary?: string; error?: string }>;
 }
 
 /** 任务级整理设置 */
@@ -313,6 +336,8 @@ export interface OrganizeItem {
   curPath: string;
   /** 网盘监控按「整理自己做的」跳过了几条事件 */
   hits: number;
+  /** 这个文件探测出来的标签（只在预览的单元结构还在内存里时带） */
+  probe?: MediaProbeTags;
 }
 
 /**

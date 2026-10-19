@@ -2,7 +2,7 @@
  * 预览：建 run → 列范围 → 分单元 → 识别（TMDB）→ 规划 → 落库；预览里改单元 / 换匹配；换匹配弹框的 TMDB 搜索。
  */
 import { randomUUID } from "node:crypto";
-import type { OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeProbeResult, MediaProbeTags, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
 import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
@@ -24,12 +24,13 @@ import { hintFor, hintSource } from "./hints.js";
 import { duplicatePathFor, isStagingDir } from "../strm/staging.js";
 import { type UnitPlanInput, finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan } from "./plan.js";
 import { indexLocalStrm, mapLocalStrm, planLocalUnit, toSyntheticUnit } from "./local-naming.js";
+import { cachedProbeTags, probeDriveFile, probeSummary, probeTags, type ProbeTarget } from "../media/probe.js";
 import { isTaskRunning } from "../task/registry.js";
 import { parseRules } from "./rules.js";
 import { resolveOrganizeSettings } from "./settings.js";
 import { isNamedAfter, looksLikeReleaseDir } from "./parse-name.js";
 import { looksLikeFileName } from "../drive/walk.js";
-import { buildUnits, type ScopeEntry, type Unit } from "./units.js";
+import { type UnitFile, buildUnits, type ScopeEntry, type Unit } from "./units.js";
 import { log, ORGANIZE_LIMITS, handPicked, deps, type Job, beginOp, jobLog, setProgress, baseOf, dirOf, joinRel, absOf, relOf, videoExtsOf, computeStats, runStartedAt, startJob, type PlanState, planContext, mergePreferId, mergeEntries, planStates, releaseHeldCopies, accountTasks } from "./run-state.js";
 import { applyRun } from "./apply.js";
 
@@ -516,6 +517,8 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
   jobLog(job, `分成 ${units.length} 个作品单元`);
 
   const state = newPlanState({ task, settings, org, run, walked, provider, units });
+  attachProbes(state, provider.account.name);
+  if (org.probe === "missing") await autoProbe(job, state, provider, signal);
   const library = listLibraryEntries();
   const hints = getRunHints(runId);
   const rows: OrganizeUnit[] = [];
@@ -697,6 +700,150 @@ async function previewLocal(
   if (superseded > 0) jobLog(job, `作废了 ${superseded} 个范围被这次覆盖的旧预览`);
   jobLog(job, `预览完成：${stats.units} 个单元，${stats.planned} 项要动，${stats.conflicts} 项冲突`);
   updateRun(runId, { status: "ready", stats, log: job.logs, error: "" });
+}
+
+/* ------------------------------- 探测编码（mediainfo.js） ------------------------------- */
+
+const PROBE_VARS: Array<keyof MediaProbeTags> = ["resolution", "videoCodec", "audio", "hdr"];
+
+/** 模板里用到了哪些可以探测出来的标签 */
+function probeVarsOf(org: PlanState["org"]): Array<keyof MediaProbeTags> {
+  const text = `${org.templates.movie} ${org.templates.tv}`;
+  return PROBE_VARS.filter((v) => text.includes(`{${v}}`));
+}
+
+const probeTargetOf = (state: PlanState, file: UnitFile): ProbeTarget => ({ path: absOf(state.task, file.path), id: file.id, size: file.size });
+
+/** 文件名里缺模板要用的标签、探测结果里也没有 */
+const lacksProbeTags = (file: UnitFile, wanted: Array<keyof MediaProbeTags>): boolean => wanted.some((v) => !file.parsed.tags[v] && !file.probe?.[v]);
+
+function videoFilesOf(state: PlanState, keys?: Iterable<string>): UnitFile[] {
+  const units = keys ? [...keys].map((k) => state.units.get(k)).filter((u): u is Unit => !!u) : [...state.units.values()];
+  return units.flatMap((u) => u.files.filter((f) => f.kind === "video"));
+}
+
+/** 预览开始时把缓存里的探测结果填进单元文件（不碰网盘） */
+function attachProbes(state: PlanState, accountName: string): void {
+  const files = videoFilesOf(state);
+  const tags = cachedProbeTags(accountName, files.map((f) => probeTargetOf(state, f)));
+  for (const f of files) {
+    const t = tags.get(absOf(state.task, f.path));
+    if (t) f.probe = t;
+  }
+}
+
+/** 设置开着「预览时自动探测」：识别之前把文件名缺标签的视频探一遍，进度写在识别那一栏 */
+async function autoProbe(job: Job, state: PlanState, provider: DriveProvider, signal: AbortSignal): Promise<void> {
+  const wanted = probeVarsOf(state.org);
+  if (wanted.length === 0) return;
+  const targets = videoFilesOf(state).filter((f) => lacksProbeTags(f, wanted));
+  if (targets.length === 0) return;
+  let ok = 0;
+  let cached = 0;
+  let failed = 0;
+  for (const [i, f] of targets.entries()) {
+    signal.throwIfAborted();
+    setProgress(job, "identify", i, targets.length, `探测编码 ${f.name}`);
+    const r = await probeDriveFile(provider, provider.account.name, probeTargetOf(state, f), { signal });
+    if (r.status === "ok" && r.probe) {
+      f.probe = probeTags(r.probe);
+      ok++;
+      if (r.cached) cached++;
+    } else failed++;
+  }
+  jobLog(job, `探测编码：${targets.length} 个视频的文件名里缺模板要用的标签，读到 ${ok} 个（${cached} 个用缓存），${failed} 个没读到`);
+}
+
+export interface ProbeSelection {
+  /** 这个单元的全部视频 */
+  key?: string;
+  /** 这些单元里文件名缺模板要用的标签的视频 */
+  keys?: string[];
+  /** 清单里勾选的全部单元中，文件名缺模板要用的标签的视频 */
+  missing?: boolean;
+}
+
+export type ProbeUnitsResult = OrganizeProbeResult;
+
+/**
+ * 预览里探测编码：读文件头（有缓存的不读）、把标签填进单元文件、重新规划。按单元点的会重试上次失败的；
+ * 「探测缺标签的」对失败过的不再读网盘、照旧算没读到（那些多半是读不了的，错误原因还在）。按本地 strm 结构的清单不套模板，没有探测的意义
+ */
+export async function probeUnits(runId: string, sel: ProbeSelection, opts: { retryFailed?: boolean } = {}): Promise<ProbeUnitsResult> {
+  const { state } = editableRun(runId);
+  if (state.local) throw new HttpError(400, "按本地 strm 结构整理的清单不套模板，不用探测编码", { code: "NOT_TMDB_RUN" });
+  if (!sel.key && !sel.keys?.length && !sel.missing) throw new HttpError(400, "key、keys 或 missing 至少给一个");
+  for (const k of [...(sel.key ? [sel.key] : []), ...(sel.keys ?? [])]) if (!state.units.has(k)) throw new HttpError(404, `单元不存在：${k}`);
+  const end = beginOp(runId);
+  try {
+    const wanted = probeVarsOf(state.org);
+    let targets: UnitFile[];
+    if (sel.key) targets = videoFilesOf(state, [sel.key]);
+    else {
+      const scope = sel.keys?.length ? sel.keys : listUnits(runId).filter((r) => r.selected).map((r) => r.key);
+      targets = wanted.length === 0 ? [] : videoFilesOf(state, scope).filter((f) => lacksProbeTags(f, wanted));
+    }
+    const ownerOf = new Map<UnitFile, string>();
+    for (const u of state.units.values()) for (const f of u.files) ownerOf.set(f, u.key);
+    const provider = providerForTask(state.task);
+    const out: ProbeUnitsResult = { probed: 0, cached: 0, failed: 0, units: 0, files: [] };
+    const touched = new Set<string>();
+    for (const f of targets) {
+      const r = await probeDriveFile(provider, provider.account.name, probeTargetOf(state, f), { retryFailed: opts.retryFailed ?? !!sel.key });
+      const unitKey = ownerOf.get(f) ?? "";
+      if (r.status === "ok" && r.probe) {
+        f.probe = probeTags(r.probe);
+        out.probed++;
+        if (r.cached) out.cached++;
+        touched.add(unitKey);
+        out.files.push({ path: absOf(state.task, f.path), unitKey, summary: probeSummary(r.probe) });
+      } else {
+        out.failed++;
+        out.files.push({ path: absOf(state.task, f.path), unitKey, error: r.error ?? "没读到" });
+      }
+    }
+    // 从这里到落库没有 await
+    const current = assertStillEditable(runId, state);
+    const fresh = new Map(listUnits(runId).map((r) => [r.key, r]));
+    const changed = new Map<string, OrganizeUnit>();
+    for (const key of touched) {
+      const row = fresh.get(key);
+      if (row) changed.set(key, row);
+    }
+    if (changed.size > 0) {
+      const before = itemsFingerprints(listItems(runId));
+      replanRun(current, state, changed);
+      const after = itemsFingerprints(listItems(runId));
+      out.units = [...new Set([...before.keys(), ...after.keys()])].filter((k) => before.get(k) !== after.get(k)).length;
+    }
+    return out;
+  } finally {
+    end();
+  }
+}
+
+/** 每个单元的项的指纹（来源、去向、动作）：重新规划前后比一下就知道哪些单元真的变了 */
+function itemsFingerprints(items: OrganizeItem[]): Map<string, string> {
+  const by = new Map<string, string[]>();
+  for (const it of items) {
+    const list = by.get(it.unitKey) ?? [];
+    list.push(JSON.stringify([it.srcPath, it.dstPath, it.action]));
+    by.set(it.unitKey, list);
+  }
+  return new Map([...by].map(([k, v]) => [k, v.sort().join("\n")]));
+}
+
+/** 项上带探测标签（只在预览的单元结构还在内存里时有） */
+export function decorateItemsWithProbes(runId: string, items: OrganizeItem[]): OrganizeItem[] {
+  const state = planStates.get(runId);
+  if (!state) return items;
+  const byAbs = new Map<string, MediaProbeTags>();
+  for (const u of state.units.values()) for (const f of u.files) if (f.probe) byAbs.set(absOf(state.task, f.path), f.probe);
+  if (byAbs.size === 0) return items;
+  return items.map((it) => {
+    const probe = byAbs.get(it.srcPath);
+    return probe ? { ...it, probe } : it;
+  });
 }
 
 /** 规划一个单元：按本地 strm 结构的 run 走 planLocalUnit，其余走 planUnit */

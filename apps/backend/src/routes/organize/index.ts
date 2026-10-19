@@ -30,6 +30,8 @@ import {
   patchUnit,
   patchUnits,
   planFingerprint,
+  probeUnits,
+  decorateItemsWithProbes,
   readyRunsWithin,
   repreviewRun,
   revertRun,
@@ -143,6 +145,19 @@ const itemsQuerySchema = z
  * planVersion 是页面打开时详情里给的：待执行的清单对不上就不执行
  */
 const applySchema = z.object({ ids: z.array(z.string().min(1)).max(5000).optional(), planVersion: z.string().max(40).optional() });
+/**
+ * 探测编码：key 是这个单元的全部视频（默认连上次失败的一起重试）；keys 是这些单元里文件名缺模板标签的视频；
+ * missing 是清单里勾选的全部单元中缺标签的视频；retryFailed 明确说要不要重试失败过的
+ */
+const probeSchema = z
+  .object({
+    key: z.string().min(1).optional(),
+    keys: z.array(z.string().min(1)).min(1).max(2000).optional(),
+    missing: z.boolean().optional(),
+    retryFailed: z.boolean().optional(),
+  })
+  .refine((b) => !!b.key || !!b.keys || b.missing === true, { message: "key、keys 或 missing 至少给一个" });
+
 /** fresh 是「范围里已有待确认的清单也重新预览」；refreshTmdb 是「这次预览跳过 TMDB 缓存」，两回事 */
 const repreviewSchema = z.object({ fresh: z.boolean().optional(), refreshTmdb: z.boolean().optional() });
 const skipSchema = z.object({ ids: z.array(z.string().min(1)).min(1).max(5000) });
@@ -179,7 +194,14 @@ export default async function (fastify: FastifyInstance) {
   fastify.get("/api/organize/runs/:id/items", { preHandler: [fastify.authenticate], config: { agentScope: "read", agentToolset: "organize" } }, async (request) => {
     const { id } = parse(idParamsSchema, request.params, "params");
     const q = parse(itemsQuerySchema, request.query, "query");
-    return { items: listRunItems(id, q) };
+    return { items: decorateItemsWithProbes(id, listRunItems(id, q)) };
+  });
+
+  /** 预览里探测编码（mediainfo.js 读文件头）：填进标签、重新规划；返回每个文件读到了什么 */
+  fastify.post("/api/organize/runs/:id/probe", { preHandler: [fastify.authenticate], config: { agentScope: "run", agentToolset: "organize" } }, async (request) => {
+    const { id } = parse(idParamsSchema, request.params, "params");
+    const body = parse(probeSchema, request.body ?? {});
+    return probeUnits(id, { key: body.key, keys: body.keys, missing: body.missing }, { retryFailed: body.retryFailed });
   });
 
   /** 批量勾选单元：一次重规划 */

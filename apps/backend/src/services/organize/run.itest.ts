@@ -38,6 +38,9 @@ import { releaseTaskStart, reserveTaskStart } from "../task/registry.js";
 import { startTask } from "../task/runner.js";
 import { clearCopies, listCopies, saveCopies } from "../copy/queue.js";
 import { FakeDrive, withoutWalk } from "../../test/fake-drive.js";
+import type { MediaInfoResult } from "mediainfo.js";
+import { __test_resetMediaProbes } from "../../db/repositories/media-probes.js";
+import { setProbeDeps } from "../media/probe.js";
 import type { TmdbDetails, TmdbEpisode, TmdbSearchResult } from "../tmdb.js";
 import type { NotifyEvent } from "../notify.js";
 import type { TmdbApi } from "./identify.js";
@@ -55,6 +58,7 @@ import {
   patchPlan,
   patchUnit,
   patchUnits,
+  probeUnits,
   collapseStaleReadyRuns,
   reconcileInterruptedRuns,
   repreviewRun,
@@ -167,6 +171,7 @@ before(() => {
 
 beforeEach(() => {
   __test_resetOrganize();
+  __test_resetMediaProbes();
   replaceShareFollows([]);
   replaceTasks([task]);
   replaceAppSettings({ ...readAppSettings(), organize: {} });
@@ -2473,4 +2478,119 @@ test("按本地 strm 结构整理：本地改了名的 strm 决定网盘的名�
   assert.match(String(sync.body.message), /整理在进行/);
   await untilStatus(planning.id, ["ready"]);
   await assert.rejects(createRun({ taskId: "t1", subPath: "inbox", naming: "local", mode: "auto" }), (err: unknown) => err instanceof HttpError && err.extra.code === "LOCAL_MANUAL_ONLY");
+});
+
+/* ------------------------------- 探测编码 ------------------------------- */
+
+/** 假的探测：open 记下读了谁，analyze 回一个 4K HEVC DV + DDP Atmos 的结果（fail 时抛） */
+const probeFake = { opened: [] as string[], fail: false };
+const PROBE_RESULT = {
+  media: {
+    "@ref": "",
+    track: [
+      { "@type": "General", Format: "Matroska", Duration: "60" },
+      { "@type": "Video", Format: "HEVC", Width: 3840, Height: 2160, BitDepth: 10, HDR_Format: "Dolby Vision", HDR_Format_Compatibility: "HDR10" },
+      { "@type": "Audio", Format: "E-AC-3", Format_Commercial_IfAny: "Dolby Digital Plus with Dolby Atmos", Channels: 6, Language: "en", Default: "Yes" },
+    ],
+  },
+} as unknown as MediaInfoResult;
+function useProbeFake(): void {
+  probeFake.opened = [];
+  probeFake.fail = false;
+  setProbeDeps({
+    open: async (link, size) => {
+      probeFake.opened.push(link.url);
+      return { size: size ?? 1, read: async () => new Uint8Array(0) };
+    },
+    analyze: async () => {
+      if (probeFake.fail) throw new Error("读文件头超时");
+      return { result: PROBE_RESULT, bytesRead: 1024, reads: 1 };
+    },
+  });
+}
+
+test("探测编码：设置开着就在预览时探文件名缺标签的视频，模板的 {resolution} 用探测结果补；有标签的不探；第二次预览走缓存，大小变了重探", async () => {
+  useProbeFake();
+  try {
+    drive.tree.addFile("/tv/probe/Dune.Part.Two.2024.mkv", { size: 1000 });
+    drive.tree.addFile("/tv/probe/Up.2009.1080p.mkv", { size: 1000 });
+    replaceAppSettings({ ...readAppSettings(), organize: { probe: "missing" } });
+    const run = await createRun({ taskId: "t1", subPath: "probe" });
+    await untilStatus(run.id, ["ready"]);
+    assert.equal(probeFake.opened.length, 1, "只探文件名里没有分辨率的那个");
+    assert.ok(probeFake.opened[0].endsWith("/tv/probe/Dune.Part.Two.2024.mkv"), probeFake.opened[0]);
+    const dune = listItems(run.id).find((i) => i.srcPath.endsWith("Dune.Part.Two.2024.mkv"))!;
+    assert.equal(baseOf(dune.dstPath), "沙丘：第二部 (2024) - 2160p.mkv");
+    const up = listItems(run.id).find((i) => i.srcPath.endsWith("Up.2009.1080p.mkv"))!;
+    assert.equal(baseOf(up.dstPath), "飞屋环游记 (2009) - 1080p.mkv", "文件名里有的以文件名为准");
+    assert.ok(getRunDetail(run.id).run.log.some((l) => l.includes("探测编码：1 个视频")), getRunDetail(run.id).run.log.join("\n"));
+
+    // 再预览：缓存里有，不碰网盘
+    await cancelRun(run.id);
+    const again = await createRun({ taskId: "t1", subPath: "probe" });
+    await untilStatus(again.id, ["ready"]);
+    assert.equal(probeFake.opened.length, 1);
+    assert.equal(baseOf(listItems(again.id).find((i) => i.srcPath.endsWith("Dune.Part.Two.2024.mkv"))!.dstPath), "沙丘：第二部 (2024) - 2160p.mkv");
+
+    // 文件换了（大小不同）：缓存不算，重探
+    await cancelRun(again.id);
+    drive.tree.get("/tv/probe/Dune.Part.Two.2024.mkv")!.size = 2000;
+    const third = await createRun({ taskId: "t1", subPath: "probe" });
+    await untilStatus(third.id, ["ready"]);
+    assert.equal(probeFake.opened.length, 2);
+  } finally {
+    setProbeDeps(null);
+  }
+});
+
+test("探测编码：设置关着预览不探；按单元探后重新规划；探缺标签的跳过有标签的和失败过的，按单元点会重试；本地结构的清单不探", async () => {
+  useProbeFake();
+  try {
+    drive.tree.addFile("/tv/probe/Dune.Part.Two.2024.mkv", { size: 1000 });
+    drive.tree.addFile("/tv/probe/Up.2009.1080p.mkv", { size: 1000 });
+    const run = await createRun({ taskId: "t1", subPath: "probe" });
+    await untilStatus(run.id, ["ready"]);
+    assert.equal(probeFake.opened.length, 0);
+    const dune = listUnits(run.id).find((u) => u.match?.tmdbId === 693134)!;
+    const up = listUnits(run.id).find((u) => u.match?.tmdbId === 14160)!;
+    assert.equal(baseOf(listItems(run.id).find((i) => i.srcPath.endsWith("Dune.Part.Two.2024.mkv"))!.dstPath), "沙丘：第二部 (2024).mkv");
+
+    // 读不到：记下来，「探缺标签的」不再碰它
+    probeFake.fail = true;
+    let r = await probeUnits(run.id, { missing: true });
+    assert.deepEqual([r.probed, r.failed, r.units], [0, 1, 0]);
+    assert.equal(r.files[0].error, "读文件头超时");
+    assert.equal(r.files[0].path, "/tv/probe/Dune.Part.Two.2024.mkv");
+    r = await probeUnits(run.id, { missing: true });
+    assert.deepEqual([r.probed, r.failed], [0, 1], "失败过的照旧算没读到、原因还在");
+    assert.equal(r.files[0].error, "读文件头超时");
+    assert.equal(probeFake.opened.length, 1, "但不再读网盘");
+
+    // 按单元点：失败过的重试，读到了就重新规划
+    probeFake.fail = false;
+    r = await probeUnits(run.id, { key: dune.key });
+    assert.deepEqual([r.probed, r.cached, r.failed, r.units], [1, 0, 0, 1]);
+    assert.equal(r.files[0].summary, "HEVC · 2160p 10bit · DV · DDP Atmos 5.1 en");
+    assert.equal(baseOf(listItems(run.id).find((i) => i.srcPath.endsWith("Dune.Part.Two.2024.mkv"))!.dstPath), "沙丘：第二部 (2024) - 2160p.mkv");
+    // 再按单元点：直接用缓存
+    r = await probeUnits(run.id, { key: dune.key });
+    assert.deepEqual([r.probed, r.cached], [1, 1]);
+    assert.equal(probeFake.opened.length, 2);
+    // 文件名里有 1080p 的：按单元探也读，名字不变
+    r = await probeUnits(run.id, { key: up.key });
+    assert.equal(r.probed, 1);
+    assert.equal(baseOf(listItems(run.id).find((i) => i.srcPath.endsWith("Up.2009.1080p.mkv"))!.dstPath), "飞屋环游记 (2009) - 1080p.mkv");
+    // keys：这些单元里缺标签的——都有了
+    r = await probeUnits(run.id, { keys: [dune.key, up.key] });
+    assert.deepEqual([r.probed, r.failed], [0, 0]);
+    await assert.rejects(probeUnits(run.id, {}), /至少/);
+    await assert.rejects(probeUnits(run.id, { key: "nope" }), (err: unknown) => err instanceof HttpError && err.status === 404);
+
+    await cancelRun(run.id);
+    const local = await createRun({ taskId: "t1", subPath: "inbox", naming: "local" });
+    await untilStatus(local.id, ["ready"]);
+    await assert.rejects(probeUnits(local.id, { missing: true }), (err: unknown) => err instanceof HttpError && err.extra.code === "NOT_TMDB_RUN");
+  } finally {
+    setProbeDeps(null);
+  }
 });

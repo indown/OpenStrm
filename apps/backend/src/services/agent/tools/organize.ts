@@ -18,7 +18,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { isLocalUnitKey } from "../../organize/local-naming.js";
 import { z } from "zod";
-import type { OrganizeNaming, OrganizeItem, OrganizeRun, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeNaming, OrganizeItem, OrganizeProbeResult, OrganizeRun, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
 import { getRun, listItems, listRunsByStatus, listUnits } from "../../../db/repositories/organize.js";
 import { readAppSettings } from "../../../db/repositories/settings.js";
 import { getTask } from "../../../db/repositories/tasks.js";
@@ -34,6 +34,7 @@ import {
   lookupWork,
   patchPlan,
   planFingerprint,
+  probeUnits,
   readyRunsWithin,
   revertRun,
   runDone,
@@ -720,6 +721,75 @@ function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, Organize
   });
   return { ...(args.select ? { select: args.select } : {}), ...(args.conflicts ? { conflicts: args.conflicts } : {}), units, files };
 }
+
+export const organizeProbeTool = defineTool({
+  name: "organize_probe",
+  title: "探测视频编码",
+  description:
+    "读网盘视频的文件头（每个几 MB，不下载整个文件）拿到真实的分辨率 / 编码 / 音频 / HDR，填进文件名里缺的标签（命名模板的 {resolution} {videoCodec} {audio} {hdr}），清单按新标签重新规划；文件名里已有的标签以文件名为准。只改清单、不动网盘。unit 是探这个单元的全部视频（上次没读到的也再试一次）；missing 是清单里勾选的单元中、文件名缺模板要用的标签的视频（读过的直接用缓存；上次没读到的不再读网盘、照旧算没读到，files 里带原因）。模板没用到这几个变量时 missing 什么都不探。返回每个文件读到了什么和新的 planVersion。",
+  scope: "run",
+  toolset: "organize",
+  annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: true },
+  input: z.object({
+    run: runArg.describe(RUN_DESC),
+    unit: z.string().min(1).max(60).optional().describe("单元编号（organize_detail / organize_status 里的 ref，形如 u3）：探它的全部视频"),
+    missing: z.boolean().optional().describe("勾选的单元里文件名缺模板要用的标签的视频都探一遍；和 unit 至少给一个"),
+  }),
+  async run(args, ctx) {
+    if (!args.unit && !args.missing) throw new ToolError("VALIDATION", "unit 和 missing 至少给一个");
+    const run = resolveRun({ run: args.run });
+    if (run.status !== "ready") throw new ToolError("NOT_EDITABLE", `只有待确认的清单能探测（这次整理现在是 ${run.status}）`, "用 organize_status 看它现在怎样。");
+    if (!getRunSummary(run.id).editable) {
+      throw new ToolError("NOT_EDITABLE", "这份清单是服务上次启动时做的，单元结构没保存下来，探测的结果没处填", `要探测就用 organize_preview(again: "${run.id}", fresh: true) 重新预览。`);
+    }
+    if (run.naming === "local") throw new ToolError("VALIDATION", "按本地 strm 结构整理的清单不套模板，不用探测编码");
+    const refs = buildRefs(listUnits(run.id), listItems(run.id));
+    let key: string | undefined;
+    if (args.unit) {
+      key = refs.unitKey(args.unit);
+      if (key === undefined) throw new ToolError("VALIDATION", `这次整理里没有单元 ${args.unit}`, "单元编号形如 u3，从 organize_detail / organize_status 里拿。");
+    }
+    let r: OrganizeProbeResult;
+    try {
+      r = await probeUnits(run.id, { key, missing: args.missing }, { retryFailed: !!key });
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 409) throw new ToolError("NOT_EDITABLE", err.message, "用 organize_status 看这次整理现在怎样；需要的话重新预览。");
+      throw err;
+    }
+    const d = getRunDetail(run.id);
+    const task = taskOf(d.run);
+    const items = listItems(run.id);
+    const after = buildRefs(d.units, items);
+    const planVersion = planFingerprint(run.id, { units: listUnits(run.id), items });
+    const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+    return {
+      probed: r.probed,
+      cached: r.cached,
+      failed: r.failed,
+      /** 按探测结果重新规划后真的变了的单元数 */
+      changed: r.units,
+      files: r.files.slice(0, 40).map((f) => ({
+        file: after.fileRef(f.unitKey, f.path) ?? nameOf(f.path),
+        name: nameOf(f.path),
+        ...(f.summary ? { probe: f.summary } : { error: f.error ?? "没读到" }),
+      })),
+      summary: runLine(d.run),
+      planVersion,
+      ...(r.units > 0 && d.run.stats.planned > 0 ? { confirmText: confirmTextOf(d.run, d.units, task, d.outdated) } : {}),
+      next:
+        r.probed === 0
+          ? r.failed > 0
+            ? "一个都没读到（直链不支持按段读，或文件不是视频）；告诉用户原因，标签要改只能改文件名。"
+            : "没有要探的视频：文件名里都有模板要用的标签，或者命名模板没用 {resolution} {videoCodec} {audio} {hdr} 这些变量。"
+          : r.units === 0
+            ? "读到了，但清单没有变化（模板没用到探出来的标签，或文件名里已经有了）。"
+            : needsHandOff(capsOf(ctx), d.run)
+              ? `清单已按探测结果重新规划；把改了什么告诉用户，${handOff(capsOf(ctx), d.run.stats.plannedDelete)}`
+              : `清单已按探测结果重新规划；把改了什么和 confirmText 告诉用户，同意后调 organize_apply(run: "${run.id}", planVersion: "${planVersion}")`,
+      ...openInUi(uiPath(run.id)),
+    };
+  },
+});
 
 export const organizeCancelTool = defineTool({
   name: "organize_cancel",

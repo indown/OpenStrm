@@ -172,6 +172,12 @@ export function OrganizeSection({ value, onChange }: Props) {
           onCheckedChange={(v) => set({ episodeTitle: v })}
         />
         <SwitchRow
+          label="预览时自动探测文件名缺标签的视频"
+          description="模板用了 {resolution} {videoCodec} {audio} {hdr} 而文件名里没有时，读那个视频的文件头（几 MB）补上；读过的有缓存，大库第一次预览会慢。关着也能在清单里按作品点「探测编码」。"
+          checked={value.probe === "missing"}
+          onCheckedChange={(v) => set({ probe: v ? "missing" : "off" })}
+        />
+        <SwitchRow
           label="执行后删掉腾空的源目录"
           description="只删这次挪空的目录；范围目录本身是发布目录或季目录时也一起删，任务根目录和 inbox 这种收件箱目录不删。"
           checked={value.cleanupEmptyDirs !== false}

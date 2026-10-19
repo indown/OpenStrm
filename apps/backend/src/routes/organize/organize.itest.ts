@@ -10,7 +10,10 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 import axios, { type AxiosResponse } from "axios";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { AccountInfo, AppSettings, OrganizeItem, OrganizeRun, OrganizeRunDetail, OrganizeRunSummary, OrganizeTemplatePreview, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AppSettings, OrganizeItem, OrganizeProbeResult, OrganizeRun, OrganizeRunDetail, OrganizeRunSummary, OrganizeTemplatePreview, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
+import type { MediaInfoResult } from "mediainfo.js";
+import { __test_resetMediaProbes } from "../../db/repositories/media-probes.js";
+import { setProbeDeps } from "../../services/media/probe.js";
 import { registerErrorHandling } from "../../plugins/error-handler.js";
 import { authPlugin } from "../../plugins/auth.js";
 import organizeRoute from "./index.js";
@@ -80,6 +83,7 @@ before(async () => {
   replaceAppSettings({ ...baseline.settings, strmExtensions: [".mkv"], downloadExtensions: [], tmdb: { apiKey: "x" }, organize: {} });
   await writeAuthPassword("organize-itest-pw");
   drive.tree.addFile("/movies/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv");
+  drive.tree.addFile("/movies/probe/Dune.Part.Two.2024.mkv", { size: 1000 });
   setDriveProviderFactory((a) => (a.name === "acc" ? drive : null));
   setOrganizeDeps({ tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true), notify: async () => true, retryDelayMs: 5 });
 
@@ -97,6 +101,7 @@ after(async () => {
   setOrganizeDeps(null);
   setDriveProviderFactory(null);
   __test_resetOrganize();
+  __test_resetMediaProbes();
   replaceTasks(baseline.tasks);
   replaceAccounts(baseline.accounts);
   replaceAppSettings(baseline.settings);
@@ -384,4 +389,42 @@ test("命名来源：naming=local 建的 run 记着来源、不要 TMDB；没有
   const plain = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh" }, 201);
   assert.equal(plain.naming, "tmdb");
   await untilStatus(plain.id, ["ready"]);
+});
+
+test("探测编码：key / keys / missing 至少给一个 400、没有的单元 404；探完项上带 probe、清单按标签重新规划；本地结构的清单 400", async () => {
+  __test_resetMediaProbes();
+  const result = {
+    media: {
+      "@ref": "",
+      track: [
+        { "@type": "Video", Format: "HEVC", Width: 3840, Height: 2160, HDR_Format: "SMPTE ST 2086" },
+        { "@type": "Audio", Format: "E-AC-3", Channels: 6 },
+      ],
+    },
+  } as unknown as MediaInfoResult;
+  setProbeDeps({ open: async (_l, size) => ({ size: size ?? 1, read: async () => new Uint8Array(0) }), analyze: async () => ({ result, bytesRead: 1, reads: 1 }) });
+  try {
+    const run = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe" }, 201);
+    const ready = await untilStatus(run.id, ["ready"]);
+    const unit = ready.units.find((u) => u.match?.tmdbId === 693134)!;
+    assert.equal((await app.inject({ method: "POST", url: `/api/organize/runs/${run.id}/probe`, headers: auth, payload: {} })).statusCode, 400);
+    assert.equal((await app.inject({ method: "POST", url: `/api/organize/runs/${run.id}/probe`, headers: auth, payload: { key: "nope" } })).statusCode, 404);
+    const r = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${run.id}/probe`, { key: unit.key });
+    assert.deepEqual([r.probed, r.cached, r.failed, r.units], [1, 0, 0, 1]);
+    assert.equal(r.files[0].summary, "HEVC · 2160p · HDR10 · DDP 5.1");
+    const { items } = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${run.id}/items?unit=${encodeURIComponent(unit.key)}`);
+    const movie = items.find((i) => i.srcPath.endsWith(".mkv"))!;
+    assert.equal(r.files[0].path, movie.srcPath);
+    assert.deepEqual(movie.probe, { resolution: "2160p", videoCodec: "HEVC", audio: "DDP", hdr: "HDR10" });
+    assert.ok(movie.dstPath.endsWith("沙丘：第二部 (2024) - 2160p.mkv"), movie.dstPath);
+    const again = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${run.id}/probe`, { keys: [unit.key] });
+    assert.equal(again.probed + again.failed, 0, "缺的标签已经有探测结果了，不用再探");
+    const local = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh", naming: "local" }, 201);
+    await untilStatus(local.id, ["ready"]);
+    const bad = await app.inject({ method: "POST", url: `/api/organize/runs/${local.id}/probe`, headers: auth, payload: { missing: true } });
+    assert.equal(bad.statusCode, 400);
+    assert.equal(bad.json().code, "NOT_TMDB_RUN");
+  } finally {
+    setProbeDeps(null);
+  }
 });

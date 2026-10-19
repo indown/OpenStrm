@@ -40,6 +40,7 @@ export interface ResolvedOrganizeSettings {
   cleanupEmptyDirs: boolean;
   extras: NonNullable<OrganizeSettings["extras"]>;
   auto: NonNullable<OrganizeSettings["auto"]>;
+  probe: NonNullable<OrganizeSettings["probe"]>;
 }
 
 function cleanRules(list: OrganizeCategoryRule[] | undefined, fallback: OrganizeCategoryRule[]): OrganizeCategoryRule[] {
@@ -75,6 +76,7 @@ export function resolveOrganizeSettings(settings: AppSettings): ResolvedOrganize
     // 没设过就跟着正片走：留在旧目录的花絮以后成不了单元，没人再管，还让旧目录删不掉
     extras: o.extras ?? "move",
     auto: o.auto ?? "off",
+    probe: o.probe ?? "off",
   };
 }
 

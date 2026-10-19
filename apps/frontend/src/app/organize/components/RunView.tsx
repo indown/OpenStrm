@@ -208,6 +208,39 @@ export function RunView({
     }
   };
 
+  /** 探测一部作品的视频编码（读文件头）：把分辨率 / 编码 / 音频 / HDR 填进文件名里缺的标签，重新规划 */
+  const probeUnit = async (unit: OrganizeUnit) => {
+    markPatching([unit.key], true);
+    try {
+      const r = await api.organize.probe(runId, { key: unit.key });
+      await load();
+      if (r.probed === 0) toast.error(r.files[0]?.error ? `没读到：${r.files[0].error}` : "这部作品没有视频文件");
+      else toast.success(`读到 ${r.probed} 个视频${r.failed ? `，${r.failed} 个没读到` : ""}${r.units ? "，已按探测结果重新规划" : "，清单没有变化"}`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "探测编码失败"));
+      await load();
+    } finally {
+      markPatching([unit.key], false);
+    }
+  };
+
+  /** 探测列出来、勾着的作品里文件名缺模板标签的视频：读过的用缓存；上次没读到的不再读网盘、照旧算没读到（按作品点「探测编码」才重试） */
+  const probeMissing = async (keys: string[]) => {
+    if (keys.length === 0) return;
+    markPatching(keys, true);
+    try {
+      const r = await api.organize.probe(runId, { keys });
+      await load();
+      if (r.probed + r.failed === 0) toast.info("没有要探的视频：文件名里都有模板要用的标签，或者模板没用 {resolution} 这些变量");
+      else toast.success(`读到 ${r.probed} 个视频${r.failed ? `，${r.failed} 个没读到` : ""}${r.units ? `，${r.units} 部已重新规划` : "，清单没有变化"}`);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "探测编码失败"));
+      await load();
+    } finally {
+      markPatching(keys, false);
+    }
+  };
+
   /** 批量勾选（一次重规划）；「只选把握大的」是把握大的勾上、其余取消，两次批量 */
   const bulk = async (steps: Array<{ keys: string[]; selected: boolean }>) => {
     const keys = steps.flatMap((s) => s.keys);
@@ -588,6 +621,8 @@ export function RunView({
           onMatch={setMatching}
           onAdjust={setAdjusting}
           onRefresh={(u) => void refreshUnit(u)}
+          onProbe={(u) => void probeUnit(u)}
+          onProbeMissing={(keys) => void probeMissing(keys)}
         />
       )}
 

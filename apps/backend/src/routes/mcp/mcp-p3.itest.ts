@@ -41,6 +41,9 @@ import type { TmdbDetails, TmdbEpisode, TmdbSearchResult } from "../../services/
 import { cancelAllRunningTasks } from "../../services/task/registry.js";
 import { FakeDrive, type FakeTree } from "../../test/fake-drive.js";
 import { HttpError } from "../../lib/http-error.js";
+import type { MediaInfoResult } from "mediainfo.js";
+import { __test_resetMediaProbes } from "../../db/repositories/media-probes.js";
+import { setProbeDeps } from "../../services/media/probe.js";
 
 const quark: AccountInfo = { accountType: "quark", name: "q", cookie: "c" };
 const tv: TaskDefinition = { id: "p3-tv", account: "q", accountType: "quark", originPath: "tv", targetPath: "mcp-p3/tv", strmPrefix: "/mnt" };
@@ -144,6 +147,7 @@ beforeEach(async () => {
   await __test_resetFollows();
   cancelAllRuns();
   __test_resetOrganize();
+  __test_resetMediaProbes();
   __test_resetAutoOrganize();
   __test_resetAgentQuota();
   __test_resetJobs();
@@ -369,7 +373,7 @@ test("整理：只读令牌只看得到看的工具；清单输出不超过几 K
   try {
     const names = (await reader.listTools()).tools.map((t) => t.name);
     for (const n of ["organize_list", "organize_status", "organize_detail", "tmdb_search"]) assert.ok(names.includes(n), n);
-    for (const n of ["organize_preview", "organize_adjust", "organize_apply", "organize_revert", "organize_skip", "organize_cancel"]) assert.ok(!names.includes(n), n);
+    for (const n of ["organize_preview", "organize_adjust", "organize_probe", "organize_apply", "organize_revert", "organize_skip", "organize_cancel"]) assert.ok(!names.includes(n), n);
 
     const preview = await call(daily, "organize_preview", { task: "tv", subPath: "inbox" });
     const runId = preview.data.runId as string;
@@ -1146,5 +1150,44 @@ test("按本地 strm 结构：organize_preview naming=local 不用 TMDB、run �
     assert.match(String(confident.data.error), /把握之分/);
   } finally {
     await client.close();
+  }
+});
+
+test("整理：探测编码——按单元探全部视频、结果带摘要和 planVersion；默认模板的剧集没用这些变量、「缺标签的」什么都不探；编号不对 / 参数不全报错", async () => {
+  const result = {
+    media: {
+      "@ref": "",
+      track: [
+        { "@type": "Video", Format: "AVC", Width: 1920, Height: 1080 },
+        { "@type": "Audio", Format: "AAC", Channels: 2, Language: "zh" },
+      ],
+    },
+  } as unknown as MediaInfoResult;
+  setProbeDeps({ open: async (_l, size) => ({ size: size ?? 1, read: async () => new Uint8Array(0) }), analyze: async () => ({ result, bytesRead: 1, reads: 1 }) });
+  const client = await connect(dailyToken);
+  try {
+    const preview = await call(client, "organize_preview", { task: "tv", subPath: "inbox" });
+    assert.equal(preview.data.state, "ready");
+    const runId = preview.data.runId as string;
+    const beef = unitBySource(preview.data.attention, "BEEF")!;
+    const probed = await call(client, "organize_probe", { run: runId, unit: beef.ref });
+    assert.equal(probed.isError, false, JSON.stringify(probed.data));
+    assert.deepEqual([probed.data.probed, probed.data.failed, probed.data.changed], [2, 0, 0]);
+    assert.equal(probed.data.files[0].probe, "H.264 · 1080p · AAC 2.0 zh");
+    assert.match(probed.data.files[0].file, new RegExp(`^${beef.ref}\\.[0-9a-f]{8}$`));
+    assert.match(probed.data.planVersion, /^[0-9a-f]{10}$/);
+    assert.match(probed.data.next, /清单没有变化/, "剧集模板没用 {resolution}，名字不变");
+    const nothing = await call(client, "organize_probe", { run: runId, missing: true });
+    assert.equal(nothing.data.probed, 0);
+    assert.match(nothing.data.next, /模板/);
+    const bad = await call(client, "organize_probe", { run: runId, unit: "u99" });
+    assert.equal(bad.isError, true);
+    assert.equal(bad.data.code, "VALIDATION");
+    assert.match(bad.data.error, /没有单元 u99/);
+    const none = await call(client, "organize_probe", { run: runId });
+    assert.equal(none.isError, true);
+  } finally {
+    await client.close();
+    setProbeDeps(null);
   }
 });

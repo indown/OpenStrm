@@ -718,6 +718,38 @@
     }
   },
   {
+    "name": "organize_probe",
+    "scope": "run",
+    "toolset": "organize",
+    "annotations": {
+      "readOnly": false,
+      "destructive": false,
+      "idempotent": true,
+      "openWorld": true
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "missing": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "run"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "organize_cancel",
     "scope": "run",
     "toolset": "organize",

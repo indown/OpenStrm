@@ -96,6 +96,8 @@ export type {
   OrganizeRunDetail,
   OrganizeRunMode,
   OrganizeNaming,
+  MediaProbeTags,
+  OrganizeProbeResult,
   OrganizeRunStage,
   OrganizeRunStats,
   OrganizeRunStatus,

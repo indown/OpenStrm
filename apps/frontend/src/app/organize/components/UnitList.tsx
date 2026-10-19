@@ -3,8 +3,8 @@
 import { useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, RefreshCw, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
-import type { OrganizeConflictChoice, OrganizeItem, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
+import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, RefreshCw, ScanSearch, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
+import type { MediaProbeTags, OrganizeConflictChoice, OrganizeItem, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -72,6 +72,8 @@ export function UnitList({
   onMatch,
   onAdjust,
   onRefresh,
+  onProbe,
+  onProbeMissing,
 }: {
   runId: string;
   units: OrganizeUnit[];
@@ -99,6 +101,10 @@ export function UnitList({
   onAdjust: (unit: OrganizeUnit) => void;
   /** 刷新这部的 TMDB 信息（跳过缓存重新拉详情和季集） */
   onRefresh: (unit: OrganizeUnit) => void;
+  /** 探测这部全部视频的编码（读文件头），填进文件名里缺的标签 */
+  onProbe: (unit: OrganizeUnit) => void;
+  /** 探测这些单元里文件名缺模板标签的视频 */
+  onProbeMissing: (keys: string[]) => void;
 }) {
   const [filter, setFilter] = useState<UnitFilter>("all");
   const [query, setQuery] = useState("");
@@ -161,6 +167,18 @@ export function UnitList({
               <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={busy} onClick={() => onOnlyHigh(matched.map((r) => r.unit))}>
                 只选把握大的
               </Button>
+              {!local && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  disabled={busy}
+                  onClick={() => onProbeMissing(matched.filter((r) => r.unit.selected).map((r) => r.unit.key))}
+                  title="勾着的作品里，文件名缺模板要用的分辨率 / 编码 / 音频 / HDR 标签的视频：读几 MB 文件头补上（读过的有缓存；上次没读到的不再读，按作品点「探测编码」才重试）"
+                >
+                  探测缺标签的视频
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -184,6 +202,7 @@ export function UnitList({
           onMatch={() => onMatch(r.unit)}
           onAdjust={() => onAdjust(r.unit)}
           onRefresh={() => onRefresh(r.unit)}
+          onProbe={() => onProbe(r.unit)}
         />
       ))}
       {folded.length > 0 && (
@@ -208,6 +227,9 @@ export function UnitList({
   );
 }
 
+/** 探测出来的标签一行：2160p HEVC DV DDP */
+const probeLine = (p: MediaProbeTags): string => [p.resolution, p.videoCodec, p.hdr, p.audio].filter(Boolean).join(" ");
+
 function UnitCard({
   runId,
   unit,
@@ -224,6 +246,7 @@ function UnitCard({
   onMatch,
   onAdjust,
   onRefresh,
+  onProbe,
 }: {
   runId: string;
   unit: OrganizeUnit;
@@ -242,6 +265,7 @@ function UnitCard({
   onMatch: () => void;
   onAdjust: () => void;
   onRefresh: () => void;
+  onProbe: () => void;
 }) {
   const [open, setOpen] = useState(false);
   // 海报加载失败（TMDB 图片被墙）就退回图标，别把 alt 文字画在卡片上
@@ -336,6 +360,19 @@ function UnitCard({
               <Button variant="outline" size="sm" className="h-8" onClick={onRefresh} disabled={pending} title="不换作品：跳过缓存重新拉这部的详情和季集，按新信息重新规划">
                 <RefreshCw className="size-4" />
                 刷新 TMDB
+              </Button>
+            )}
+            {m && !local && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8"
+                onClick={onProbe}
+                disabled={pending}
+                title="读这部每个视频的文件头（几 MB，不下载整个文件）拿到真实的分辨率 / 编码 / 音频 / HDR，填进文件名里缺的标签并重新规划；读过的有缓存"
+              >
+                <ScanSearch className="size-4" />
+                探测编码
               </Button>
             )}
             {m && !local && (
@@ -540,6 +577,7 @@ function ItemsTable({
                 <td className="px-2 py-1.5">
                   <div className="break-all">{baseName(it.srcPath)}</div>
                   <div className="break-all text-muted-foreground">{dirName(it.srcPath)}</div>
+                  {it.probe && <div className="text-muted-foreground">探测到 {probeLine(it.probe)}</div>}
                   {it.error ? (
                     <div className="break-all text-destructive">{it.error}</div>
                   ) : it.reason ? (

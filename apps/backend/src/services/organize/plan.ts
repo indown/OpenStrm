@@ -208,15 +208,17 @@ function fillNote(fill: EpisodeFill, count: number): string {
   return `${fill.from}：${count} 个没写季的文件${what.join("、")}`;
 }
 
+/** 文件级的模板变量：文件名里的标签优先，没有的用探测结果（file.probe）补 */
 function fileVars(file: UnitFile): TemplateVars {
   const t = file.parsed.tags;
+  const p = file.probe;
   return {
     edition: file.parsed.edition,
-    resolution: t.resolution,
+    resolution: t.resolution ?? p?.resolution,
     source: t.source,
-    videoCodec: t.videoCodec,
-    audio: t.audio,
-    hdr: t.hdr,
+    videoCodec: t.videoCodec ?? p?.videoCodec,
+    audio: t.audio ?? p?.audio,
+    hdr: t.hdr ?? p?.hdr,
     group: t.group,
     part: file.parsed.part !== undefined ? `part${file.parsed.part}` : "",
     ext: file.ext.replace(/^\./, ""),
@@ -235,7 +237,10 @@ export function renameVariants(dst: string, file: UnitFile): string[] {
   const stem = ext ? name.slice(0, -ext.length) : name;
   const lower = stem.toLowerCase();
   const t = file.parsed.tags;
-  const tags = [t.resolution, t.source, t.hdr, t.videoCodec, t.audio, t.group, file.parsed.edition].filter((x): x is string => !!x && !lower.includes(x.toLowerCase()));
+  const p = file.probe;
+  const tags = [t.resolution ?? p?.resolution, t.source, t.hdr ?? p?.hdr, t.videoCodec ?? p?.videoCodec, t.audio ?? p?.audio, t.group, file.parsed.edition].filter(
+    (x): x is string => !!x && !lower.includes(x.toLowerCase()),
+  );
   const out: string[] = [];
   let suffix = "";
   for (const tag of tags) {

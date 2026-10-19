@@ -39,6 +39,7 @@
     "fastify-plugin": "^5.0.1",
     "jose": "^6.1.0",
     "lru-cache": "^11.0.2",
+    "mediainfo.js": "0.3.8",
     "pino": "^9.14.0",
     "rxjs": "^7.8.2",
     "zod": "^4.1.5"

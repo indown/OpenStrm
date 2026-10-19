@@ -680,3 +680,20 @@ export const oauthUsedRefresh = sqliteTable(
     usedAtIdx: index("oauth_used_refresh_used_at_idx").on(t.usedAt),
   }),
 );
+
+/** 网盘视频的探测结果（services/media/probe.ts，mediainfo.js 读文件头）：按账号 + 文件 id（没 id 的按绝对路径）记，大小变了才重探 */
+export const mediaProbes = sqliteTable(
+  "media_probes",
+  {
+    accountName: text("account_name").notNull(),
+    key: text("key").notNull(),
+    path: text("path").notNull().default(""),
+    size: integer("size").notNull().default(0),
+    /** ok / failed */
+    status: text("status").notNull().default("ok"),
+    data: text("data").notNull().default("{}"),
+    error: text("error").notNull().default(""),
+    probedAt: integer("probed_at").notNull().default(sql`(unixepoch())`),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.accountName, t.key] }) }),
+);
