@@ -69,7 +69,14 @@
 查缓存：有 id 的文件先按 `id:` 键再退到 `path:` 键（`keysOf`），Emby 回填的才用得上。`videoCodecOf` / `audioCodecOf` 顺手认了 Emby 的短名（h264 / hevc / mpeg4 / mpeg2video / vc1、eac3 / truehd / mp3 / pcm_*）。
 测试：library-new.itest（开关关着照样回填、对上任务的才写、没视频流的不写、首轮回填、有 id 退到路径、读文件头的不覆盖）。真机没验（本机没有常驻的 Emby；OpenList 实验环境那套 emby-lab.sh 能起一个，留给下次）。
 
+## 真机补验（2026-10-19 夜）
+
+- **OpenList**：本机 openlist 容器（Local 存储，PUID/PGID=0）挂 ffmpeg 造的三个小文件（H.264 1080p AAC 2.0 / HEVC 720p 10bit AAC 5.1 / mp4 H.264 AC3 5.1），实验账号 + 任务 `src/tv`：预览 → 按单元探测 3 个 2.1 秒全读到，标签 / 语言 / 声道都对；OpenList 的 `/d/` 直链回 206。
+- **整库自动探测的耗时（夸克）**：设置开 `probe: missing`、剧集模板加 `[ - {resolution}]`，预览 `黑白清道夫 (2026)` 整部剧（10 集，每集 4 GB 4K HEVC + DDP + 字幕轨）：**9 分钟**，读到 6 个、4 个「读取量超过上限（48 次 / 64 MB）」。追踪：夸克直链只有约 1 MB/s（2 MB 一块要 1.5–2 秒），MediaInfoLib 从头顺序读到每条轨（含字幕轨）的首个包才停，这些文件要 42–66 MB，所以每个 45–70 秒。还碰到两次直链半路断开 / 20 秒超时（夸克对连续读会抖）。
+- **能不能更早停**：自己驱动 `Open_Buffer_Continue` 看状态位——115 的 remux 上 `Filled` 位和最终完成一样都在 32 MB 处才亮（读到每条轨的首包之前它不认为「填好了」），所以没有「读完轨道表就停」的捷径；WASM 版没有 ParseSpeed。
+- **改法**：预算放到 96 MB / 64 次 / 240 秒；每块请求超时 20 → 60 秒；一次读遇到超时 / 服务端断开（ECONNABORTED / ECONNRESET / aborted / socket hang up）换连接重试一次。真实成本写进文档：夸克上一个 4K 文件一两分钟，1080p 的 mp4 几秒；自动探测默认关，开了整库第一次预览很慢。
+- **Emby 回填**：本机 Emby 容器（emby-lab.sh）+ strm 指向容器里挂的同一批小文件。Emby 入库时 `MediaStreams` 是空的（size 0），`Items/{id}/Refresh` 也不分析；对 strm 条目要等首次播放（`PlaybackInfo`）才 ffprobe 并持久化。所以回填加了 pending：入库时没流的条目记下 id（最多 200 条、30 天），之后每轮按 id 再问，有了流再回填；条目没了也拿掉。
+
 ## 还没做的
 
-- OpenList 真机探测；设置开着自动探测的整库真机预览。
 - 探测结果现在只喂模板；写 nfo 时可以直接用 `media_probes` 里的完整结果（音轨 / 字幕 / 码率都存了）。

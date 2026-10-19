@@ -7,10 +7,11 @@ import axios from "axios";
 import mediaInfoFactory, { type MediaInfo, type MediaInfoResult } from "mediainfo.js";
 
 /**
- * 读取预算。MediaInfoLib 不只读轨道表，还要在第一个簇里找到每条轨的首帧（HDR 元数据、Atmos 这些只在帧里），
- * 最后再跳到文件尾看时长：真机上一个 68 GiB、77 Mbps 的 4K 原盘 remux（4 条音轨）从头顺序读了 33 MB 才凑齐，
- * 再加文件尾一块；码率低的文件读得少得多。WASM 版没有 ParseSpeed 可调，所以预算要放到这个量级，
- * 超了算失败「读取量超过上限」，不半途给结果
+ * 读取预算。MediaInfoLib 不只读轨道表，还要在第一个簇里找到每条轨的首个包（HDR 元数据、Atmos 这些只在帧里，
+ * 字幕轨的第一条可能在几十秒之后），最后再跳到文件尾看时长：真机上一个 68 GiB、77 Mbps 的 4K 原盘 remux（4 条音轨）
+ * 从头顺序读了 33 MB 才凑齐；夸克上 4 GB 的 4K 剧集（HEVC + DDP + 字幕轨）要 42–66 MB。底层 Open_Buffer_Continue 的
+ * Filled 位也是读到同一处才亮，没有更早的停法；WASM 版没有 ParseSpeed 可调。所以预算要放到这个量级，
+ * 超了算失败「读取量超过上限」，不半途给结果。网盘直链慢（夸克约 1 MB/s）时一个 4K 文件要一两分钟，这是探测的真实成本
  */
 export interface ProbeLimits {
   /** 一个文件最多读这么多字节 */
@@ -23,7 +24,7 @@ export interface ProbeLimits {
   CHUNK_BYTES: number;
 }
 
-const DEFAULT_LIMITS: ProbeLimits = { MAX_BYTES: 64 * 1024 * 1024, MAX_READS: 48, TIMEOUT_MS: 120_000, CHUNK_BYTES: 2 * 1024 * 1024 };
+const DEFAULT_LIMITS: ProbeLimits = { MAX_BYTES: 96 * 1024 * 1024, MAX_READS: 64, TIMEOUT_MS: 240_000, CHUNK_BYTES: 2 * 1024 * 1024 };
 export const PROBE_LIMITS: ProbeLimits = { ...DEFAULT_LIMITS };
 
 /** 仅供测试：改预算，传 null 恢复；改了 CHUNK_BYTES 要再 __test_resetMediaInfo 让实例按新块大小重建 */
@@ -128,18 +129,34 @@ export interface RangeLink {
  * 网盘直链上的 Range 读取。大小没给的话先读第一块，从 Content-Range 里拿总大小（第一块留着给 offset 0 用，不白读）。
  * 服务端不理 Range 回 200 整个文件时 maxContentLength 会拦下来，当成「直链不支持 Range」
  */
+/** 直链上一次读的临时故障（慢得超时、服务端半路断开）：换个连接再试一次就好，不算这个文件读不了 */
+const isTransient = (err: unknown): boolean => {
+  const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: string })?.code ?? "";
+  return code === "ECONNABORTED" || code === "ECONNRESET" || code === "ETIMEDOUT" || /aborted|socket hang up|timeout/i.test(msg);
+};
+
 export async function openRangeSource(link: RangeLink, size: number | undefined, extraHeaders: Record<string, string> = {}): Promise<ProbeSource> {
   const headers = { ...extraHeaders, ...(link.headers ?? {}) };
-  const fetchRange = async (offset: number, length: number, signal?: AbortSignal): Promise<{ data: Uint8Array; total?: number }> => {
-    const res = await axios.get<ArrayBuffer>(link.url, {
+  const fetchOnce = (offset: number, length: number, signal?: AbortSignal) =>
+    axios.get<ArrayBuffer>(link.url, {
       headers: { ...headers, Range: `bytes=${offset}-${offset + length - 1}` },
       responseType: "arraybuffer",
-      timeout: 20_000,
+      // 慢直链上 2 MB 一块也可能要几十秒（夸克约 1 MB/s，还会抖）
+      timeout: 60_000,
       maxContentLength: length + 64 * 1024,
       maxRedirects: 5,
       validateStatus: (s) => s === 206 || s === 200,
       signal,
     });
+  const fetchRange = async (offset: number, length: number, signal?: AbortSignal): Promise<{ data: Uint8Array; total?: number }> => {
+    let res: Awaited<ReturnType<typeof fetchOnce>>;
+    try {
+      res = await fetchOnce(offset, length, signal);
+    } catch (err) {
+      if (signal?.aborted || !isTransient(err)) throw err;
+      res = await fetchOnce(offset, length, signal);
+    }
     if (res.status === 200 && offset !== 0) throw new Error("直链不支持 Range 读取");
     const data = new Uint8Array(res.data);
     const cr = String(res.headers["content-range"] ?? "");

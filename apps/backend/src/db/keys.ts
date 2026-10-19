@@ -29,6 +29,8 @@ export const KEY = {
   embyNewCursor: "emby.newCursor",
   /** Emby 入库回填探测缓存的游标（和入库通知的游标分开：通知开关关着回填照跑） */
   embyProbeCursor: "emby.probeCursor",
+  /** 入库时 Emby 还没分析流的条目：之后几轮再问（Emby 对 strm 要到首次播放才分析） */
+  embyProbePending: "emby.probePending",
   /** 上一次检查更新的结果；不放 app. 前缀——它是运行状态，不是用户设置 */
   updateState: "update.state",
   /** 影库节点的 search_text 是按哪一版归一化规则算的（services/library/search-text.ts 的 SEARCH_TEXT_VERSION） */

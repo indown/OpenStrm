@@ -26,6 +26,9 @@ let baseline: AppSettings;
 let baselineTasks: ReturnType<typeof listTasks> = [];
 /** 桩 Emby：null = 未配置 */
 let page: EmbyNewItem[] | null = [];
+/** 桩的「按 id 取」：从这里找；记下每次问了哪些 id */
+let byId: Record<string, EmbyNewItem> = {};
+let byIdCalls: string[][] = [];
 let fetchCalls = 0;
 let notified: NotifyEvent[] = [];
 
@@ -51,6 +54,10 @@ before(() => {
       fetchCalls += 1;
       return page ? [...page] : null;
     },
+    fetchByIds: async (ids) => {
+      byIdCalls.push(ids);
+      return page ? ids.map((id) => byId[id]).filter((i): i is EmbyNewItem => !!i) : null;
+    },
     notify: async (ev) => {
       notified.push(ev);
     },
@@ -61,6 +68,8 @@ beforeEach(async () => {
   await __test_resetEmbyNew();
   replaceAppSettings({ ...baseline, telegram: { botToken: "t", chatId: "-100" } });
   page = [];
+  byId = {};
+  byIdCalls = [];
   fetchCalls = 0;
   notified = [];
 });
@@ -197,4 +206,26 @@ test("循环启停与加急：没起循环时 nudge 是空操作", async () => {
   assert.equal(getEmbyNewWatcherStatus().running, true);
   await stopEmbyNewWatcher();
   assert.equal(getEmbyNewWatcherStatus().running, false);
+});
+
+test("入库时 Emby 还没分析流的条目：记进 pending，之后每轮按 id 再问，有了流就回填并拿掉；条目没了也拿掉", async () => {
+  replaceTasks([{ id: "emby-t", account: "acc", accountType: "quark", originPath: "tv", targetPath: "x/tv", strmPrefix: "/mnt" }]);
+  __test_resetMediaProbes();
+  const empty = ep({ id: "e-empty", episode: 7, at: T0, sources: [{ path: "/mnt/tv/A/A.S01E07.mkv", size: 1, streams: [] }] });
+  const gone = ep({ id: "e-gone", episode: 8, at: T0 - 1000, sources: [{ path: "/mnt/tv/A/A.S01E08.mkv", size: 1, streams: [] }] });
+  page = [empty, gone];
+  byId = { "e-empty": empty, "e-gone": gone };
+  await tickEmbyNew();
+  assert.equal(countMediaProbes(), 0, "没有流就不写");
+  assert.deepEqual(byIdCalls.at(-1)?.sort(), ["e-empty", "e-gone"], "同一轮就按 id 问了一遍");
+
+  // 下一轮：e-empty 播放过了有了流，e-gone 没了
+  byId = { "e-empty": { ...empty, sources: [{ path: "/mnt/tv/A/A.S01E07.mkv", size: 2, streams: [{ Type: "Video", Codec: "h264", Width: 1920, Height: 1080 }] }] } };
+  await tickEmbyNew();
+  const row = getMediaProbes("acc", ["path:/tv/A/A.S01E07.mkv"]).get("path:/tv/A/A.S01E07.mkv")!;
+  assert.ok(row, "有了流就回填");
+  assert.equal(row.size, 2);
+  const calls = byIdCalls.length;
+  await tickEmbyNew();
+  assert.equal(byIdCalls.length, calls, "都处理完了，pending 空了就不再按 id 问");
 });

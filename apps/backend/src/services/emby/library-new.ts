@@ -56,20 +56,14 @@ interface Cursor {
 interface Deps {
   /** 按 DateCreated 倒序取最近的条目；Emby 未配置时回 null */
   fetch: (limit: number) => Promise<EmbyNewItem[] | null>;
+  /** 按 id 取条目（带媒体源）：入库时还没分析流的条目之后几轮再问；Emby 未配置时回 null */
+  fetchByIds: (ids: string[]) => Promise<EmbyNewItem[] | null>;
   notify: (event: NotifyEvent) => Promise<unknown>;
 }
 
-async function fetchLatestReal(limit: number): Promise<EmbyNewItem[] | null> {
-  const s = readAppSettings();
-  if (!s.emby?.url || !s.emby.apiKey) return null;
-  const base = s.emby.url.replace(/\/+$/, "");
-  const url =
-    `${base}/Items?Recursive=true&IncludeItemTypes=Movie,Episode` +
-    `&SortBy=DateCreated&SortOrder=Descending&Limit=${limit}` +
-    `&Fields=DateCreated,SeriesName,ParentIndexNumber,IndexNumber,ProductionYear,MediaSources` +
-    `&api_key=${encodeURIComponent(s.emby.apiKey)}`;
-  const res = await axios.get<{ Items?: Array<Record<string, unknown>> }>(url, { timeout: DEFAULT_TIMEOUT_MS });
-  return (res.data?.Items ?? []).map((it) => ({
+/** Emby 的一页条目 → 我们的结构；sources 只在要了 MediaSources 时有 */
+function toNewItem(it: Record<string, unknown>): EmbyNewItem {
+  return {
     id: String(it.Id ?? ""),
     type: String(it.Type ?? ""),
     name: String(it.Name ?? ""),
@@ -88,10 +82,38 @@ async function fetchLatestReal(limit: number): Promise<EmbyNewItem[] | null> {
             streams: Array.isArray(ms.MediaStreams) ? (ms.MediaStreams as Array<Record<string, unknown>>) : [],
           }))
       : undefined,
-  }));
+  };
 }
 
-const realDeps: Deps = { fetch: fetchLatestReal, notify };
+const EMBY_FIELDS = "DateCreated,SeriesName,ParentIndexNumber,IndexNumber,ProductionYear,MediaSources";
+
+function embyBase(): { base: string; apiKey: string } | null {
+  const s = readAppSettings();
+  if (!s.emby?.url || !s.emby.apiKey) return null;
+  return { base: s.emby.url.replace(/\/+$/, ""), apiKey: s.emby.apiKey };
+}
+
+async function fetchLatestReal(limit: number): Promise<EmbyNewItem[] | null> {
+  const e = embyBase();
+  if (!e) return null;
+  const url = `${e.base}/Items?Recursive=true&IncludeItemTypes=Movie,Episode&SortBy=DateCreated&SortOrder=Descending&Limit=${limit}&Fields=${EMBY_FIELDS}&api_key=${encodeURIComponent(e.apiKey)}`;
+  const res = await axios.get<{ Items?: Array<Record<string, unknown>> }>(url, { timeout: DEFAULT_TIMEOUT_MS });
+  return (res.data?.Items ?? []).map(toNewItem);
+}
+
+async function fetchByIdsReal(ids: string[]): Promise<EmbyNewItem[] | null> {
+  const e = embyBase();
+  if (!e) return null;
+  const out: EmbyNewItem[] = [];
+  for (let i = 0; i < ids.length; i += 50) {
+    const url = `${e.base}/Items?Ids=${encodeURIComponent(ids.slice(i, i + 50).join(","))}&Fields=${EMBY_FIELDS}&api_key=${encodeURIComponent(e.apiKey)}`;
+    const res = await axios.get<{ Items?: Array<Record<string, unknown>> }>(url, { timeout: DEFAULT_TIMEOUT_MS });
+    out.push(...(res.data?.Items ?? []).map(toNewItem));
+  }
+  return out;
+}
+
+const realDeps: Deps = { fetch: fetchLatestReal, fetchByIds: fetchByIdsReal, notify };
 
 let deps: Deps = { ...realDeps };
 
@@ -134,13 +156,55 @@ export async function tickEmbyNew(): Promise<void> {
   }
 }
 
-/** 回填探测缓存：自己的游标，和通知开关无关；首轮也回填（存量的最近几十条白送） */
-function backfillRound(sorted: EmbyNewItem[]): void {
+/** 入库时 Emby 还没分析流的条目：记下来之后几轮再问。最多记这么多、最多等这么久（Emby 对 strm 要到首次播放才分析） */
+const PENDING_MAX = 200;
+const PENDING_TTL_MS = 30 * 24 * 3600 * 1000;
+
+interface Pending {
+  id: string;
+  since: number;
+}
+
+const hasVideoStream = (i: EmbyNewItem): boolean => (i.sources ?? []).some((src) => src.streams.some((st) => st.Type === "Video"));
+
+/**
+ * 回填探测缓存：自己的游标，和通知开关无关；首轮也回填（存量的最近几十条白送）。
+ * Emby 对 strm 条目要到首次播放（PlaybackInfo）才分析流，入库那一刻多半是空的：这些条目记进 pending，之后每轮按 id 再问，
+ * 有了流就回填、拿掉；等太久的丢掉
+ */
+async function backfillRound(sorted: EmbyNewItem[]): Promise<void> {
   const cursor = readKv<Cursor>(KEY.embyProbeCursor);
   const fresh = cursor ? sorted.filter((i) => i.at > cursor.at || (i.at === cursor.at && !cursor.ids.includes(i.id))) : sorted;
   const newest = sorted[0];
   if (newest) writeKv(KEY.embyProbeCursor, { at: newest.at, ids: sorted.filter((i) => i.at === newest.at).map((i) => i.id) });
-  const sources = fresh.flatMap((i) => i.sources ?? []);
+
+  const now = Date.now();
+  const pending = (readKv<Pending[]>(KEY.embyProbePending) ?? []).filter((p) => now - p.since < PENDING_TTL_MS);
+  const known = new Set(pending.map((p) => p.id));
+  const ready = fresh.filter(hasVideoStream);
+  for (const i of fresh) if (!hasVideoStream(i) && (i.sources?.length ?? 0) > 0 && !known.has(i.id)) pending.push({ id: i.id, since: now });
+
+  // 之前没分析的：按 id 再看一眼
+  if (pending.length > 0) {
+    const again = await deps.fetchByIds(pending.map((p) => p.id));
+    if (again) {
+      const found = new Map(again.map((i) => [i.id, i]));
+      for (const p of [...pending]) {
+        const i = found.get(p.id);
+        if (!i) {
+          pending.splice(pending.indexOf(p), 1); // 条目没了（删了 / 重建了）
+          continue;
+        }
+        if (hasVideoStream(i)) {
+          ready.push(i);
+          pending.splice(pending.indexOf(p), 1);
+        }
+      }
+    }
+  }
+  writeKv(KEY.embyProbePending, pending.slice(-PENDING_MAX));
+
+  const sources = ready.flatMap((i) => i.sources ?? []);
   if (sources.length === 0) return;
   const r = backfillProbesFromEmby(sources);
   if (r.filled > 0) log.info(`按 Emby 分析过的媒体流回填了 ${r.filled} 个文件的探测缓存${r.kept ? `（${r.kept} 个已有读文件头的结果，不覆盖）` : ""}`);
@@ -151,7 +215,7 @@ async function runRound(): Promise<void> {
   if (!items) return;
 
   const sorted = items.filter((i) => Number.isFinite(i.at) && i.id).sort((a, b) => b.at - a.at);
-  backfillRound(sorted);
+  await backfillRound(sorted);
   // 通知开关关着就到此为止；通知的游标会停在关掉那一刻，重新打开时把中间的入库补报一次
   if (!notifyPrefs(readAppSettings()).embyNew) return;
   const newest = sorted[0];
@@ -216,6 +280,7 @@ export async function __test_resetEmbyNew(): Promise<void> {
   await stopEmbyNewWatcher();
   writeKv(KEY.embyNewCursor, null);
   writeKv(KEY.embyProbeCursor, null);
+  writeKv(KEY.embyProbePending, null);
   lastTickAt = null;
   loop.noteError(null);
 }
