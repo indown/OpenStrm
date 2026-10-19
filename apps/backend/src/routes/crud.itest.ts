@@ -521,3 +521,17 @@ test("PUT /api/settings：PanSou 换了地址、密码还是掩码，存着的�
   const bad = await call("PUT", "/api/settings", { pansou: { baseUrl: "http://admin:pw@elsewhere:8888" } });
   assert.equal(bad.statusCode, 400, "地址里不收用户名密码");
 });
+
+test("任务自己的命名模板：合法的存得进去、空串不算；坏模板 400", async () => {
+  const created = await call("POST", "/api/task", {
+    account: "acc",
+    originPath: "tv",
+    targetPath: "tv",
+    organize: { libraryType: "tv", templates: { movie: "", tv: "{title}/Season {season00}/{title} - S{season00}E{episode00}.{ext}" }, idTag: "plex", episodeTitle: true },
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  assert.deepEqual(created.json().organize, { libraryType: "tv", templates: { movie: "", tv: "{title}/Season {season00}/{title} - S{season00}E{episode00}.{ext}" }, idTag: "plex", episodeTitle: true });
+  const bad = await call("POST", "/api/task", { account: "acc", originPath: "tv", targetPath: "tv", organize: { templates: { tv: "{title}/{nope}.{ext}" } } });
+  assert.equal(bad.statusCode, 400);
+  assert.match(bad.json().message, /剧集模板.*不认识的变量/);
+});

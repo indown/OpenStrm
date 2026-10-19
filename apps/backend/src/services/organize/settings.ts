@@ -1,5 +1,5 @@
 /**
- * 整理设置的默认值与归一化。设置存在 app.organize（settings 表），任务上的 organize 覆盖自动整理策略。
+ * 整理设置的默认值与归一化。设置存在 app.organize（settings 表），任务上的 organize 覆盖自动整理策略、命名模板、id 标签、集标题。
  */
 import type { AppSettings, OrganizeCategoryRule, OrganizeCategorySettings, OrganizeSettings, TaskDefinition } from "@openstrm/shared";
 
@@ -56,16 +56,21 @@ function cleanRules(list: OrganizeCategoryRule[] | undefined, fallback: Organize
   return out;
 }
 
-export function resolveOrganizeSettings(settings: AppSettings): ResolvedOrganizeSettings {
+/**
+ * 全局设置归一；给了 task 就套上任务自己的命名设定（模板 / id 标签 / 集标题，留空的沿用全局）。
+ * 分类、识别词、冒号、花絮这些仍是全局的
+ */
+export function resolveOrganizeSettings(settings: AppSettings, task?: Pick<TaskDefinition, "organize"> | null): ResolvedOrganizeSettings {
   const o = settings.organize ?? {};
+  const t = task?.organize ?? {};
   return {
     templates: {
-      movie: o.templates?.movie?.trim() || DEFAULT_TEMPLATES.movie,
-      tv: o.templates?.tv?.trim() || DEFAULT_TEMPLATES.tv,
+      movie: t.templates?.movie?.trim() || o.templates?.movie?.trim() || DEFAULT_TEMPLATES.movie,
+      tv: t.templates?.tv?.trim() || o.templates?.tv?.trim() || DEFAULT_TEMPLATES.tv,
     },
-    idTag: o.idTag ?? "emby",
+    idTag: t.idTag ?? o.idTag ?? "emby",
     colon: o.colon ?? "smart",
-    episodeTitle: o.episodeTitle === true,
+    episodeTitle: (t.episodeTitle ?? o.episodeTitle) === true,
     categories: {
       enabled: o.categories?.enabled === true,
       movie: cleanRules(o.categories?.movie, DEFAULT_CATEGORIES.movie),

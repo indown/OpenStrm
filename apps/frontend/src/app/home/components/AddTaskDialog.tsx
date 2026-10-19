@@ -3,10 +3,10 @@
 import * as React from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { useForm, useWatch, type Control } from "react-hook-form";
+import { useForm, useWatch, type Control, type UseFormSetValue } from "react-hook-form";
 import { toast } from "sonner";
 import { FolderOpen } from "lucide-react";
-import type { OpenlistCopySettings, TaskDefinition } from "@openstrm/shared";
+import type { OpenlistCopySettings, OrganizeTemplatePreview, TaskDefinition } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -38,6 +38,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
+import { TemplatePresetPicker } from "@/components/template-preset-picker";
 import { apiErrorMessage } from "@/lib/axios";
 import { fmtWhen } from "@/lib/format";
 import { copyGapInDialog, isOpenlistRootInput, normTargetDir, OPENLIST_ROOT_TARGET } from "@/lib/openlist-copy";
@@ -73,6 +74,11 @@ export const taskFormSchema = z.object({
   /** 整理：库类型先验；自动整理策略（空串 = 跟随全局设置） */
   libraryType: z.enum(["mixed", "movie", "tv"]).optional(),
   organizeMode: z.enum(["", "off", "review", "auto"]).optional(),
+  /** 这个任务自己的命名模板 / id 标签 / 集标题：留空 / 空串 = 沿用全局设置（模板合不合法后端校验，错了会回在表单上） */
+  orgMovieTemplate: z.string().optional(),
+  orgTvTemplate: z.string().optional(),
+  orgIdTag: z.enum(["", "emby", "jellyfin", "plex", "none"]).optional(),
+  orgEpisodeTitle: z.enum(["", "on", "off"]).optional(),
 })
   // 「复制到哪」不收 OpenList 根；复制关着时这一栏不显示、也不提交，不拦
   .refine((v) => !v.copyEnabled || !isOpenlistRootInput(v.copyDstDir), { message: OPENLIST_ROOT_TARGET, path: ["copyDstDir"] });
@@ -133,7 +139,163 @@ function defaultsFor(task: TaskEditable | undefined): TaskFormValues {
     copyAfterCopy: task?.copyToOpenlist?.enabled ? (task.copyToOpenlist.afterCopy ?? "keep") : "keep",
     libraryType: task?.organize?.libraryType ?? "mixed",
     organizeMode: task?.organize?.mode ?? "",
+    orgMovieTemplate: task?.organize?.templates?.movie ?? "",
+    orgTvTemplate: task?.organize?.templates?.tv ?? "",
+    orgIdTag: task?.organize?.idTag ?? "",
+    orgEpisodeTitle: task?.organize?.episodeTitle === undefined ? "" : task.organize.episodeTitle ? "on" : "off",
   };
+}
+
+/** 任务上有没有自己的命名设定：有就默认展开那一块 */
+const hasOwnNaming = (task: Pick<TaskDefinition, "organize"> | null | undefined): boolean =>
+  !!task?.organize?.templates?.movie?.trim() || !!task?.organize?.templates?.tv?.trim() || !!task?.organize?.idTag || task?.organize?.episodeTitle !== undefined;
+
+/**
+ * 任务自己的命名设定（可选，折叠着）：电影 / 剧集模板、id 标签写法、集标题，留空沿用全局；
+ * 和设置页一样实时试算（两个固定样例），没填的那格按全局模板算
+ */
+function TaskNamingFields({ control, setValue, defaultOpen }: { control: Control<TaskFormValues>; setValue: UseFormSetValue<TaskFormValues>; defaultOpen: boolean }) {
+  const [open, setOpen] = React.useState(defaultOpen);
+  const movie = useWatch({ control, name: "orgMovieTemplate" }) ?? "";
+  const tv = useWatch({ control, name: "orgTvTemplate" }) ?? "";
+  const idTag = useWatch({ control, name: "orgIdTag" }) ?? "";
+  const episodeTitle = useWatch({ control, name: "orgEpisodeTitle" }) ?? "";
+  const [preview, setPreview] = React.useState<OrganizeTemplatePreview | null>(null);
+  const timer = React.useRef<NodeJS.Timeout | null>(null);
+  const key = JSON.stringify([open, movie, tv, idTag, episodeTitle]);
+  React.useEffect(() => {
+    if (!open) return;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      api.organize
+        .previewName({
+          templates: { movie, tv },
+          ...(idTag ? { idTag: idTag as Exclude<typeof idTag, ""> } : {}),
+          ...(episodeTitle ? { episodeTitle: episodeTitle === "on" } : {}),
+        })
+        .then(setPreview)
+        .catch(() => setPreview(null));
+    }, 400);
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  const own = !!movie.trim() || !!tv.trim() || !!idTag || !!episodeTitle;
+  return (
+    <div className="space-y-3 rounded-md border p-3">
+      <button type="button" className="flex w-full items-center justify-between gap-2 text-left text-sm" onClick={() => setOpen((v) => !v)}>
+        <span className="font-medium">
+          命名模板 <span className="text-xs font-normal text-muted-foreground">{own ? "这个任务单独设了" : "沿用全局设置"}</span>
+        </span>
+        <span className="text-xs text-muted-foreground">{open ? "收起" : "展开"}</span>
+      </button>
+      {open && (
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">只给这个任务用的写法（比如动画库文件名带绝对集数）；留空的沿用设置页「整理与命名」里的。</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <TemplatePresetPicker
+              onPick={(p) => {
+                setValue("orgMovieTemplate", p.movie, { shouldDirty: true });
+                setValue("orgTvTemplate", p.tv, { shouldDirty: true });
+              }}
+            />
+            <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => {
+              setValue("orgMovieTemplate", "", { shouldDirty: true });
+              setValue("orgTvTemplate", "", { shouldDirty: true });
+              setValue("orgIdTag", "", { shouldDirty: true });
+              setValue("orgEpisodeTitle", "", { shouldDirty: true });
+            }}>
+              清空，沿用全局
+            </Button>
+          </div>
+          <FormField
+            control={control}
+            name="orgMovieTemplate"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>电影模板</FormLabel>
+                <FormControl>
+                  <Input {...field} value={field.value ?? ""} placeholder="留空沿用全局" className="font-mono text-xs" />
+                </FormControl>
+                <FormDescription className="break-all text-xs">示例：{preview?.movie ?? "…"}</FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={control}
+            name="orgTvTemplate"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>剧集模板</FormLabel>
+                <FormControl>
+                  <Input {...field} value={field.value ?? ""} placeholder="留空沿用全局" className="font-mono text-xs" />
+                </FormControl>
+                <FormDescription className="break-all text-xs">示例：{preview?.tv ?? "…"}</FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          {preview && preview.errors.length > 0 && (
+            <ul className="space-y-0.5 text-xs text-destructive">
+              {preview.errors.map((e, i) => (
+                <li key={i} className="break-all">
+                  {e}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <FormField
+              control={control}
+              name="orgIdTag"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>id 标签写法</FormLabel>
+                  <Select onValueChange={(v) => field.onChange(v === "__global__" ? "" : v)} value={field.value || "__global__"}>
+                    <FormControl>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent className="z-[60]">
+                      <SelectItem value="__global__">跟随全局设置</SelectItem>
+                      <SelectItem value="emby">Emby：[tmdbid=123]</SelectItem>
+                      <SelectItem value="jellyfin">Jellyfin：[tmdbid-123]</SelectItem>
+                      <SelectItem value="plex">Plex：{"{tmdb-123}"}</SelectItem>
+                      <SelectItem value="none">不写</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={control}
+              name="orgEpisodeTitle"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>文件名里写集标题</FormLabel>
+                  <Select onValueChange={(v) => field.onChange(v === "__global__" ? "" : v)} value={field.value || "__global__"}>
+                    <FormControl>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent className="z-[60]">
+                      <SelectItem value="__global__">跟随全局设置</SelectItem>
+                      <SelectItem value="on">写</SelectItem>
+                      <SelectItem value="off">不写</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormItem>
+              )}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** 和全站共用的 <SwitchRow> 同一副长相，只是值从 react-hook-form 来 */
@@ -392,12 +554,21 @@ export function AddTaskDialog({
       // 115 + 302 且前缀是本地挂载路径时拼上账户名，代理按这个前缀识别挂载点；http(s) 前缀不拼，代理按任务反查账号
       const prefix = normalizePrefix(values.strmPrefix);
       const withAccount = is115Account && !!values.enable302 && !!values.account && !isHttpPrefix(prefix);
-      const { libraryType, organizeMode, copyEnabled, copyDstDir, copyAfterCopy, ...rest } = values;
+      const { libraryType, organizeMode, orgMovieTemplate, orgTvTemplate, orgIdTag, orgEpisodeTitle, copyEnabled, copyDstDir, copyAfterCopy, ...rest } = values;
+      const movieTpl = orgMovieTemplate?.trim() ?? "";
+      const tvTpl = orgTvTemplate?.trim() ?? "";
       const taskData = {
         ...rest,
         strmPrefix: withAccount ? `${prefix}/${values.account}` : prefix,
         accountType,
-        organize: { ...(organizeMode ? { mode: organizeMode } : {}), libraryType: libraryType ?? "mixed" },
+        organize: {
+          ...(organizeMode ? { mode: organizeMode } : {}),
+          libraryType: libraryType ?? "mixed",
+          // 留空的不存：沿用全局设置
+          ...(movieTpl || tvTpl ? { templates: { ...(movieTpl ? { movie: movieTpl } : {}), ...(tvTpl ? { tv: tvTpl } : {}) } } : {}),
+          ...(orgIdTag ? { idTag: orgIdTag } : {}),
+          ...(orgEpisodeTitle ? { episodeTitle: orgEpisodeTitle === "on" } : {}),
+        },
         // 开关关着就整块记成关：留着「删除 / 归档」的话，
         // 以后在转存弹框里勾一次「转存后复制」会连带把网盘上的源文件删了或挪走
         copyToOpenlist: copyEnabled
@@ -669,6 +840,8 @@ export function AddTaskDialog({
                 )}
               />
             </div>
+
+            <TaskNamingFields control={form.control} setValue={form.setValue} defaultOpen={hasOwnNaming(task)} />
 
             <div className="space-y-2">
               {is115Account && (

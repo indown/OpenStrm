@@ -2695,3 +2695,13 @@ test("本地结构的清单：能改文件名（字幕跟着），不能改标�
   const srt = listItems(run.id).find((i) => i.srcPath.endsWith("BEEF.S01E01.1080p.WEB-DL.chs.srt"))!;
   assert.equal(srt.dstPath, "/tv/inbox/BEEF.S01.1080p/自己起的名.chs.srt", "本地的附属文件按视频的新主名跟");
 });
+
+test("任务自己的命名模板 / id 标签 / 集标题：按任务上的规划，全局的不变", async () => {
+  replaceAppSettings({ ...readAppSettings(), organize: { idTag: "jellyfin" } });
+  replaceTasks([{ ...task, organize: { templates: { movie: "{title} ({year}) {idTag}/{title}.{year}.{ext}" }, idTag: "emby", episodeTitle: false } }]);
+  const run = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(run.id, ["ready"]);
+  const items = listItems(run.id);
+  assert.ok(items.some((i) => i.dstPath === "/tv/沙丘：第二部 (2024) [tmdbid=693134]/沙丘：第二部.2024.mkv"), items.map((i) => i.dstPath).join("\n"));
+  assert.ok(items.some((i) => i.dstPath === "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv"), "剧集模板任务上没设，沿用全局默认；id 标签按任务上的 emby");
+});

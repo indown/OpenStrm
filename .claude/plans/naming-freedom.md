@@ -110,3 +110,11 @@
 **测试**：plan.test（标题 / 年份、钉季集四种组合、改名带附属、原地改名）、local-naming.test（改名带附属、不动的改名）、run.itest（改标题 → 清掉 → 换匹配清掉 → 记住 → 下次预览套上；钉集 → 季覆盖 / 偏移不影响 → 只给剧集视频 → 撤；改名 → 字幕跟 → 撤；本地清单能改名不能改标题 / 钉）、organize.itest（校验、PIN_NOT_TV、别名接口）、mcp-p3（adjust 改标题 + 钉 + 改名，confirmText）。全量：见下。
 
 **真机 / 浏览器（115 只读预览，`tv/东京三十岁左右 (2026) [tmdbid=325124]`，5 集，什么都没执行）**：TMDB 的译名是「东京三十而已」而目录叫「东京三十岁左右」——正是改标题的用处。改标题弹框从真 TMDB 拉到 6 个别名（东京三十而已 / Tokyo middle 30 / Tokyo Mid 30s / 三十而已 日本版 / トウキョウ ミドルサーティー / 東京三十歲左右）；填「东京三十岁左右」后 5 项全变「不变」（文件本来就按这个名字放好的）。「…」→ 钉季 / 集 把 E01 钉成 S02E07：变「移动」到 Season 02、目录操作多一条 mkdir。「…」→ 改文件名把 E02 改成「东京三十岁左右 第2集」：变「改名」、自动补 .mp4。自动化点「…」小按钮容易点偏（24px），用 ref 点就行，不是功能问题。实验库、口令、令牌用完已删。
+
+## 实施记录：第二批 A1 + A5（2026-10-19）
+
+**A1 按任务覆盖**：`TaskOrganizeSettings` 加 `templates { movie?, tv? }` / `idTag` / `episodeTitle`（任务是 JSON 存的，没有迁移）；任务的 zod 校验和设置页共用 `templateField()`（空串算没填，填了必须是合法模板）。`resolveOrganizeSettings(settings, task?)`：任务上非空的盖过全局，分类 / 识别词 / 冒号 / 花絮仍全局；只有 `preview()` 传 task（规划、`planContext`、重规划都吃 `state.org`），`afterApply` / 影库那几处只用 rules，不用传。任务弹框「整理」下面多一块可折叠的「命名模板」（任务上设过就默认展开）：预设下拉、电影 / 剧集模板、id 标签、集标题，沿用设置页的实时试算（留空那格按全局算），「清空，沿用全局」一键回退；提交时留空的不存。
+
+**A5 预设与说明**：`lib/organize-presets.ts` 五个预设（默认 / 按年份分目录 / 动画带绝对集数 / Plex 风格 / 只归目录保留原文件名），`components/template-preset-picker.tsx` 设置页和任务弹框共用；设置页说明补上 `{absolute000}` `{originalName}` 和「可选段里能放 /」。「按合集」预设等 A2 做完再加。`DEFAULT_TEMPLATES` 搬到 lib 里：预设模块引设置页组件、设置页组件又引预设选择器，浏览器里报「Cannot access 'DEFAULT_TEMPLATES' before initialization」——浏览器冒烟抓出来的，typecheck / lint 都不报。
+
+**测试**：settings.test（任务覆盖 / 留空沿用 / 分类识别词仍全局）、run.itest（任务自己的电影模板 + idTag，剧集沿用全局）、crud.itest（合法模板存得进、坏模板 400）。浏览器：115 tv 任务套「动画：文件名带绝对集数」预设 → 保存 → 重开显示「这个任务单独设了」且模板还在；设置页预设下拉和说明正常。

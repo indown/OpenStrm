@@ -148,6 +148,11 @@ export interface TaskOrganizeSettings {
   mode?: OrganizeAutoMode;
   /** 这个任务的库是电影 / 剧集 / 混合：识别时当作先验，混合按识别结果分流 */
   libraryType?: "movie" | "tv" | "mixed";
+  /** 这个任务自己的命名模板（留空的沿用全局设置）：电影库、动画库各用各的写法 */
+  templates?: { movie?: string; tv?: string };
+  /** 这个任务的 id 标签写法 / 文件名里写不写集标题（不给就沿用全局） */
+  idTag?: OrganizeSettings["idTag"];
+  episodeTitle?: boolean;
 }
 
 /* ------------------------------- 识别结果 ------------------------------- */

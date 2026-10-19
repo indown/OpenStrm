@@ -8,6 +8,9 @@ import type { AppSettings, LifeMonitorSettings, TaskDefinition } from "@openstrm
 import { normalizeStrmPrefix } from "../services/strm/naming.js";
 import { validateTemplate } from "../services/organize/template.js";
 import { parseRules } from "../services/organize/rules.js";
+
+/** 命名模板字段：空串算没填（沿用默认），填了就得是合法模板 */
+const templateField = (label: string) => z.string().refine((v) => !v.trim() || validateTemplate(v).length === 0, { error: (iss) => `${label}：${validateTemplate(String(iss.input)).join("；")}` });
 import { isOpenlistRootInput, OPENLIST_ROOT_TARGET } from "../services/copy/paths.js";
 import { THROTTLE_LIMITS } from "../db/defaults.js";
 
@@ -60,6 +63,10 @@ export const taskInputSchema = z.looseObject({
     .object({
       mode: z.enum(["off", "review", "auto"]).optional(),
       libraryType: z.enum(["movie", "tv", "mixed"]).optional(),
+      /** 任务自己的命名模板 / id 标签 / 集标题：不给就沿用全局设置 */
+      templates: z.object({ movie: templateField("电影模板").optional(), tv: templateField("剧集模板").optional() }).optional(),
+      idTag: z.enum(["emby", "jellyfin", "plex", "none"]).optional(),
+      episodeTitle: z.boolean().optional(),
     })
     .optional(),
   copyToOpenlist: z
@@ -155,12 +162,7 @@ const categoryRuleSchema = z.object({
 /** 整理设置：模板和识别词在入口就校验，坏模板存进去每次预览都会炸 */
 export const organizeSettingsSchema = z
   .looseObject({
-    templates: z
-      .object({
-        movie: z.string().refine((v) => !v.trim() || validateTemplate(v).length === 0, { error: (iss) => `电影模板：${validateTemplate(String(iss.input)).join("；")}` }).optional(),
-        tv: z.string().refine((v) => !v.trim() || validateTemplate(v).length === 0, { error: (iss) => `剧集模板：${validateTemplate(String(iss.input)).join("；")}` }).optional(),
-      })
-      .optional(),
+    templates: z.object({ movie: templateField("电影模板").optional(), tv: templateField("剧集模板").optional() }).optional(),
     idTag: z.enum(["emby", "jellyfin", "plex", "none"]).optional(),
     colon: z.enum(["smart", "delete", "dash", "spaceDash"]).optional(),
     episodeTitle: z.boolean().optional(),

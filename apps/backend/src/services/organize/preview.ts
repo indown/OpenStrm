@@ -499,7 +499,8 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
   if (!task) throw new Error("任务已不存在");
   const provider = providerForTask(task, "write");
   const settings = readAppSettings();
-  const org = resolveOrganizeSettings(settings);
+  // 命名模板 / id 标签 / 集标题可以按任务覆盖
+  const org = resolveOrganizeSettings(settings, task);
   // 按本地 strm 结构的不识别，不要 TMDB；缺 key 的检查放在分支之后
   const tmdb = run.naming === "local" ? null : deps.tmdb(settings, { fresh: opts.refreshTmdb });
   const signal = job.abort.signal;
