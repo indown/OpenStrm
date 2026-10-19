@@ -7,10 +7,10 @@
  * popularity 只做同分排序。置信度：来自 id 证据或「标题相等且年份相等」是 high；标题相等但年份缺 / 差一年、
  * 或首选领先第二名 ≥ 3 分是 medium；其余有结果是 low；没结果 none。
  *
- * TMDB 请求都过 TmdbClient：进程内 + 库里两层缓存，节流在 services/tmdb.ts。
+ * TMDB 请求都过 TmdbClient：进程内 + 库里两层缓存，节流在 services/tmdb.ts；设置页能一键清空（purgeTmdbCache）。
  */
 import type { OrganizeCandidate, OrganizeConfidence, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType } from "@openstrm/shared";
-import { readTmdbCache, writeTmdbCache } from "../../db/repositories/organize.js";
+import { clearTmdbCache, readTmdbCache, writeTmdbCache } from "../../db/repositories/organize.js";
 import { stripInvisible } from "../../lib/text.js";
 import { getDetails, getSeasonEpisodes, searchMovie, searchMulti, searchTv, throttleTmdb, type TmdbDetails, type TmdbEpisode, type TmdbSearchResult } from "../tmdb.js";
 import { normalizeTitle } from "./parse-name.js";
@@ -29,18 +29,48 @@ const SEARCH_TTL = 24 * 3600;
 const DETAILS_TTL = 7 * 24 * 3600;
 const SEASON_TTL = 24 * 3600;
 
+/** 清空过几次：活得久的客户端（收藏夹那个单例）看到它变了，就把自己的进程内 memo 丢掉 */
+let generation = 0;
+
+/**
+ * 设置页「清空 TMDB 缓存」：库里的行整个删掉，各客户端的进程内 memo 一并作废。
+ * TMDB 上改了译名 / 海报，不用等详情那 7 天过期。返回删掉的行数
+ */
+export function purgeTmdbCache(): number {
+  generation += 1;
+  return clearTmdbCache();
+}
+
+export interface TmdbClientOptions {
+  /**
+   * 刷新 TMDB 信息：详情和季集跳过库里已有的值、直接问 TMDB（拉到的照常写回；同一个客户端里 memo 照用，
+   * 一部剧的几个季目录只拉一次）。搜索不受影响：目录名是按旧名起的，旧名反而更容易对上
+   */
+  fresh?: boolean;
+}
+
 export class TmdbClient implements TmdbApi {
   private readonly memo = new Map<string, unknown>();
+  private seen = generation;
+  private readonly fresh: boolean;
 
   constructor(
     private readonly apiKey: string,
     private readonly language: string,
-  ) {}
+    opts: TmdbClientOptions = {},
+  ) {
+    this.fresh = opts.fresh === true;
+  }
 
-  private async cached<T>(key: string, ttl: number, fetcher: () => Promise<T>): Promise<T> {
+  /** skipStore：不看库里的（memo 还是看：同一个客户端里拉过的就是新的） */
+  private async cached<T>(key: string, ttl: number, fetcher: () => Promise<T>, skipStore = false): Promise<T> {
+    if (this.seen !== generation) {
+      this.memo.clear();
+      this.seen = generation;
+    }
     const k = `${key}:${this.language}`;
     if (this.memo.has(k)) return this.memo.get(k) as T;
-    const hit = readTmdbCache<T>(k, ttl);
+    const hit = skipStore ? null : readTmdbCache<T>(k, ttl);
     if (hit !== null) {
       this.memo.set(k, hit);
       return hit;
@@ -65,11 +95,11 @@ export class TmdbClient implements TmdbApi {
   }
 
   details(kind: OrganizeMediaType, id: number): Promise<TmdbDetails | null> {
-    return this.cached(`details:${kind}:${id}`, DETAILS_TTL, () => getDetails(this.apiKey, kind, id, this.language));
+    return this.cached(`details:${kind}:${id}`, DETAILS_TTL, () => getDetails(this.apiKey, kind, id, this.language), this.fresh);
   }
 
   season(tvId: number, season: number): Promise<TmdbEpisode[]> {
-    return this.cached(`season:${tvId}:${season}`, SEASON_TTL, () => getSeasonEpisodes(this.apiKey, tvId, season, this.language));
+    return this.cached(`season:${tvId}:${season}`, SEASON_TTL, () => getSeasonEpisodes(this.apiKey, tvId, season, this.language), this.fresh);
   }
 }
 

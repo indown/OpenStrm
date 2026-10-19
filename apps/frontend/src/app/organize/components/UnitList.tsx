@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
+import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, RefreshCw, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
 import type { OrganizeConflictChoice, OrganizeItem, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -67,6 +67,7 @@ export function UnitList({
   onResolve,
   onMatch,
   onAdjust,
+  onRefresh,
 }: {
   runId: string;
   units: OrganizeUnit[];
@@ -90,6 +91,8 @@ export function UnitList({
   onResolve: (unit: OrganizeUnit, item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
   onMatch: (unit: OrganizeUnit) => void;
   onAdjust: (unit: OrganizeUnit) => void;
+  /** 刷新这部的 TMDB 信息（跳过缓存重新拉详情和季集） */
+  onRefresh: (unit: OrganizeUnit) => void;
 }) {
   const [filter, setFilter] = useState<UnitFilter>("all");
   const [query, setQuery] = useState("");
@@ -172,6 +175,7 @@ export function UnitList({
           onResolve={(item, how) => onResolve(r.unit, item, how)}
           onMatch={() => onMatch(r.unit)}
           onAdjust={() => onAdjust(r.unit)}
+          onRefresh={() => onRefresh(r.unit)}
         />
       ))}
       {folded.length > 0 && (
@@ -210,6 +214,7 @@ function UnitCard({
   onResolve,
   onMatch,
   onAdjust,
+  onRefresh,
 }: {
   runId: string;
   unit: OrganizeUnit;
@@ -225,6 +230,7 @@ function UnitCard({
   onResolve: (item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
   onMatch: () => void;
   onAdjust: () => void;
+  onRefresh: () => void;
 }) {
   const [open, setOpen] = useState(false);
   // 海报加载失败（TMDB 图片被墙）就退回图标，别把 alt 文字画在卡片上
@@ -305,6 +311,12 @@ function UnitCard({
               <Button variant="outline" size="sm" className="h-8" onClick={onAdjust} disabled={pending}>
                 <SlidersHorizontal className="size-4" />
                 季 / 集偏移
+              </Button>
+            )}
+            {m && (
+              <Button variant="outline" size="sm" className="h-8" onClick={onRefresh} disabled={pending} title="不换作品：跳过缓存重新拉这部的详情和季集，按新信息重新规划">
+                <RefreshCw className="size-4" />
+                刷新 TMDB
               </Button>
             )}
             {m && (

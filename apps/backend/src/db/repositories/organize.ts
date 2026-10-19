@@ -649,8 +649,9 @@ export function deleteTmdbCacheBefore(cutoffSec: number): number {
   return db.delete(tmdbCache).where(lt(tmdbCache.fetchedAt, cutoffSec)).run().changes;
 }
 
-export function clearTmdbCache(): void {
-  db.delete(tmdbCache).run();
+/** 整张表清掉，返回删掉的行数 */
+export function clearTmdbCache(): number {
+  return db.delete(tmdbCache).run().changes;
 }
 
 /** 仅供测试 */

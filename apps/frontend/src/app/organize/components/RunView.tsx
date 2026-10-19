@@ -5,6 +5,7 @@ import { AlertTriangle, Ban, ChevronDown, ChevronRight, Film, Loader2, Play, Ref
 import { toast } from "sonner";
 import type { OrganizeConflictChoice, OrganizeConflictResolution, OrganizeItem, OrganizeRun, OrganizeRunDetail, OrganizeRunStatus, OrganizeUnit, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -93,10 +94,12 @@ export function RunView({
       setDetail(d);
       setVersion((v) => v + 1);
       setError(null);
+      return d;
     } catch (err) {
       if (n !== fullSeq.current) return;
       setError(apiErrorMessage(err, "读取整理记录失败"));
     }
+    return null;
   }, [runId, seen]);
 
   /** 进行中只拉 run 和开关（不带单元和项）；一结束就拉一次完整详情，别拿「待执行 + 0 个单元」闪一下 */
@@ -184,6 +187,27 @@ export function RunView({
     }
   };
 
+  /** 刷新一部作品的 TMDB 信息：跳过缓存重新拉详情和季集，按新信息重新规划；信息没变后端什么都不动 */
+  const refreshUnit = async (unit: OrganizeUnit) => {
+    const before = detail?.planVersion;
+    markPatching([unit.key], true);
+    try {
+      const next = await api.organize.patchUnit(runId, unit.key, { refresh: true });
+      const d = await load();
+      const a = unit.match;
+      const b = next.match;
+      if (a && b && a.title !== b.title) toast.success(`「${a.title}」→「${b.title}」，已按新译名重新规划`);
+      else if (a && b && (a.year !== b.year || unit.dstRoot !== next.dstRoot)) toast.success(`「${b.title}」的 TMDB 信息有更新，已重新规划`);
+      else if (d?.planVersion && before && d.planVersion !== before) toast.success(`「${b?.title ?? unit.rawName}」的集标题 / 海报有更新，清单已重新规划`);
+      else toast.info("TMDB 上的信息没有变化");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "刷新 TMDB 信息失败"));
+      await load();
+    } finally {
+      markPatching([unit.key], false);
+    }
+  };
+
   /** 批量勾选（一次重规划）；「只选把握大的」是把握大的勾上、其余取消，两次批量 */
   const bulk = async (steps: Array<{ keys: string[]; selected: boolean }>) => {
     const keys = steps.flatMap((s) => s.keys);
@@ -238,11 +262,11 @@ export function RunView({
     else void resolveItem(unit, [item.id], how === "stay" ? null : { how });
   };
 
-  const repreview = async () => {
+  const repreview = async (opts: { refreshTmdb?: boolean } = {}) => {
     setBusy(true);
     try {
-      const next = await api.organize.repreview(runId);
-      toast.success("按同一范围重新预览，请稍候");
+      const next = await api.organize.repreview(runId, opts);
+      toast.success(opts.refreshTmdb ? "按同一范围重新预览并刷新 TMDB 信息，请稍候" : "按同一范围重新预览，请稍候");
       notifyOrganizeChanged();
       onOpenRun(next.id);
     } catch (err) {
@@ -382,10 +406,27 @@ export function RunView({
               </Button>
             )}
             {(run.status === "ready" || (!executed && (run.status === "cancelled" || run.status === "failed"))) && (
-              <Button variant="outline" size="sm" onClick={() => void repreview()} disabled={locked} title="按同一范围重新列目录、识别、规划">
-                <Search className="size-4" />
-                重新预览
-              </Button>
+              <div className="flex items-center">
+                <Button variant="outline" size="sm" className="rounded-r-none" onClick={() => void repreview()} disabled={locked} title="按同一范围重新列目录、识别、规划">
+                  <Search className="size-4" />
+                  重新预览
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="rounded-l-none border-l-0 px-1.5 has-[>svg]:px-1.5" disabled={locked} aria-label="更多重新预览的方式">
+                      <ChevronDown className="size-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="max-w-[min(22rem,calc(100vw-2rem))]">
+                    <DropdownMenuItem className="flex-col items-start gap-0.5" onSelect={() => void repreview({ refreshTmdb: true })}>
+                      <span>重新预览并刷新 TMDB 信息</span>
+                      <span className="text-xs text-muted-foreground">
+                        跳过缓存重新拉每部作品的详情和季集。和重新预览一样，没「记住」的手动改动不保留；只想刷新某一部，在它那一行点「刷新 TMDB」
+                      </span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             )}
             {canApply && (
               <Button size="sm" onClick={() => setConfirm("apply")} disabled={locked}>
@@ -487,7 +528,7 @@ export function RunView({
       )}
 
       {!isBusyStatus(run.status) && run.status !== "ready" && (
-        <FailurePanel run={run} groups={groups} busy={busy} version={version} onWorking={setPanelWorking} onChanged={load} onRevert={() => setConfirm("revert")} onOpenRun={onOpenRun} />
+        <FailurePanel run={run} groups={groups} busy={busy} version={version} onWorking={setPanelWorking} onChanged={async () => void (await load())} onRevert={() => setConfirm("revert")} onOpenRun={onOpenRun} />
       )}
 
       {run.status === "planning" && units.length === 0 ? (
@@ -530,6 +571,7 @@ export function RunView({
           onResolve={pickResolve}
           onMatch={setMatching}
           onAdjust={setAdjusting}
+          onRefresh={(u) => void refreshUnit(u)}
         />
       )}
 

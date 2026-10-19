@@ -406,6 +406,11 @@ export interface OrganizeUnitPatch {
   episodeOffset?: number;
   selected?: boolean;
   remember?: boolean;
+  /**
+   * 刷新 TMDB 信息：按现在的匹配（或同时给的 match）跳过缓存重新拉详情和季集，再重新规划；
+   * 拉回来和原来一样就什么都不改。还没识别出来的单元不能刷新（400 NO_MATCH）
+   */
+  refresh?: boolean;
 }
 
 /** 用户确认过的识别，按账号 + 目录记住 */

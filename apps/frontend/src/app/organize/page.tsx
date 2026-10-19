@@ -8,12 +8,14 @@ import { Bookmark, FolderOpen, FolderTree, History, ListChecks, Loader2, Refresh
 import { toast } from "sonner";
 import type { OrganizeRun } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { InputGroup, InputGroupButton, InputGroupInput } from "@/components/ui/input-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { TableSkeleton } from "@/components/loading";
 import { TreeSelectDialog } from "@/components/TreeSelectDialog";
+import { FieldHint } from "@/components/field-hint";
 import { api, type TaskRow } from "@/lib/api";
 import { accountLabel } from "@/lib/drive";
 import { apiErrorMessage } from "@/lib/axios";
@@ -83,6 +85,8 @@ function OrganizeContent() {
   const [draft, setDraft] = useState("");
   const [browsing, setBrowsing] = useState(false);
   const [creating, setCreating] = useState(false);
+  /** 这次预览跳过 TMDB 缓存（TMDB 上改了译名时用）；发起之后复位，不记忆 */
+  const [refreshTmdb, setRefreshTmdb] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
 
@@ -194,9 +198,11 @@ function OrganizeContent() {
     if (!list) return;
     setCreating(true);
     try {
-      const run = await api.organize.createRun(list.length > 1 ? { taskId, paths: list } : { taskId, subPath: list[0] ?? "" });
+      const scope = list.length > 1 ? { taskId, paths: list } : { taskId, subPath: list[0] ?? "" };
+      const run = await api.organize.createRun(refreshTmdb ? { ...scope, refreshTmdb: true } : scope);
+      setRefreshTmdb(false);
       openRun(run.id);
-      toast.success("开始识别，请稍候");
+      toast.success(refreshTmdb ? "开始识别（刷新 TMDB 信息），请稍候" : "开始识别，请稍候");
       notifyOrganizeChanged();
     } catch (err) {
       toastRunError(err, "预览失败", openRun);
@@ -278,10 +284,20 @@ function OrganizeContent() {
               </InputGroupButton>
             </InputGroup>
           </div>
-          <Button onClick={() => void createRun()} disabled={!taskId || creating} className="self-end">
-            {creating ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
-            预览
-          </Button>
+          {/* 和左边两格一样「上面一行小字、下面控件」：小字这里是「刷新 TMDB 信息」的勾选 */}
+          <div className="flex flex-col items-end justify-between gap-1.5">
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap">
+                <Checkbox checked={refreshTmdb} onCheckedChange={(v) => setRefreshTmdb(v === true)} disabled={!task || creating} />
+                刷新 TMDB 信息
+              </label>
+              <FieldHint>跳过缓存，重新拉每部作品的详情和季集：TMDB 上改了译名、海报时用；作品多会慢一些。</FieldHint>
+            </span>
+            <Button onClick={() => void createRun()} disabled={!taskId || creating}>
+              {creating ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
+              预览
+            </Button>
+          </div>
           {scopes.length > 0 && (
             // -mt-1.5 是 gap-3 的一半：已选的范围贴着输入框，不和上一行隔得像两组
             <div ref={chipsRef} className="col-span-2 -mt-1.5 flex flex-wrap items-center gap-1.5 md:col-span-1 md:col-start-2">

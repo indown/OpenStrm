@@ -36,6 +36,7 @@ import {
   searchCandidates,
   skipItems,
 } from "../../services/organize/run.js";
+import { purgeTmdbCache } from "../../services/organize/identify.js";
 import { parseRules } from "../../services/organize/rules.js";
 import { DEFAULT_TEMPLATES, resolveOrganizeSettings } from "../../services/organize/settings.js";
 import { idTagFor, renderTemplate, validateTemplate } from "../../services/organize/template.js";
@@ -47,6 +48,8 @@ const createSchema = z.object({
   paths: z.array(z.string()).max(5000).optional(),
   /** 令牌用：范围里已有待确认的清单也重新预览（会作废它们） */
   fresh: z.boolean().optional(),
+  /** 刷新 TMDB 信息：这次预览的详情和季集跳过缓存重新拉 */
+  refreshTmdb: z.boolean().optional(),
 });
 
 /** 令牌一次最多点这么多个目录（和 organize_preview 一样）：手动范围要逐个去网盘确认存在 */
@@ -84,6 +87,8 @@ const unitPatchSchema = z.object({
   episodeOffset: z.number().int().min(-2000).max(2000).optional(),
   selected: z.boolean().optional(),
   remember: z.boolean().optional(),
+  /** 刷新 TMDB 信息：按现在的匹配跳过缓存重新拉详情和季集 */
+  refresh: z.boolean().optional(),
 });
 
 const previewNameSchema = z.object({
@@ -136,7 +141,8 @@ const itemsQuerySchema = z
  * planVersion 是页面打开时详情里给的：待执行的清单对不上就不执行
  */
 const applySchema = z.object({ ids: z.array(z.string().min(1)).max(5000).optional(), planVersion: z.string().max(40).optional() });
-const repreviewSchema = z.object({ fresh: z.boolean().optional() });
+/** fresh 是「范围里已有待确认的清单也重新预览」；refreshTmdb 是「这次预览跳过 TMDB 缓存」，两回事 */
+const repreviewSchema = z.object({ fresh: z.boolean().optional(), refreshTmdb: z.boolean().optional() });
 const skipSchema = z.object({ ids: z.array(z.string().min(1)).min(1).max(5000) });
 
 export default async function (fastify: FastifyInstance) {
@@ -145,7 +151,7 @@ export default async function (fastify: FastifyInstance) {
     if (isToken(request) && (body.paths?.length ?? 0) > TOKEN_PATHS_MAX) throw new HttpError(400, `一次最多整理 ${TOKEN_PATHS_MAX} 个目录`);
     guardSupersede(request, body.taskId, { subPath: body.subPath, paths: body.paths }, body.fresh);
     const trigger = isToken(request) ? "agent" : "manual";
-    const run = await createRun({ taskId: body.taskId, subPath: body.subPath, paths: body.paths, mode: "manual", trigger });
+    const run = await createRun({ taskId: body.taskId, subPath: body.subPath, paths: body.paths, mode: "manual", trigger, refreshTmdb: body.refreshTmdb });
     return reply.code(201).send(run);
   });
 
@@ -200,6 +206,9 @@ export default async function (fastify: FastifyInstance) {
     return lookupCandidate(p.type, p.id);
   });
 
+  /** 设置页「清空 TMDB 缓存」：TMDB 上改了译名 / 海报，不等缓存过期就重新拉。只给人用，令牌不开放 */
+  fastify.delete("/api/organize/tmdb/cache", { preHandler: [fastify.authenticate] }, async () => ({ cleared: purgeTmdbCache() }));
+
   /** 单元 key 里可能带 /，放 body 里 */
   fastify.put("/api/organize/runs/:id/unit", { preHandler: [fastify.authenticate], config: { agentScope: "run", agentToolset: "organize" } }, async (request) => {
     const { id } = parse(idParamsSchema, request.params, "params");
@@ -242,7 +251,7 @@ export default async function (fastify: FastifyInstance) {
     const body = parse(repreviewSchema, request.body ?? {});
     const old = getRun(id);
     if (old) guardSupersede(request, old.taskId, { subPath: old.scopePath, paths: old.scopePaths }, body.fresh);
-    return reply.code(201).send(await repreviewRun(id));
+    return reply.code(201).send(await repreviewRun(id, { refreshTmdb: body.refreshTmdb }));
   });
 
   fastify.post("/api/organize/runs/:id/cancel", { preHandler: [fastify.authenticate], config: { agentScope: "run", agentToolset: "organize" } }, async (request) => {

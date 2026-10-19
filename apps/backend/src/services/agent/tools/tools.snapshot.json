@@ -598,6 +598,9 @@
         },
         "fresh": {
           "type": "boolean"
+        },
+        "refreshTmdb": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -670,6 +673,9 @@
                 "maximum": 2000
               },
               "remember": {
+                "type": "boolean"
+              },
+              "refresh": {
                 "type": "boolean"
               },
               "selected": {

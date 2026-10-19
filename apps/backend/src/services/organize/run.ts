@@ -48,7 +48,7 @@ export function cancelRun(runId: string): OrganizeRun {
  * 按原范围、原触发来源重新预览：建一个新的手动预览（不自动执行、不发待确认通知）。新增路径的 run 保留新增路径的语义，
  * 触发来源也照旧（界面上还是「转存 / 监控 …的 N 个新增路径」），追更带的识别提示也带过去
  */
-export async function repreviewRun(runId: string): Promise<OrganizeRun> {
+export async function repreviewRun(runId: string, opts: { refreshTmdb?: boolean } = {}): Promise<OrganizeRun> {
   const run = getRun(runId);
   if (!run) throw new HttpError(404, "整理记录不存在");
   return createRun({
@@ -58,6 +58,7 @@ export async function repreviewRun(runId: string): Promise<OrganizeRun> {
     hints: getRunHints(runId),
     mode: "manual",
     trigger: run.trigger,
+    refreshTmdb: opts.refreshTmdb === true,
   });
 }
 

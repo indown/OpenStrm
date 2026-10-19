@@ -739,7 +739,8 @@ export const api = {
     check: () => data(axiosInstance.post<UpdateStatus>("/api/update/check", undefined, { timeout: 20_000 })),
   },
   organize: {
-    createRun: (input: { taskId: string; subPath?: string; paths?: string[] }) =>
+    /** refreshTmdb：这次预览每部作品的详情和季集都跳过缓存重新拉 */
+    createRun: (input: { taskId: string; subPath?: string; paths?: string[]; refreshTmdb?: boolean }) =>
       data(axiosInstance.post<OrganizeRun>("/api/organize/runs", input)),
     listRuns: (taskId?: string, limit = 30, offset = 0) =>
       data(axiosInstance.get<{ runs: OrganizeRun[] }>("/api/organize/runs", { params: { taskId: taskId || undefined, limit, offset: offset || undefined } })),
@@ -768,14 +769,17 @@ export const api = {
       data(axiosInstance.post<{ results: OrganizeCandidate[] }>("/api/organize/tmdb/search", q)),
     /** 换匹配弹框：按 TMDB 编号查 */
     tmdbLookup: (type: "movie" | "tv", id: number) => data(axiosInstance.get<OrganizeCandidate>(`/api/organize/tmdb/${type}/${id}`)),
+    /** 设置页「清空 TMDB 缓存」：返回删掉的行数 */
+    clearTmdbCache: () => data(axiosInstance.delete<{ cleared: number }>("/api/organize/tmdb/cache")),
     /** 不带 ids：ready 的执行全部，其它状态重试失败 / 没做的（默认只重试临时失败）；带 ids 只重试点名的项 */
     /** planVersion：执行待确认的清单时带上详情里给的，打开之后清单被改过就回 409 PLAN_CHANGED */
     apply: (id: string, ids?: string[], planVersion?: string) =>
       data(axiosInstance.post<OrganizeRun>(`/api/organize/runs/${encodeURIComponent(id)}/apply`, { ...(ids ? { ids } : {}), ...(planVersion ? { planVersion } : {}) })),
     /** 放弃失败项：标成「已放弃」让 run 收口；原地改了名还没挪走的先在网盘上改回原名，所以给长一点的超时 */
     skip: (id: string, ids: string[]) => data(axiosInstance.post<OrganizeSkipResult>(`/api/organize/runs/${encodeURIComponent(id)}/skip`, { ids }, { timeout: 120_000 })),
-    /** 按原范围、原触发来源重新预览：返回新建的 run */
-    repreview: (id: string) => data(axiosInstance.post<OrganizeRun>(`/api/organize/runs/${encodeURIComponent(id)}/repreview`)),
+    /** 按原范围、原触发来源重新预览：返回新建的 run；refreshTmdb 让这次预览跳过 TMDB 缓存 */
+    repreview: (id: string, opts: { refreshTmdb?: boolean } = {}) =>
+      data(axiosInstance.post<OrganizeRun>(`/api/organize/runs/${encodeURIComponent(id)}/repreview`, opts.refreshTmdb ? { refreshTmdb: true } : {})),
     cancel: (id: string) => data(axiosInstance.post<OrganizeRun>(`/api/organize/runs/${encodeURIComponent(id)}/cancel`)),
     revert: (id: string) => data(axiosInstance.post<OrganizeRun>(`/api/organize/runs/${encodeURIComponent(id)}/revert`)),
     remove: (id: string) => data(axiosInstance.delete<{ success: true }>(`/api/organize/runs/${encodeURIComponent(id)}`)),

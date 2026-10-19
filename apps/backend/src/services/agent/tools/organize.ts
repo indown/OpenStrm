@@ -471,6 +471,7 @@ export const organizePreviewTool = defineTool({
     paths: z.array(z.string().min(1).max(1000)).min(1).max(PREVIEW_PATHS_MAX).optional().describe(`只整理这几个子目录（最多 ${PREVIEW_PATHS_MAX} 个）；和 subPath 只给一个`),
     again: runArg.optional().describe("按这次旧整理原来的范围重新预览（填它的 runId）"),
     fresh: z.boolean().optional().describe("范围里已有待确认的清单时也重新预览（会作废它们），默认 false"),
+    refreshTmdb: z.boolean().optional().describe("刷新 TMDB 信息：这次预览每部作品的详情和季集都跳过缓存重新拉（TMDB 上改了译名时用），作品多会慢；默认 false"),
   }),
   async run(args, ctx) {
     let task: TaskDefinition;
@@ -517,7 +518,7 @@ export const organizePreviewTool = defineTool({
     }
 
     requireTmdb();
-    const run = await createRun({ taskId: task.id, subPath, paths, mode: "manual", trigger });
+    const run = await createRun({ taskId: task.id, subPath, paths, mode: "manual", trigger, refreshTmdb: args.refreshTmdb === true });
     await waitRun(run.id, INLINE_WAIT_MS, ctx);
     const now = getRun(run.id)!;
     if (now.status === "planning") {
@@ -545,6 +546,7 @@ const changeSchema = z
     season: z.number().int().min(-1).max(99).optional().describe("单元：整个单元都当第几季，0 是特别篇，-1 取消这个设置"),
     episodeOffset: z.number().int().min(-2000).max(2000).optional().describe("单元：集数加减多少（第二季从 13 集接着编号时填 -12）"),
     remember: z.boolean().optional().describe("单元：执行后记住这次的识别，下次同一个目录直接用（记住的季 / 集偏移只补给文件名没写季的文件）"),
+    refresh: z.boolean().optional().describe("单元：刷新 TMDB 信息——按现在的匹配跳过缓存重新拉详情和季集（TMDB 上改了译名时用）；拉回来没变就什么都不改"),
     selected: z.boolean().optional().describe("单元：整理 / 不整理；文件：整理 / 留在原处"),
     resolve: z
       .enum(["rename", "custom", "duplicate", "delete", "replace", "keep"])
@@ -557,7 +559,7 @@ const changeSchema = z
 export const organizeAdjustTool = defineTool({
   name: "organize_adjust",
   title: "改整理清单",
-  description: `改一份待确认的整理清单，只改清单、不动网盘，一次可以改多处（只重新规划一次）：select 批量勾选单元（all 全选 / none 全不选 / confident 只选把握大的）；conflicts 把还没选办法的冲突统一改名保留（rename）或挪进重复文件目录（duplicate）；changes 逐条改单元（换匹配、季、集偏移、勾选、记住）或文件（勾选、冲突办法）。先做 select，再做 conflicts，最后按顺序做 changes；有一条不合法整批都不改。重新规划是整体的，改一处可能挤出别处的新冲突，结果里的 newConflicts 会列出来。冲突办法只能给冲突的文件，也只在真撞上时起作用；文件的去处由匹配、季、集偏移和命名模板决定。换了匹配 / 季 / 集偏移的单元，它原来选的冲突办法会清掉，同一次调用里也不能再给它选（等重新规划后看新的冲突）。选「删掉 / 覆盖」也只是写进清单：执行带删除项的清单要「删除与花费」档，没有这一档就把 confirmText 给用户看、请用户在 OpenStrm 的整理页点执行。返回新的 planVersion 和 confirmText：把改了什么、为什么和 confirmText 告诉用户，同意后再调 organize_apply。`,
+  description: `改一份待确认的整理清单，只改清单、不动网盘，一次可以改多处（只重新规划一次）：select 批量勾选单元（all 全选 / none 全不选 / confident 只选把握大的）；conflicts 把还没选办法的冲突统一改名保留（rename）或挪进重复文件目录（duplicate）；changes 逐条改单元（换匹配、季、集偏移、勾选、记住、刷新 TMDB 信息）或文件（勾选、冲突办法）。先做 select，再做 conflicts，最后按顺序做 changes；有一条不合法整批都不改。重新规划是整体的，改一处可能挤出别处的新冲突，结果里的 newConflicts 会列出来。冲突办法只能给冲突的文件，也只在真撞上时起作用；文件的去处由匹配、季、集偏移和命名模板决定。换了匹配 / 季 / 集偏移的单元，它原来选的冲突办法会清掉，同一次调用里也不能再给它选（等重新规划后看新的冲突）。选「删掉 / 覆盖」也只是写进清单：执行带删除项的清单要「删除与花费」档，没有这一档就把 confirmText 给用户看、请用户在 OpenStrm 的整理页点执行。返回新的 planVersion 和 confirmText：把改了什么、为什么和 confirmText 告诉用户，同意后再调 organize_apply。`,
   scope: "run",
   toolset: "organize",
   annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: true },
@@ -648,7 +650,7 @@ type AdjustArgs = { select?: PlanPatch["select"]; conflicts?: PlanPatch["conflic
 function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, OrganizeUnit>, canResolve: (unitKey: string, srcPath: string) => boolean): PlanPatch {
   const units: NonNullable<PlanPatch["units"]> = [];
   const files: NonNullable<PlanPatch["files"]> = [];
-  const UNIT_FIELDS = ["tmdbId", "mediaType", "season", "episodeOffset", "remember"] as const;
+  const UNIT_FIELDS = ["tmdbId", "mediaType", "season", "episodeOffset", "remember", "refresh"] as const;
   (args.changes ?? []).forEach((c, i) => {
     const at = `changes[${i}]（${c.target}）`;
     const unitKey = refs.unitKey(c.target);
@@ -661,6 +663,9 @@ function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, Organize
       if (c.selected === true && !row.match && !c.tmdbId) {
         throw new ToolError("VALIDATION", `${at}：没识别出来的单元不能勾`, "先用 tmdb_search 找到它，再在同一条里给 tmdbId 和 mediaType。");
       }
+      if (c.refresh === true && !row.match && !c.tmdbId) {
+        throw new ToolError("VALIDATION", `${at}：没识别出来的单元没法刷新 TMDB 信息`, "先用 tmdb_search 找到它，再在同一条里给 tmdbId 和 mediaType。");
+      }
       units.push({
         key: unitKey,
         ...(c.tmdbId && mediaType ? { match: { mediaType, tmdbId: c.tmdbId } } : {}),
@@ -668,6 +673,7 @@ function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, Organize
         ...(c.episodeOffset !== undefined ? { episodeOffset: c.episodeOffset } : {}),
         ...(c.selected !== undefined ? { selected: c.selected } : {}),
         ...(c.remember !== undefined ? { remember: c.remember } : {}),
+        ...(c.refresh !== undefined ? { refresh: c.refresh } : {}),
       });
       return;
     }

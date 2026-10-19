@@ -73,6 +73,14 @@ let notified: NotifyEvent[] = [];
 
 const hit = (id: number, mediaType: "movie" | "tv", title: string, year: string): TmdbSearchResult => ({ id, mediaType, title, year, posterUrl: "", overview: "" });
 class StubTmdb implements TmdbApi {
+  /** 刷新 TMDB 信息的测试：改 beefTitle 就等于 TMDB 上改了译名；failBeef 让查它的详情失败 */
+  static beefTitle = "怒呛人生";
+  static failBeef = false;
+  /** 每次建客户端是不是要求跳过缓存（deps.tmdb 的 opts.fresh） */
+  static freshCalls: boolean[] = [];
+  constructor(fresh = false) {
+    StubTmdb.freshCalls.push(fresh);
+  }
   async search(query: string): Promise<TmdbSearchResult[]> {
     const q = query.toLowerCase();
     if (q === "beef" || q === "怒呛人生") return [hit(153312, "tv", "BEEF", "2023")];
@@ -86,7 +94,10 @@ class StubTmdb implements TmdbApi {
   }
   async details(kind: "movie" | "tv", id: number): Promise<TmdbDetails | null> {
     const base = { id, mediaType: kind, enTitle: "", posterUrl: "", imdbId: "", genreIds: [], countries: [], originalLanguage: "", aliases: [] };
-    if (id === 153312) return { ...base, title: "怒呛人生", originalTitle: "BEEF", year: "2023", seasons: [{ season: 1, episodeCount: 10 }] };
+    if (id === 153312) {
+      if (StubTmdb.failBeef) throw new Error("TMDB 挂了");
+      return { ...base, title: StubTmdb.beefTitle, originalTitle: "BEEF", year: "2023", seasons: [{ season: 1, episodeCount: 10 }] };
+    }
     if (id === 84656) return { ...base, title: "回家的诱惑", originalTitle: "回家的诱惑", year: "2011", seasons: [{ season: 1, episodeCount: 80 }] };
     if (id === 19389) return { ...base, title: "我和僵尸有个约会", originalTitle: "我和僵尸有个约会", year: "1998", seasons: [{ season: 1, episodeCount: 33 }, { season: 2, episodeCount: 43 }] };
     if (id === 693134) return { ...base, title: "沙丘：第二部", originalTitle: "Dune: Part Two", year: "2024" };
@@ -142,7 +153,7 @@ before(() => {
   replaceTasks([task]);
   replaceAppSettings({ ...baseline.settings, strmExtensions: [".mkv"], downloadExtensions: [".srt", ".nfo"], tmdb: { apiKey: "x", language: "zh-CN" }, organize: {} });
   setOrganizeDeps({
-    tmdb: () => new StubTmdb(),
+    tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true),
     notify: async (ev) => {
       notified.push(ev);
       return true;
@@ -2287,7 +2298,7 @@ test("换匹配弹框的 TMDB 搜索：按类型 / 年份搜（去重）、按�
     await assert.rejects(searchCandidates({ query: "x" }), /TMDB 未配置/);
   } finally {
     setOrganizeDeps({
-      tmdb: () => new StubTmdb(),
+      tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true),
       notify: async (ev) => {
         notified.push(ev);
         return true;
@@ -2295,4 +2306,75 @@ test("换匹配弹框的 TMDB 搜索：按类型 / 年份搜（去重）、按�
       retryDelayMs: 5,
     });
   }
+});
+
+test("刷新 TMDB 信息：按新译名重算、把握理由备选勾选照旧；没变就不动（冲突办法留着）；没识别的 400；TMDB 挂了整批不改；预览带 refreshTmdb 跳过缓存", async () => {
+  // 目标位置上已有 E01：撞出一个冲突，给它选个办法，看刷新会不会把办法清掉
+  drive.tree.addDir("/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01");
+  drive.tree.addFile("/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv");
+  drive.tree.addFile("/tv/inbox/Nobody.Knows.This.S01E01.mkv");
+  const run = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(run.id, ["ready"]);
+  const key = "inbox/BEEF.S01.1080p";
+  const before = listUnits(run.id).find((u) => u.key === key)!;
+  assert.equal(before.match?.title, "怒呛人生");
+  const conflict = listItems(run.id).find((i) => i.unitKey === key && i.action === "conflict")!;
+  assert.ok(conflict, "E01 应该撞上目标位置已有的那份");
+  await patchItems(run.id, [conflict.id], { resolve: { how: "rename" } });
+  const resolved = listUnits(run.id).find((u) => u.key === key)!;
+  assert.equal(Object.keys(resolved.resolutions).length, 1);
+
+  // 没变：什么都不动，冲突办法还在
+  StubTmdb.freshCalls = [];
+  const same = await patchUnit(run.id, key, { refresh: true });
+  assert.deepEqual(StubTmdb.freshCalls, [true], "刷新建的客户端要求跳过缓存");
+  assert.deepEqual(same, resolved);
+
+  // TMDB 上改了译名：按新名重算，把握 / 理由 / 备选 / 勾选照旧，原来给冲突选的办法作废
+  StubTmdb.beefTitle = "怒呛人生（新译名）";
+  try {
+    const renamed = await patchUnit(run.id, key, { refresh: true });
+    assert.equal(renamed.match?.title, "怒呛人生（新译名）");
+    assert.equal(renamed.dstRoot, "怒呛人生（新译名） (2023) [tmdbid=153312]");
+    assert.equal(renamed.match?.confidence, before.match?.confidence);
+    assert.equal(renamed.match?.reason, before.match?.reason);
+    assert.deepEqual(renamed.match?.candidates, before.match?.candidates);
+    assert.equal(renamed.selected, before.selected);
+    assert.deepEqual(renamed.resolutions, {});
+    const items = listItems(run.id);
+    assert.ok(
+      items.some((i) => i.dstPath === "/tv/怒呛人生（新译名） (2023) [tmdbid=153312]/Season 01/怒呛人生（新译名） - S01E02.mkv"),
+      items.map((i) => i.dstPath).join("\n"),
+    );
+    assert.ok(items.some((i) => i.dstPath.includes("沙丘：第二部")), "别的单元不动");
+
+    // TMDB 挂了：整批不改
+    StubTmdb.failBeef = true;
+    await assert.rejects(patchUnit(run.id, key, { refresh: true }), /TMDB 挂了/);
+    StubTmdb.failBeef = false;
+    assert.equal(listUnits(run.id).find((u) => u.key === key)!.match?.title, "怒呛人生（新译名）");
+  } finally {
+    StubTmdb.beefTitle = "怒呛人生";
+    StubTmdb.failBeef = false;
+  }
+
+  // 没识别出来的不能刷新
+  const nobody = listUnits(run.id).find((u) => !u.match)!;
+  assert.ok(nobody, "应该有一个认不出的单元");
+  await assert.rejects(patchUnit(run.id, nobody.key, { refresh: true }), (err: unknown) => err instanceof HttpError && err.extra.code === "NO_MATCH");
+
+  // 整个范围：预览 / 重新预览带 refreshTmdb → 客户端跳过缓存，日志说明
+  StubTmdb.freshCalls = [];
+  const whole = await createRun({ taskId: "t1", subPath: "inbox", refreshTmdb: true });
+  const wholeReady = await untilStatus(whole.id, ["ready"]);
+  assert.ok(StubTmdb.freshCalls.includes(true));
+  assert.ok(wholeReady.log.some((l) => l.includes("刷新 TMDB 信息")), wholeReady.log.join("\n"));
+  StubTmdb.freshCalls = [];
+  const again = await repreviewRun(whole.id, { refreshTmdb: true });
+  assert.ok((await untilStatus(again.id, ["ready"])).log.some((l) => l.includes("刷新 TMDB 信息")));
+  assert.ok(StubTmdb.freshCalls.includes(true));
+  StubTmdb.freshCalls = [];
+  const plain = await repreviewRun(again.id);
+  assert.ok(!(await untilStatus(plain.id, ["ready"])).log.some((l) => l.includes("刷新 TMDB 信息")));
+  assert.ok(!StubTmdb.freshCalls.includes(true), "不带标记的照旧走缓存");
 });

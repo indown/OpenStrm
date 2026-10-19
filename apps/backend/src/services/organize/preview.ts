@@ -43,6 +43,8 @@ export interface CreateRunInput {
   hints?: OrganizeHint[];
   mode?: OrganizeRunMode;
   trigger?: OrganizeTrigger;
+  /** 刷新 TMDB 信息：这次预览每部作品的详情和季集都跳过缓存重新向 TMDB 拉（作品多会慢） */
+  refreshTmdb?: boolean;
 }
 
 export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
@@ -97,7 +99,7 @@ export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
     trigger,
   });
   runStartedAt.set(run.id, startedAt);
-  startJob(run.id, (job) => preview(job, run.id));
+  startJob(run.id, (job) => preview(job, run.id, { refreshTmdb: input.refreshTmdb === true }));
   return getRun(run.id)!;
 }
 
@@ -462,14 +464,14 @@ function referencesTo(refPaths: string[], rootRel: string): number {
   return refPaths.filter((p) => p === rootRel || p.startsWith(`${rootRel}/`)).length;
 }
 
-async function preview(job: Job, runId: string): Promise<void> {
+async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }): Promise<void> {
   const run = getRun(runId)!;
   const task = getTask(run.taskId);
   if (!task) throw new Error("任务已不存在");
   const provider = providerForTask(task, "write");
   const settings = readAppSettings();
   const org = resolveOrganizeSettings(settings);
-  const tmdb = deps.tmdb(settings);
+  const tmdb = deps.tmdb(settings, { fresh: opts.refreshTmdb });
   if (!tmdb) throw new Error("TMDB 未配置 apiKey");
   const signal = job.abort.signal;
   updateRun(runId, { startedAt: Math.floor(Date.now() / 1000) });
@@ -478,6 +480,7 @@ async function preview(job: Job, runId: string): Promise<void> {
   // 手动选的多个目录列出来（和页面「N 个目录」一个说法）；自动触发的新增路径可能几十条，只报个数
   const scopeNote = run.scopePaths.length === 0 ? "" : handPicked(run.trigger) ? `（${run.scopePaths.length} 个目录：${run.scopePaths.slice(0, 5).join("、")}${run.scopePaths.length > 5 ? " 等" : ""}）` : `（${run.scopePaths.length} 个新增路径）`;
   jobLog(job, `开始预览：${task.originPath}${run.scopePath ? `/${run.scopePath}` : ""}${scopeNote}`);
+  if (opts.refreshTmdb) jobLog(job, "刷新 TMDB 信息：每部作品的详情和季集跳过缓存重新向 TMDB 拉取，作品多会慢一些");
   const walked = await walkScope(provider, task, run, signal);
   jobLog(job, `列到 ${walked.files} 个文件`);
   signal.throwIfAborted();
@@ -775,6 +778,18 @@ function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>):
 }
 
 /** 两个单元行在规划上有没有区别（换了匹配是新对象，按引用比就够） */
+/** 刷新 TMDB 信息时比「拉回来的和原来一样吗」：只看会落到命名 / 分类 / 海报上的字段 */
+function sameMatchData(a: OrganizeMatch, b: OrganizeMatch): boolean {
+  const pick = (m: OrganizeMatch) =>
+    JSON.stringify([m.title, m.originalTitle, m.enTitle ?? "", m.year, m.posterUrl, m.imdbId ?? "", m.genreIds ?? [], m.countries ?? [], m.originalLanguage ?? "", m.seasons ?? []]);
+  return pick(a) === pick(b);
+}
+
+function sameEpisodeTitles(a: Map<string, string> | undefined, b: Map<string, string>): boolean {
+  const norm = (m: Map<string, string> | undefined) => JSON.stringify([...(m ?? new Map<string, string>())].sort());
+  return norm(a) === norm(b);
+}
+
 function sameUnitRow(a: OrganizeUnit, b: OrganizeUnit): boolean {
   return (
     a.match === b.match &&
@@ -805,7 +820,8 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
       const matchChanged = patch.match !== undefined && (!row.match || row.match.tmdbId !== patch.match.tmdbId || row.match.mediaType !== patch.match.mediaType);
       const seasonChanged = patch.seasonOverride !== undefined && patch.seasonOverride !== row.seasonOverride;
       const offsetChanged = patch.episodeOffset !== undefined && patch.episodeOffset !== row.episodeOffset;
-      if (matchChanged || seasonChanged || offsetChanged) reidentified.add(key);
+      // 刷新 TMDB 信息的也算：目标可能变（拉回来发现没变的，下面会再拿掉）
+      if (matchChanged || seasonChanged || offsetChanged || patch.refresh === true) reidentified.add(key);
     }
     // 点名的文件：单元 + 路径要是现在清单里的一项（建目录 / 删空目录不属于任何单元）
     const items = listItems(runId);
@@ -851,19 +867,36 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
     };
     let filesByUnit = fileChangesOf(items, rows);
 
-    // 换匹配：按指定的 TMDB 编号重新识别（查不到就整批不改）
-    const picked = new Map<string, { match: OrganizeMatch; episodeTitles: Map<string, string> }>();
+    // 换匹配：按指定的 TMDB 编号重新识别（查不到就整批不改）。
+    // 刷新 TMDB 信息（refresh）：身份不变，按现在的编号跳过缓存重新拉详情和季集；拉回来和原来一样就当没改
+    const picked = new Map<string, { match: OrganizeMatch; episodeTitles: Map<string, string>; keep: boolean }>();
     for (const [key, patch] of unitPatches) {
       const row = rows.get(key)!;
-      if (!patch.match || (row.match && row.match.tmdbId === patch.match.tmdbId && row.match.mediaType === patch.match.mediaType)) continue;
-      const tmdb = deps.tmdb(state.settings);
+      const target = patch.match ?? (patch.refresh ? row.match : undefined);
+      if (!target) {
+        if (patch.refresh) throw new HttpError(400, "这部还没识别出来，先换匹配", { code: "NO_MATCH" });
+        continue;
+      }
+      const old = row.match && row.match.tmdbId === target.tmdbId && row.match.mediaType === target.mediaType ? row.match : null;
+      if (old && !patch.refresh) continue;
+      const tmdb = deps.tmdb(state.settings, { fresh: patch.refresh === true });
       if (!tmdb) throw new HttpError(400, "TMDB 未配置 apiKey");
       const r = await identifyUnit(
-        { unit: state.units.get(key)!, evidence: { known: { tmdbId: patch.match.tmdbId, mediaType: patch.match.mediaType, source: "手动指定" } }, episodeTitles: state.org.episodeTitle },
+        { unit: state.units.get(key)!, evidence: { known: { tmdbId: target.tmdbId, mediaType: target.mediaType, source: old ? "刷新 TMDB 信息" : "手动指定" } }, episodeTitles: state.org.episodeTitle },
         tmdb,
       );
-      if (!r.match) throw new HttpError(404, `TMDB 上没有 ${patch.match.mediaType} ${patch.match.tmdbId}`);
-      picked.set(key, { match: { ...r.match, candidates: row.match?.candidates ?? [] }, episodeTitles: r.episodeTitles });
+      if (!r.match) throw new HttpError(404, `TMDB 上没有 ${target.mediaType} ${target.tmdbId}`);
+      if (!old) {
+        picked.set(key, { match: { ...r.match, candidates: row.match?.candidates ?? [] }, episodeTitles: r.episodeTitles, keep: false });
+        continue;
+      }
+      // 刷新：把握、理由、备选照旧（用户没确认什么）；详情和集标题都没变就什么都不动，连冲突办法都留着
+      const next: OrganizeMatch = { ...r.match, confidence: old.confidence, reason: old.reason, candidates: old.candidates ?? [] };
+      if (sameMatchData(old, next) && sameEpisodeTitles(state.episodeTitles.get(key), r.episodeTitles)) {
+        reidentified.delete(key);
+        continue;
+      }
+      picked.set(key, { match: next, episodeTitles: r.episodeTitles, keep: true });
     }
 
     /** 一个单元行套上这次的全部改动 */
@@ -893,7 +926,7 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
             match: next.match,
             seasonOverride: next.seasonOverride,
             episodeOffset: next.episodeOffset,
-            fill: picked.has(row.key) ? null : state.fills.get(row.key),
+            fill: picked.has(row.key) && !picked.get(row.key)?.keep ? null : state.fills.get(row.key),
             episodeTitles: picked.get(row.key)?.episodeTitles ?? state.episodeTitles.get(row.key),
             selected: true,
             excluded: excludedRel(state.task, next),
@@ -910,6 +943,8 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
     mergeEntries(state, extra);
     for (const [key, p] of picked) {
       state.episodeTitles.set(key, p.episodeTitles);
+      // 刷新不是换作品：识别时的备注和记忆补的季都还作数
+      if (p.keep) continue;
       state.identifyNotes.set(key, []);
       state.fills.delete(key);
     }

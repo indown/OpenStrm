@@ -1315,3 +1315,18 @@ UPDATE organize_items SET error_kind = 'mirror' WHERE status = 'done' AND error 
 没验的：真 TMDB；真网盘上执行（只预览了）；Emby 对 `extras/` 的实际表现（只查了文档）。
 
 升级说明要写：没动过「花絮挪进 extras/」开关的，从这版起花絮和 sample 默认跟着正片进作品目录下的 `extras/`，目录是作品自己的时里面认不出类型的文件也跟进作品目录；想保持原样就把开关关掉。
+
+## TMDB 缓存：手动清空（issue #11，2026-10-19）
+
+用户反馈（[#11](https://github.com/indown/OpenStrm/issues/11)）：TMDB 上作品改了名，再次整理预览还按旧名（`tmdb_cache` 里详情 7 天、搜索 / 季 1 天），重启容器清不掉库里的缓存，也没有入口。核实：名字一律来自 `fromDetails` 读详情；「重新预览」「换匹配」都走缓存，换回同一个编号在 `patchUnit` 里直接跳过；整理每次操作 new 一个 `TmdbClient`、memo 只活一次操作，收藏夹那边是进程级单例、memo 没有过期。
+
+第一步先做全局清空：
+
+- `purgeTmdbCache()`（`services/organize/identify.ts`）：删库里全部行 + 模块级 `generation` 加一，活着的客户端下次 `cached()` 时发现代数变了就 `memo.clear()`（收藏夹单例也就跟着作废）。
+- `DELETE /api/organize/tmdb/cache` → `{ cleared }`，只给人用（没声明 agentScope，令牌 403）。
+- 设置页 TMDB 一节 `TmdbCacheButton`：说明 + 按钮 + 确认框；是动作不是字段，`type="button"`、不碰表单脏状态。
+- `organize.itest.ts` 加一条：写一行 → 客户端读到 → 清空 → 库里没了 → 库里换新值后同一个客户端读到新值（证明 memo 丢了）。
+
+没做、留给下一步（issue 里真正要的）：按作品 / 按本次范围只刷新详情和季（`TmdbClient.cached()` 加跳过读取的选项，`PUT /runs/:id/unit` 走现有换匹配路径用当前编号重认，`repreview` 加标记；`repreview` 已有的 `fresh` 是作废待确认清单的意思，别重名）。
+
+第二步（按作品 / 按范围刷新详情和季集，不清全库）的计划在 tmdb-refresh.md。

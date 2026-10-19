@@ -50,6 +50,13 @@ const hit = (id: number, mediaType: "movie" | "tv", title: string, year: string)
 class StubTmdb implements TmdbApi {
   /** 设了就让查 999 的详情停在这里，测「等 TMDB 的时候界面上有人改了清单」 */
   static gate: Promise<void> | null = null;
+  /** 刷新 TMDB 信息的测试：改这个就等于 TMDB 上改了译名 */
+  static beefTitle = "怒呛人生";
+  /** 每次建客户端是不是要求跳过缓存（deps.tmdb 的 opts.fresh） */
+  static freshCalls: boolean[] = [];
+  constructor(fresh = false) {
+    StubTmdb.freshCalls.push(fresh);
+  }
   async search(query: string): Promise<TmdbSearchResult[]> {
     const q = query.toLowerCase();
     if (q === "beef" || q === "怒呛人生") return [hit(153312, "tv", "BEEF", "2023")];
@@ -59,7 +66,7 @@ class StubTmdb implements TmdbApi {
   async details(kind: "movie" | "tv", id: number): Promise<TmdbDetails | null> {
     if (id === 999 && StubTmdb.gate) await StubTmdb.gate;
     const base = { id, mediaType: kind, enTitle: "", posterUrl: "", imdbId: "", genreIds: [], countries: [], originalLanguage: "", aliases: [] };
-    if (id === 153312) return { ...base, title: "怒呛人生", originalTitle: "BEEF", year: "2023", seasons: [{ season: 1, episodeCount: 10 }] };
+    if (id === 153312) return { ...base, title: StubTmdb.beefTitle, originalTitle: "BEEF", year: "2023", seasons: [{ season: 1, episodeCount: 10 }] };
     if (id === 999) return { ...base, title: "另一部剧", originalTitle: "Other", year: "2020", seasons: [{ season: 1, episodeCount: 5 }, { season: 2, episodeCount: 5 }] };
     return null;
   }
@@ -106,7 +113,7 @@ before(async () => {
     organize: {},
     agent: { enabled: true, uiBaseUrl: "http://nas:3000" },
   });
-  setOrganizeDeps({ tmdb: () => new StubTmdb(), notify: async () => true, retryDelayMs: 5 });
+  setOrganizeDeps({ tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true), notify: async () => true, retryDelayMs: 5 });
   setFollowServiceDeps({ notify: async () => {}, random: () => 0.5, gapMs: 0 });
   await writeAuthPassword("mcp-p3-pw");
   const all = ["sync", "transfer", "organize", "follow", "strm"] as const;
@@ -1079,5 +1086,45 @@ test("修补：strm 路径每段原样保留（目录名后面带空格的也找
     assert.ok(!asked[0].includes("凡人修仙传"), asked[0]);
   } finally {
     await full.close();
+  }
+});
+
+test("刷新 TMDB 信息：organize_preview 带 refreshTmdb 跳过缓存；organize_adjust 的 refresh 没变就 0 处、改了译名按新名重算；没识别的拒绝", async () => {
+  const client = await connect(dailyToken);
+  try {
+    StubTmdb.freshCalls = [];
+    const preview = await call(client, "organize_preview", { task: "tv", subPath: "inbox", refreshTmdb: true });
+    assert.equal(preview.isError, false, JSON.stringify(preview.data));
+    assert.equal(preview.data.state, "ready");
+    assert.ok(StubTmdb.freshCalls.includes(true), "预览的客户端要求跳过缓存");
+    const runId = preview.data.runId as string;
+    const attention = preview.data.attention as Array<Record<string, any>>;
+    const beef = unitBySource(attention, "BEEF")!;
+    const mystery = unitBySource(attention, "Mystery")!;
+
+    const same = await call(client, "organize_adjust", { run: runId, changes: [{ target: beef.ref, refresh: true }] });
+    assert.equal(same.isError, false, JSON.stringify(same.data));
+    assert.equal(same.data.changed, 0);
+    assert.deepEqual(same.data.units, [], "没变的单元不算改过");
+
+    StubTmdb.beefTitle = "怒呛人生（新译名）";
+    try {
+      const renamed = await call(client, "organize_adjust", { run: runId, changes: [{ target: beef.ref, refresh: true }] });
+      assert.equal(renamed.isError, false, JSON.stringify(renamed.data));
+      assert.equal(renamed.data.changed, 1);
+      const after = (renamed.data.units as Array<Record<string, any>>).find((u) => u.ref === beef.ref)!;
+      assert.equal(after.match.title, "怒呛人生（新译名）");
+      assert.equal(after.match.tmdbId, 153312);
+      assert.equal(after.match.reason, beef.match.reason, "刷新不是换作品，理由照旧");
+    } finally {
+      StubTmdb.beefTitle = "怒呛人生";
+    }
+
+    const bad = await call(client, "organize_adjust", { run: runId, changes: [{ target: mystery.ref, refresh: true }] });
+    assert.equal(bad.isError, true, JSON.stringify(bad.data));
+    assert.equal(bad.data.code, "VALIDATION");
+    assert.match(String(bad.data.error), /没识别出来/);
+  } finally {
+    await client.close();
   }
 });

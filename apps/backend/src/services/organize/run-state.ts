@@ -16,7 +16,7 @@ import { dstDirFor } from "../copy/paths.js";
 import { extSet } from "../strm/naming.js";
 import { notify } from "../notify.js";
 import { messageOf, retryableItem, revertPendingItem, revertWorkItem } from "./failures.js";
-import { TmdbClient, type TmdbApi } from "./identify.js";
+import { TmdbClient, type TmdbApi, type TmdbClientOptions } from "./identify.js";
 import type { EpisodeFill, ScopeRoot } from "./plan.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
 import { AUDIO_EXTS, type ScopeEntry, type Unit } from "./units.js";
@@ -42,16 +42,17 @@ export const handPicked = (trigger: OrganizeTrigger): boolean => trigger === "ma
 /* ------------------------------- 依赖注入 ------------------------------- */
 
 interface Deps {
-  tmdb: (settings: AppSettings) => TmdbApi | null;
+  /** opts.fresh：详情和季集跳过缓存（刷新 TMDB 信息） */
+  tmdb: (settings: AppSettings, opts?: TmdbClientOptions) => TmdbApi | null;
   notify: typeof notify;
   /** 临时失败（网络 / 超时）自动重试前等多久；测试里调短 */
   retryDelayMs: number;
 }
 
 const realDeps: Deps = {
-  tmdb: (settings) => {
+  tmdb: (settings, opts) => {
     const key = settings.tmdb?.apiKey?.trim();
-    return key ? new TmdbClient(key, settings.tmdb?.language || "zh-CN") : null;
+    return key ? new TmdbClient(key, settings.tmdb?.language || "zh-CN", opts) : null;
   },
   notify,
   retryDelayMs: 3000,

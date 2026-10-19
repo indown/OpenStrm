@@ -24,6 +24,7 @@ import type { AppSettings, OpenlistCopySettings, OrganizeSettings, ResourceStatu
 import { OpenlistCopySection } from "./components/OpenlistCopySection";
 import { OrganizeSection } from "./components/OrganizeSection";
 import { UpdateSection } from "./components/UpdateSection";
+import { TmdbCacheButton } from "./components/TmdbCacheButton";
 import { AgentSection } from "./components/AgentSection";
 import { PathMappingsEditor, RouteRulesEditor } from "./components/EmbyProxyRules";
 import { SectionNav, type Section } from "./components/SectionNav";
@@ -802,6 +803,7 @@ export default function SettingsPage() {
                   )}
                 />
               </div>
+              <TmdbCacheButton />
             </section>
 
             <section id="pansou" className="scroll-mt-20 space-y-4 rounded-xl border bg-card p-6">

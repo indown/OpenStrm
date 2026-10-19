@@ -1,5 +1,5 @@
 /**
- * 整理路由的闭环：鉴权、校验、建 run / 看详情 / 改单元 / 执行 / 撤销 / 删除、模板试算、识别记忆。
+ * 整理路由的闭环：鉴权、校验、建 run / 看详情 / 改单元 / 执行 / 撤销 / 删除、模板试算、识别记忆、清空 TMDB 缓存。
  * 网盘换成内存假网盘，TMDB 换成桩。
  *
  *   CONFIG_DIR=... DATA_DIR=... pnpm test:file src/routes/organize/organize.itest.ts
@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, test } from "node:test";
+import axios, { type AxiosResponse } from "axios";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AccountInfo, AppSettings, OrganizeItem, OrganizeRun, OrganizeRunDetail, OrganizeRunSummary, OrganizeTemplatePreview, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
 import { registerErrorHandling } from "../../plugins/error-handler.js";
@@ -19,11 +20,11 @@ import { writeAuthPassword } from "../../db/repositories/auth.js";
 import { listTasks, replaceTasks } from "../../db/repositories/tasks.js";
 import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
-import { __test_resetOrganize, rememberMatch } from "../../db/repositories/organize.js";
+import { __test_resetOrganize, readTmdbCache, rememberMatch, writeTmdbCache } from "../../db/repositories/organize.js";
 import { DATA_DIR } from "../../paths.js";
 import { setDriveProviderFactory } from "../../services/drive/registry.js";
 import type { TmdbDetails, TmdbEpisode, TmdbSearchResult } from "../../services/tmdb.js";
-import type { TmdbApi } from "../../services/organize/identify.js";
+import { TmdbClient, type TmdbApi } from "../../services/organize/identify.js";
 import { setOrganizeDeps, waitForRun } from "../../services/organize/run.js";
 import { FakeDrive } from "../../test/fake-drive.js";
 
@@ -35,12 +36,19 @@ const task: TaskDefinition = { id: "t1", account: "acc", accountType: "quark", o
 const drive = new FakeDrive("quark", account);
 
 class StubTmdb implements TmdbApi {
+  /** 刷新 TMDB 信息的测试：改这个就等于 TMDB 上改了译名 */
+  static duneTitle = "沙丘：第二部";
+  /** 每次建客户端是不是要求跳过缓存（deps.tmdb 的 opts.fresh） */
+  static freshCalls: boolean[] = [];
+  constructor(fresh = false) {
+    StubTmdb.freshCalls.push(fresh);
+  }
   async search(query: string): Promise<TmdbSearchResult[]> {
     return query.toLowerCase() === "dune part two" ? [{ id: 693134, mediaType: "movie", title: "沙丘：第二部", year: "2024", posterUrl: "", overview: "" }] : [];
   }
   async details(kind: "movie" | "tv", id: number): Promise<TmdbDetails | null> {
     const base = { id, mediaType: kind, enTitle: "", posterUrl: "", imdbId: "", genreIds: [], countries: [], originalLanguage: "", aliases: [] };
-    if (id === 693134) return { ...base, title: "沙丘：第二部", originalTitle: "Dune: Part Two", year: "2024" };
+    if (id === 693134) return { ...base, title: StubTmdb.duneTitle, originalTitle: "Dune: Part Two", year: "2024" };
     if (id === 438631) return { ...base, title: "沙丘", originalTitle: "Dune", year: "2021" };
     return null;
   }
@@ -73,7 +81,7 @@ before(async () => {
   await writeAuthPassword("organize-itest-pw");
   drive.tree.addFile("/movies/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv");
   setDriveProviderFactory((a) => (a.name === "acc" ? drive : null));
-  setOrganizeDeps({ tmdb: () => new StubTmdb(), notify: async () => true, retryDelayMs: 5 });
+  setOrganizeDeps({ tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true), notify: async () => true, retryDelayMs: 5 });
 
   app = Fastify();
   registerErrorHandling(app);
@@ -262,4 +270,100 @@ test("设置：坏模板 / 坏识别词存不进去；好的存得进去", async
   await json("PUT", "/api/settings", { organize: { idTag: "jellyfin", rules: ["高清剧集"], auto: "review" } });
   assert.equal(readAppSettings().organize?.idTag, "jellyfin");
   rememberMatch({ accountName: "acc", srcPath: "/x", mediaType: "tv", tmdbId: 1, title: "", year: "", season: null, episodeOffset: 0 });
+});
+
+test("清空 TMDB 缓存：库里的行删掉，还活着的客户端把进程内 memo 一起丢掉", async () => {
+  const key = "details:movie:438631:zh-CN";
+  writeTmdbCache(key, { id: 438631, title: "沙丘" });
+  const client = new TmdbClient("x", "zh-CN");
+  assert.equal((await client.details("movie", 438631))?.title, "沙丘");
+
+  const { cleared } = await json<{ cleared: number }>("DELETE", "/api/organize/tmdb/cache");
+  assert.ok(cleared >= 1);
+  assert.equal(readTmdbCache(key, 3600), null);
+
+  // 库里换成新的一版：memo 要是没丢，读到的还是旧的「沙丘」
+  writeTmdbCache(key, { id: 438631, title: "沙丘（新译名）" });
+  assert.equal((await client.details("movie", 438631))?.title, "沙丘（新译名）");
+  assert.ok((await json<{ cleared: number }>("DELETE", "/api/organize/tmdb/cache")).cleared >= 1);
+});
+
+test("刷新 TMDB 信息的客户端：详情跳过库里的值直接问 TMDB、拉到的写回；同一个客户端第二次走 memo", async () => {
+  const key = "details:movie:693134:zh-CN";
+  writeTmdbCache(key, { id: 693134, title: "旧译名" });
+  let calls = 0;
+  const adapter = axios.defaults.adapter;
+  axios.defaults.adapter = async (config) => {
+    calls += 1;
+    return { data: { id: 693134, title: "沙丘：第二部", original_title: "Dune: Part Two", release_date: "2024-02-27" }, status: 200, statusText: "OK", headers: {}, config } as AxiosResponse;
+  };
+  try {
+    assert.equal((await new TmdbClient("x", "zh-CN").details("movie", 693134))?.title, "旧译名", "不刷新的照旧读缓存");
+    const fresh = new TmdbClient("x", "zh-CN", { fresh: true });
+    assert.equal((await fresh.details("movie", 693134))?.title, "沙丘：第二部");
+    assert.equal(calls, 1);
+    assert.equal(readTmdbCache<{ title: string }>(key, 3600)?.title, "沙丘：第二部", "拉到的写回库里");
+    await fresh.details("movie", 693134);
+    assert.equal(calls, 1, "同一个客户端第二次走 memo");
+    assert.equal((await new TmdbClient("x", "zh-CN").details("movie", 693134))?.title, "沙丘：第二部", "别的客户端从库里读到新的");
+    assert.equal(calls, 1);
+  } finally {
+    axios.defaults.adapter = adapter;
+  }
+});
+
+test("刷新 TMDB 信息：单元按新译名重算，没变就什么都不动，没识别的 400；预览 / 重新预览带 refreshTmdb 跳过缓存", async () => {
+  drive.tree.addFile("/movies/refresh/Dune.Part.Two.2024.2160p.WEB-DL.mkv");
+  drive.tree.addFile("/movies/refresh/Nobody.Knows.This.2020.mkv");
+  const run = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh" }, 201);
+  const ready = await untilStatus(run.id, ["ready"]);
+  const dune = ready.units.find((u) => u.match?.tmdbId === 693134)!;
+  const nobody = ready.units.find((u) => !u.match)!;
+  assert.ok(dune && nobody, JSON.stringify(ready.units.map((u) => [u.key, u.match?.tmdbId])));
+  // 前面的测试把 id 标签写法改成了 jellyfin，这里不认死一种
+  assert.match(dune.dstRoot, /^沙丘：第二部 \(2024\) \[tmdbid[=-]693134\]$/);
+
+  // 没变：200、单元原样
+  StubTmdb.freshCalls = [];
+  const same = await json<OrganizeUnit>("PUT", `/api/organize/runs/${run.id}/unit`, { key: dune.key, refresh: true });
+  assert.deepEqual(StubTmdb.freshCalls, [true], "刷新建的客户端要求跳过缓存");
+  assert.equal(same.match?.title, "沙丘：第二部");
+  assert.equal(same.dstRoot, dune.dstRoot);
+
+  // TMDB 上改了译名：按新名重算，把握和理由照旧
+  StubTmdb.duneTitle = "沙丘 2";
+  try {
+    const renamed = await json<OrganizeUnit>("PUT", `/api/organize/runs/${run.id}/unit`, { key: dune.key, refresh: true });
+    assert.equal(renamed.match?.title, "沙丘 2");
+    assert.equal(renamed.dstRoot, dune.dstRoot.replace("沙丘：第二部", "沙丘 2"));
+    assert.equal(renamed.match?.confidence, dune.match?.confidence);
+    assert.equal(renamed.match?.reason, dune.match?.reason);
+    assert.equal(renamed.selected, dune.selected);
+    const items = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${run.id}/items?unit=${encodeURIComponent(dune.key)}`);
+    assert.ok(items.items.some((it) => it.dstPath.includes("沙丘 2 (2024)")), JSON.stringify(items.items.map((it) => it.dstPath)));
+  } finally {
+    StubTmdb.duneTitle = "沙丘：第二部";
+  }
+
+  // 没识别出来的不能刷新
+  const bad = await app.inject({ method: "PUT", url: `/api/organize/runs/${run.id}/unit`, headers: auth, payload: { key: nobody.key, refresh: true } });
+  assert.equal(bad.statusCode, 400, bad.body);
+  assert.equal(bad.json().code, "NO_MATCH");
+
+  // 整个范围：预览和重新预览都能带 refreshTmdb
+  StubTmdb.freshCalls = [];
+  const whole = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh", refreshTmdb: true }, 201);
+  const wholeReady = await untilStatus(whole.id, ["ready"]);
+  assert.ok(StubTmdb.freshCalls.includes(true));
+  assert.ok(wholeReady.run.log.some((l) => l.includes("刷新 TMDB 信息")), wholeReady.run.log.join("\n"));
+  StubTmdb.freshCalls = [];
+  const again = await json<OrganizeRun>("POST", `/api/organize/runs/${whole.id}/repreview`, { refreshTmdb: true }, 201);
+  const againReady = await untilStatus(again.id, ["ready"]);
+  assert.ok(StubTmdb.freshCalls.includes(true));
+  assert.ok(againReady.run.log.some((l) => l.includes("刷新 TMDB 信息")));
+  StubTmdb.freshCalls = [];
+  const plain = await json<OrganizeRun>("POST", `/api/organize/runs/${again.id}/repreview`, {}, 201);
+  const plainReady = await untilStatus(plain.id, ["ready"]);
+  assert.ok(!StubTmdb.freshCalls.includes(true), "不带标记的照旧走缓存");
+  assert.ok(!plainReady.run.log.some((l) => l.includes("刷新 TMDB 信息")));
 });
