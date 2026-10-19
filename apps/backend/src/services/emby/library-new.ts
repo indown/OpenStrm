@@ -5,7 +5,8 @@
  * 各版本 payload 还不一样；而 emby.url + apiKey 本来就配好了（302 代理在用），
  * 对局域网 Emby 两分钟一次 /Items 查询可以忽略不计。
  *
- * 循环常驻、不追着设置起停：每一轮先看开关和配置，不满足就什么都不做。
+ * 循环常驻、不追着设置起停：每一轮先看配置，Emby 没配就什么都不做；通知开关关着也会问一次，
+ * 因为同一批条目还顺手给整理的探测缓存回填媒体流（services/media/emby-streams.ts，自己的游标）。
  * refreshEmbyNow 成功后 30 秒会插一轮加急——入库基本都发生在我们触发刷新之后。
  * 游标 = 最新条目的 DateCreated（毫秒）+ 同一时刻的 id 集，落在 settings 表里：
  * 重启不重复报；开关关掉一阵再打开，会把这段时间的入库补报一次（超量时只报总数）。
@@ -18,6 +19,7 @@ import { DEFAULT_TIMEOUT_MS } from "../../lib/http.js";
 import { moduleLogger } from "../../lib/logger.js";
 import { createPollingLoop } from "../../lib/polling.js";
 import { notify, notifyPrefs, type EmbyNewGroup, type NotifyEvent } from "../notify.js";
+import { backfillProbesFromEmby, type EmbyStreamSource } from "../media/emby-streams.js";
 
 const log = moduleLogger("emby-new");
 
@@ -39,6 +41,8 @@ export interface EmbyNewItem {
   year?: number;
   /** DateCreated 解析成毫秒；解析不了的条目直接丢弃 */
   at: number;
+  /** 条目的媒体源（Emby 分析过的流，回填探测缓存用）；桩 / 老数据可以没有 */
+  sources?: EmbyStreamSource[];
 }
 
 interface Cursor {
@@ -62,7 +66,7 @@ async function fetchLatestReal(limit: number): Promise<EmbyNewItem[] | null> {
   const url =
     `${base}/Items?Recursive=true&IncludeItemTypes=Movie,Episode` +
     `&SortBy=DateCreated&SortOrder=Descending&Limit=${limit}` +
-    `&Fields=DateCreated,SeriesName,ParentIndexNumber,IndexNumber,ProductionYear` +
+    `&Fields=DateCreated,SeriesName,ParentIndexNumber,IndexNumber,ProductionYear,MediaSources` +
     `&api_key=${encodeURIComponent(s.emby.apiKey)}`;
   const res = await axios.get<{ Items?: Array<Record<string, unknown>> }>(url, { timeout: DEFAULT_TIMEOUT_MS });
   return (res.data?.Items ?? []).map((it) => ({
@@ -74,6 +78,16 @@ async function fetchLatestReal(limit: number): Promise<EmbyNewItem[] | null> {
     episode: typeof it.IndexNumber === "number" ? it.IndexNumber : undefined,
     year: typeof it.ProductionYear === "number" ? it.ProductionYear : undefined,
     at: Date.parse(String(it.DateCreated ?? "")),
+    sources: Array.isArray(it.MediaSources)
+      ? (it.MediaSources as Array<Record<string, unknown>>)
+          .filter((ms) => typeof ms.Path === "string" && ms.Path)
+          .map((ms) => ({
+            path: ms.Path as string,
+            size: typeof ms.Size === "number" ? ms.Size : undefined,
+            container: typeof ms.Container === "string" ? ms.Container : undefined,
+            streams: Array.isArray(ms.MediaStreams) ? (ms.MediaStreams as Array<Record<string, unknown>>) : [],
+          }))
+      : undefined,
   }));
 }
 
@@ -120,13 +134,26 @@ export async function tickEmbyNew(): Promise<void> {
   }
 }
 
+/** 回填探测缓存：自己的游标，和通知开关无关；首轮也回填（存量的最近几十条白送） */
+function backfillRound(sorted: EmbyNewItem[]): void {
+  const cursor = readKv<Cursor>(KEY.embyProbeCursor);
+  const fresh = cursor ? sorted.filter((i) => i.at > cursor.at || (i.at === cursor.at && !cursor.ids.includes(i.id))) : sorted;
+  const newest = sorted[0];
+  if (newest) writeKv(KEY.embyProbeCursor, { at: newest.at, ids: sorted.filter((i) => i.at === newest.at).map((i) => i.id) });
+  const sources = fresh.flatMap((i) => i.sources ?? []);
+  if (sources.length === 0) return;
+  const r = backfillProbesFromEmby(sources);
+  if (r.filled > 0) log.info(`按 Emby 分析过的媒体流回填了 ${r.filled} 个文件的探测缓存${r.kept ? `（${r.kept} 个已有读文件头的结果，不覆盖）` : ""}`);
+}
+
 async function runRound(): Promise<void> {
-  // 开关关着连 Emby 都不问；游标会停在关掉那一刻，重新打开时把中间的入库补报一次
-  if (!notifyPrefs(readAppSettings()).embyNew) return;
   const items = await deps.fetch(FETCH_LIMIT);
   if (!items) return;
 
   const sorted = items.filter((i) => Number.isFinite(i.at) && i.id).sort((a, b) => b.at - a.at);
+  backfillRound(sorted);
+  // 通知开关关着就到此为止；通知的游标会停在关掉那一刻，重新打开时把中间的入库补报一次
+  if (!notifyPrefs(readAppSettings()).embyNew) return;
   const newest = sorted[0];
   const cursor = readKv<Cursor>(KEY.embyNewCursor);
   const idsAt = (at: number) => sorted.filter((i) => i.at === at).map((i) => i.id);
@@ -188,6 +215,7 @@ export function nudgeEmbyNewWatch(): void {
 export async function __test_resetEmbyNew(): Promise<void> {
   await stopEmbyNewWatcher();
   writeKv(KEY.embyNewCursor, null);
+  writeKv(KEY.embyProbeCursor, null);
   lastTickAt = null;
   loop.noteError(null);
 }

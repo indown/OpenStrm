@@ -58,21 +58,22 @@ const num = (v: unknown): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-function videoCodecOf(format: string | undefined, codecId: string | undefined): string {
+/** 视频编码的统一写法：收 MediaInfo 的 Format / CodecID，也收 Emby 的短名（h264 / hevc / mpeg4 …） */
+export function videoCodecOf(format: string | undefined, codecId: string | undefined): string {
   const f = (format ?? "").toLowerCase();
   const c = (codecId ?? "").toLowerCase();
-  if (f === "avc" || c.includes("avc") || c.includes("h264")) return "H.264";
-  if (f === "hevc" || c.includes("hvc") || c.includes("hev1") || c.includes("hevc")) return "HEVC";
+  if (f === "avc" || f === "h264" || c.includes("avc") || c.includes("h264")) return "H.264";
+  if (f === "hevc" || f === "h265" || c.includes("hvc") || c.includes("hev1") || c.includes("hevc")) return "HEVC";
   if (f === "av1" || c.includes("av01")) return "AV1";
   if (f === "vp9" || f === "vp09") return "VP9";
   if (f === "vp8") return "VP8";
-  if (f === "mpeg-4 visual" || c.includes("xvid") || c.includes("divx")) return "XviD";
-  if (f === "mpeg video") return "MPEG-2";
-  if (f === "vc-1") return "VC-1";
+  if (f === "mpeg-4 visual" || f === "mpeg4" || c.includes("xvid") || c.includes("divx")) return "XviD";
+  if (f === "mpeg video" || f === "mpeg2video") return "MPEG-2";
+  if (f === "vc-1" || f === "vc1") return "VC-1";
   return format ?? codecId ?? "";
 }
 
-function hdrOf(hdrFormat: string | undefined, compat: string | undefined, transfer: string | undefined): string | undefined {
+export function hdrOf(hdrFormat: string | undefined, compat: string | undefined, transfer: string | undefined): string | undefined {
   const h = `${hdrFormat ?? ""} ${compat ?? ""}`;
   if (/dolby vision/i.test(h)) return "DV";
   if (/2094/.test(h) || /HDR10\+/i.test(h)) return "HDR10+";
@@ -82,13 +83,14 @@ function hdrOf(hdrFormat: string | undefined, compat: string | undefined, transf
   return undefined;
 }
 
-function audioCodecOf(format: string | undefined, commercial: string | undefined, features: string | undefined): string {
+/** 音频编码的统一写法：收 MediaInfo 的 Format / 商业名，也收 Emby 的短名（eac3 / truehd / pcm_s16le …） */
+export function audioCodecOf(format: string | undefined, commercial: string | undefined, features: string | undefined): string {
   const f = (format ?? "").toLowerCase();
   const c = (commercial ?? "").toLowerCase();
   if (f === "e-ac-3" || f === "eac3") return "DDP";
   if (f === "ac-3" || f === "ac3") return "AC3";
   if (f === "aac") return "AAC";
-  if (f === "mlp fba" || c.includes("truehd")) return "TrueHD";
+  if (f === "mlp fba" || f === "truehd" || c.includes("truehd")) return "TrueHD";
   if (f === "dts") {
     if (c.includes("dts:x") || c.includes("dts-x")) return "DTS-X";
     if (c.includes("dts-hd") || /XLL|HRA/i.test(features ?? "")) return "DTS-HD";
@@ -97,8 +99,8 @@ function audioCodecOf(format: string | undefined, commercial: string | undefined
   if (f === "flac") return "FLAC";
   if (f === "opus") return "Opus";
   if (f === "vorbis") return "Vorbis";
-  if (f === "mpeg audio") return "MP3";
-  if (f === "pcm") return "PCM";
+  if (f === "mpeg audio" || f === "mp3") return "MP3";
+  if (f === "pcm" || f.startsWith("pcm_")) return "PCM";
   if (f === "alac") return "ALAC";
   return format ?? "";
 }
@@ -235,12 +237,19 @@ function describeError(err: unknown): string {
   return msg.slice(0, 200);
 }
 
+/** 一个文件可能命中的缓存键：有 id 先按 id，再退到路径（Emby 回填的只认路径） */
+const keysOf = (t: ProbeTarget): string[] => (t.id ? [probeKey(t), `path:${t.path}`] : [probeKey(t)]);
+
 /** 取缓存（大小对得上才算）；返回 null 表示没有可用的缓存 */
 export function cachedProbe(accountName: string, target: ProbeTarget): MediaProbeRow | null {
-  const row = getMediaProbes(accountName, [probeKey(target)]).get(probeKey(target));
-  if (!row) return null;
-  if (target.size !== undefined && row.size > 0 && row.size !== target.size) return null;
-  return row;
+  const rows = getMediaProbes(accountName, keysOf(target));
+  for (const key of keysOf(target)) {
+    const row = rows.get(key);
+    if (!row) continue;
+    if (target.size !== undefined && row.size > 0 && row.size !== target.size) continue;
+    return row;
+  }
+  return null;
 }
 
 /**
@@ -277,12 +286,15 @@ export async function probeDriveFile(provider: DriveProvider, accountName: strin
 export function cachedProbeTags(accountName: string, targets: ProbeTarget[]): Map<string, MediaProbeTags> {
   const out = new Map<string, MediaProbeTags>();
   if (targets.length === 0) return out;
-  const rows = getMediaProbes(accountName, targets.map(probeKey));
+  const rows = getMediaProbes(accountName, targets.flatMap(keysOf));
   for (const t of targets) {
-    const row = rows.get(probeKey(t));
-    if (!row || row.status !== "ok" || !row.data) continue;
-    if (t.size !== undefined && row.size > 0 && row.size !== t.size) continue;
-    out.set(t.path, probeTags(row.data));
+    for (const key of keysOf(t)) {
+      const row = rows.get(key);
+      if (!row || row.status !== "ok" || !row.data) continue;
+      if (t.size !== undefined && row.size > 0 && row.size !== t.size) continue;
+      out.set(t.path, probeTags(row.data));
+      break;
+    }
   }
   return out;
 }

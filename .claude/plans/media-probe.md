@@ -63,7 +63,13 @@
 - 界面（前端 dev 3223 + 实验后端 4100）：单元卡片「探测编码」在「刷新 TMDB」右边，点了弹「读到 5 个视频，清单没有变化」（全是缓存）；展开文件表，「原来」一列下面一行小字「探测到 1080p H.264 AAC」；两部以上时清单上方批量行多了「探测缺标签的视频」，文件名都带 2160p 的两部点了弹「没有要探的视频：文件名里都有模板要用的标签，或者模板没用 {resolution} 这些变量」；设置页「整理与命名」多了「预览时自动探测文件名缺标签的视频」开关。实验库、口令、令牌用完已删。
 - 没验的：OpenList（Local 存储的 raw_url 支持 Range，本地 http 测试覆盖了同一条路）；夸克 / OpenList 上的「假视频」优雅失败只在单测里验过（analyze 抛错 → 记 failed 带原因）；设置开着「预览时自动探测」的真机整库预览没跑（只跑了单元级）。
 
-## 下一步
+## 第二步：Emby 回填（2026-10-19 做完）
 
-- Emby 回填（原计划第二步）：配了 Emby 的，整理执行并刷新之后按本地 strm 路径查 Emby 的 MediaStreams 回填缓存。
-- 探测结果现在只喂模板；写 nfo（naming-freedom.md 里的 B 组）时可以直接用 `media_probes` 里的完整结果（音轨 / 字幕 / 码率都存了）。
+挂在现有的 Emby 入库检查循环上（`services/emby/library-new.ts`，两分钟一轮、刷新后 30 秒加急）：`/Items` 多要 `MediaSources`（里面带 Emby 分析过的 `MediaStreams`），每轮把新条目的媒体源交给 `services/media/emby-streams.ts`：strm 内容（MediaSource.Path）用 `remoteOfStrmContent` 按任务换算回网盘文件 → Emby 的流（Codec 短名、VideoRangeType、Profile / DisplayTitle 里的 Atmos）映射成同一份 `MediaProbe` → 写进 `media_probes`（键只有路径；`bytesRead` 是 0）。读文件头得到的结果（bytesRead > 0）不覆盖；Emby 回填的会被下一次回填更新。回填有自己的游标（`emby.probeCursor`），首轮把最近 50 条也回填；**通知开关关着现在也会问 Emby 一次**（原来「开关关着连 Emby 都不问」），只是不通知、通知的游标照旧停着。
+查缓存：有 id 的文件先按 `id:` 键再退到 `path:` 键（`keysOf`），Emby 回填的才用得上。`videoCodecOf` / `audioCodecOf` 顺手认了 Emby 的短名（h264 / hevc / mpeg4 / mpeg2video / vc1、eac3 / truehd / mp3 / pcm_*）。
+测试：library-new.itest（开关关着照样回填、对上任务的才写、没视频流的不写、首轮回填、有 id 退到路径、读文件头的不覆盖）。真机没验（本机没有常驻的 Emby；OpenList 实验环境那套 emby-lab.sh 能起一个，留给下次）。
+
+## 还没做的
+
+- OpenList 真机探测；设置开着自动探测的整库真机预览。
+- 探测结果现在只喂模板；写 nfo 时可以直接用 `media_probes` 里的完整结果（音轨 / 字幕 / 码率都存了）。

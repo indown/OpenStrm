@@ -27,6 +27,8 @@ export const KEY = {
   /** 「复制到 OpenList」的队列；和回执一样是运行状态，不进 app. */
   copyQueue: "copy.queue",
   embyNewCursor: "emby.newCursor",
+  /** Emby 入库回填探测缓存的游标（和入库通知的游标分开：通知开关关着回填照跑） */
+  embyProbeCursor: "emby.probeCursor",
   /** 上一次检查更新的结果；不放 app. 前缀——它是运行状态，不是用户设置 */
   updateState: "update.state",
   /** 影库节点的 search_text 是按哪一版归一化规则算的（services/library/search-text.ts 的 SEARCH_TEXT_VERSION） */
