@@ -23,6 +23,13 @@ export const TEMPLATE_PRESETS: TemplatePreset[] = [
     tv: "{category}/{year}/{title} ({year}) {idTag}/Season {season00}/{title} - S{season00}E{episode00}[ - {episodeTitle}].{ext}",
   },
   {
+    key: "collection",
+    label: "电影按系列归档",
+    hint: "同一系列的电影放进系列目录：沙丘（系列）/沙丘：第二部 (2024) [tmdbid=…]/…；不属于系列的照常",
+    movie: "{category}/[{collection}/]{title} ({year}) {idTag}/{title} ({year})[ - {edition}][ - {resolution}][-{part}].{ext}",
+    tv: DEFAULT_TEMPLATES.tv,
+  },
+  {
     key: "absolute",
     label: "动画：文件名带绝对集数",
     hint: "番剧常按总集数编号：S02E05 后面再跟 - 030，播放器和字幕组的编号都对得上",

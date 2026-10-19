@@ -715,6 +715,14 @@
               "newName": {
                 "type": "string",
                 "maxLength": 200
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "video",
+                  "extra",
+                  "auto"
+                ]
               }
             },
             "required": [

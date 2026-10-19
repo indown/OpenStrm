@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Ban, ChevronDown, ChevronRight, Film, Loader2, Play, RefreshCw, RotateCw, Search, Square, Trash2, Undo2 } from "lucide-react";
 import { toast } from "sonner";
-import type { OrganizeConflictChoice, OrganizeConflictResolution, OrganizeEpisodePin, OrganizeItem, OrganizeRun, OrganizeRunDetail, OrganizeRunStatus, OrganizeUnit, OrganizeUnitPatch } from "@openstrm/shared";
+import type { OrganizeConflictChoice, OrganizeConflictResolution, OrganizeEpisodePin, OrganizeItem, OrganizeKindOverride, OrganizeRun, OrganizeRunDetail, OrganizeRunStatus, OrganizeUnit, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -294,7 +294,7 @@ export function RunView({
   };
 
   /** 钉季 / 集、改文件名：和冲突办法一样按文件改、重新规划 */
-  const editItem = async (unit: OrganizeUnit, item: OrganizeItem, patch: { pin?: OrganizeEpisodePin | null; name?: string | null }): Promise<boolean> => {
+  const editItem = async (unit: OrganizeUnit, item: OrganizeItem, patch: { pin?: OrganizeEpisodePin | null; name?: string | null; kind?: OrganizeKindOverride | null }): Promise<boolean> => {
     markPatching([unit.key], true);
     try {
       await api.organize.patchItems(runId, [item.id], patch);
@@ -314,7 +314,10 @@ export function RunView({
     if (what === "pin") setPinning({ unit, item });
     else if (what === "rename") setRenaming({ unit, item, mode: "any" });
     else if (what === "clearPin") void editItem(unit, item, { pin: null });
-    else void editItem(unit, item, { name: null });
+    else if (what === "clearRename") void editItem(unit, item, { name: null });
+    else if (what === "kindVideo") void editItem(unit, item, { kind: "video" });
+    else if (what === "kindExtra") void editItem(unit, item, { kind: "extra" });
+    else void editItem(unit, item, { kind: null });
   };
 
   /** 下拉里选的：自己改名先弹框问名字，其余直接重规划 */

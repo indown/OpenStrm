@@ -2,7 +2,7 @@
  * 预览：建 run → 列范围 → 分单元 → 识别（TMDB）→ 规划 → 落库；预览里改单元 / 换匹配；换匹配弹框的 TMDB 搜索。
  */
 import { randomUUID } from "node:crypto";
-import type { OrganizeEpisodePin, OrganizeProbeResult, MediaProbeTags, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeKindOverride, OrganizeEpisodePin, OrganizeProbeResult, MediaProbeTags, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
 import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
@@ -328,13 +328,15 @@ const resolutionsRel = (task: TaskDefinition, unit: OrganizeUnit): Map<string, O
   new Map(Object.entries(unit.resolutions ?? {}).map(([p, r]) => [relOf(task, p), r]));
 const pinsRel = (task: TaskDefinition, unit: OrganizeUnit): Map<string, OrganizeEpisodePin> => new Map(Object.entries(unit.pins ?? {}).map(([p, r]) => [relOf(task, p), r]));
 const renamesRel = (task: TaskDefinition, unit: OrganizeUnit): Map<string, string> => new Map(Object.entries(unit.renames ?? {}).map(([p, r]) => [relOf(task, p), r]));
+const kindsRel = (task: TaskDefinition, unit: OrganizeUnit): Map<string, OrganizeKindOverride> => new Map(Object.entries(unit.kinds ?? {}).map(([p, r]) => [relOf(task, p), r]));
 
-/** 规划里要用的、单元行上的人为设定（标题 / 年份、钉的季集、改的文件名）换成相对路径 */
-const overridesOf = (task: TaskDefinition, unit: OrganizeUnit): Pick<UnitPlanInput, "titleOverride" | "yearOverride" | "pins" | "renames"> => ({
+/** 规划里要用的、单元行上的人为设定（标题 / 年份、钉的季集、改的文件名、改判的类型）换成相对路径 */
+const overridesOf = (task: TaskDefinition, unit: OrganizeUnit): Pick<UnitPlanInput, "titleOverride" | "yearOverride" | "pins" | "renames" | "kinds"> => ({
   titleOverride: unit.titleOverride,
   yearOverride: unit.yearOverride,
   pins: pinsRel(task, unit),
   renames: renamesRel(task, unit),
+  kinds: kindsRel(task, unit),
 });
 
 /** 整棵列一个目录（相对任务 originPath）：有 walkSubtree 的（夸克 / OpenList）带 id，115 只有路径，id 到执行时再解析 */
@@ -470,6 +472,7 @@ function toUnitRow(runId: string, unit: Unit, match: OrganizeMatch | null, plan:
     yearOverride: "",
     pins: {},
     renames: {},
+    kinds: {},
   };
 }
 
@@ -1035,20 +1038,21 @@ export interface PlanPatch {
 }
 
 /**
- * 文件级的改动：勾选、冲突办法、钉季 / 集（只给剧集单元里的视频；null 撤掉）、改目标文件名（null 或空串撤掉；不能带目录）。
- * 钉了、改了名的文件会重新勾上
+ * 文件级的改动：勾选、冲突办法、钉季 / 集（只给剧集单元里的视频；null 撤掉）、改目标文件名（null 或空串撤掉；不能带目录）、
+ * 改判类型（视频当正片 / 当花絮；null 回到按规则）。钉了、改了名、改判了的文件会重新勾上
  */
-type FilePatch = { selected?: boolean; resolve?: OrganizeConflictResolution | null; pin?: OrganizeEpisodePin | null; name?: string | null };
+type FilePatch = { selected?: boolean; resolve?: OrganizeConflictResolution | null; pin?: OrganizeEpisodePin | null; name?: string | null; kind?: OrganizeKindOverride | null };
 
 /**
  * 一个单元套上文件级的改动：勾选记在 excluded、冲突办法记在 resolutions。
  * 选了办法的项本来就勾着（取消勾选的选不了办法，见 patchPlan）；撤回办法（null）= 留在原处，记成取消勾选；取消勾选同时撤掉办法
  */
-function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>): Pick<OrganizeUnit, "excluded" | "resolutions" | "pins" | "renames"> {
+function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>): Pick<OrganizeUnit, "excluded" | "resolutions" | "pins" | "renames" | "kinds"> {
   const excluded = new Set(row.excluded);
   const resolutions = { ...row.resolutions };
   const pins = { ...(row.pins ?? {}) };
   const renames = { ...(row.renames ?? {}) };
+  const kinds = { ...(row.kinds ?? {}) };
   for (const [path, fp] of files) {
     const selected = fp.resolve !== undefined ? fp.resolve !== null : fp.selected;
     if (selected !== false) excluded.delete(path);
@@ -1067,15 +1071,19 @@ function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>):
       if (name) renames[path] = name;
       else delete renames[path];
     }
+    if (fp.kind !== undefined) {
+      if (fp.kind) kinds[path] = fp.kind;
+      else delete kinds[path];
+    }
   }
-  return { excluded: [...excluded].sort(), resolutions, pins, renames };
+  return { excluded: [...excluded].sort(), resolutions, pins, renames, kinds };
 }
 
 /** 两个单元行在规划上有没有区别（换了匹配是新对象，按引用比就够） */
 /** 刷新 TMDB 信息时比「拉回来的和原来一样吗」：只看会落到命名 / 分类 / 海报上的字段 */
 function sameMatchData(a: OrganizeMatch, b: OrganizeMatch): boolean {
   const pick = (m: OrganizeMatch) =>
-    JSON.stringify([m.title, m.originalTitle, m.enTitle ?? "", m.year, m.posterUrl, m.imdbId ?? "", m.genreIds ?? [], m.countries ?? [], m.originalLanguage ?? "", m.seasons ?? []]);
+    JSON.stringify([m.title, m.originalTitle, m.enTitle ?? "", m.year, m.posterUrl, m.imdbId ?? "", m.genreIds ?? [], m.countries ?? [], m.originalLanguage ?? "", m.seasons ?? [], m.collection?.name ?? ""]);
   return pick(a) === pick(b);
 }
 
@@ -1096,7 +1104,8 @@ function sameUnitRow(a: OrganizeUnit, b: OrganizeUnit): boolean {
     [...a.excluded].sort().join("\n") === [...b.excluded].sort().join("\n") &&
     JSON.stringify(Object.entries(a.resolutions ?? {}).sort()) === JSON.stringify(Object.entries(b.resolutions ?? {}).sort()) &&
     JSON.stringify(Object.entries(a.pins ?? {}).sort()) === JSON.stringify(Object.entries(b.pins ?? {}).sort()) &&
-    JSON.stringify(Object.entries(a.renames ?? {}).sort()) === JSON.stringify(Object.entries(b.renames ?? {}).sort())
+    JSON.stringify(Object.entries(a.renames ?? {}).sort()) === JSON.stringify(Object.entries(b.renames ?? {}).sort()) &&
+    JSON.stringify(Object.entries(a.kinds ?? {}).sort()) === JSON.stringify(Object.entries(b.kinds ?? {}).sort())
   );
 }
 
@@ -1145,6 +1154,11 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
         if (mediaType !== "tv") throw new HttpError(400, "只有剧集的视频能钉季 / 集", { code: "PIN_NOT_TV" });
       }
       if (patch.name && patch.name.includes("/")) throw new HttpError(400, "目标文件名不能带目录");
+      if (patch.kind) {
+        // 改判只在「这是不是正片」上：只有视频文件有正片 / 花絮之分；本地结构的清单不分
+        if (state.local) throw new HttpError(400, "按本地 strm 结构整理的清单不分正片 / 花絮", { code: "NOT_TMDB_RUN" });
+        if (it.kind !== "video") throw new HttpError(400, "只有视频能改判成正片 / 花絮", { code: "KIND_NOT_VIDEO" });
+      }
       // 办法只给冲突项（和界面一样）；已经选过的可以改主意，撤回总可以。
       // 不然「自己起名」能给任意文件起任意名字，别的办法也会记在单元上、等以后撞上了才生效
       if (patch.resolve && !conflicts.has(fileKey(unitKey, srcPath)) && !rows.get(unitKey)?.resolutions?.[srcPath]) {
@@ -1304,6 +1318,8 @@ export interface ItemsPatch {
   pin?: OrganizeEpisodePin | null;
   /** 改目标文件名（不带目录，没写扩展名沿用原来的）；null 撤掉 */
   name?: string | null;
+  /** 改判类型：video 当正片、extra 当花絮；null 回到按规则判断 */
+  kind?: OrganizeKindOverride | null;
 }
 
 export async function patchItems(runId: string, ids: string[], patch: ItemsPatch): Promise<{ changed: number }> {
@@ -1318,6 +1334,7 @@ export async function patchItems(runId: string, ids: string[], patch: ItemsPatch
       ...(patch.resolve !== undefined ? { resolve: patch.resolve } : {}),
       ...(patch.pin !== undefined ? { pin: patch.pin } : {}),
       ...(patch.name !== undefined ? { name: patch.name } : {}),
+      ...(patch.kind !== undefined ? { kind: patch.kind } : {}),
     }));
   const { changed } = await patchPlan(runId, { files });
   return { changed: changed.length };

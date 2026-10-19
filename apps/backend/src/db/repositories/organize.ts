@@ -112,6 +112,7 @@ function toUnit(row: UnitRow): OrganizeUnit {
     yearOverride: row.yearOverride ?? "",
     pins: parseJson<OrganizeUnit["pins"]>(row.pins, {}),
     renames: parseJson<OrganizeUnit["renames"]>(row.renames, {}),
+    kinds: parseJson<OrganizeUnit["kinds"]>(row.kinds, {}),
   };
 }
 
@@ -355,6 +356,7 @@ export function replaceUnits(runId: string, units: OrganizeUnit[]): void {
           yearOverride: u.yearOverride ?? "",
           pins: JSON.stringify(u.pins ?? {}),
           renames: JSON.stringify(u.renames ?? {}),
+          kinds: JSON.stringify(u.kinds ?? {}),
         })
         .run();
     }
@@ -391,6 +393,7 @@ export function updateUnit(runId: string, key: string, patch: Partial<OrganizeUn
         yearOverride: merged.yearOverride ?? "",
         pins: JSON.stringify(merged.pins ?? {}),
         renames: JSON.stringify(merged.renames ?? {}),
+        kinds: JSON.stringify(merged.kinds ?? {}),
         parsedTitle: merged.parsedTitle,
         parsedYear: merged.parsedYear,
       })

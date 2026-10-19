@@ -99,6 +99,7 @@ export type {
   MediaProbeTags,
   OrganizeProbeResult,
   OrganizeEpisodePin,
+  OrganizeKindOverride,
   OrganizeRunStage,
   OrganizeRunStats,
   OrganizeRunStatus,

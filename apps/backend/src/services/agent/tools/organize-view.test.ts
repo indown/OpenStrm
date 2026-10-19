@@ -39,6 +39,7 @@ function unit(key: string, extra: Partial<OrganizeUnit> = {}): OrganizeUnit {
     yearOverride: "",
     pins: {},
     renames: {},
+    kinds: {},
     ...extra,
   };
 }

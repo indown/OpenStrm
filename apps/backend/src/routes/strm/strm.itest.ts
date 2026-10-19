@@ -369,6 +369,7 @@ function organizedUnit(runId: string, dstRoot = "Organized Show", tmdbId = 99): 
     yearOverride: "",
     pins: {},
     renames: {},
+    kinds: {},
   };
 }
 

@@ -136,8 +136,10 @@ const itemsPatchSchema = z
     resolve: conflictResolveSchema.nullable().optional(),
     pin: pinSchema.nullable().optional(),
     name: z.string().trim().max(200).refine((n) => !n.includes("/"), { message: "目标文件名不能带目录" }).nullable().optional(),
+    /** 改判：视频当正片 / 当花絮；null 回到按规则 */
+    kind: z.enum(["video", "extra"]).nullable().optional(),
   })
-  .refine((b) => b.selected !== undefined || b.resolve !== undefined || b.pin !== undefined || b.name !== undefined, { message: "selected、resolve、pin、name 至少给一个" });
+  .refine((b) => b.selected !== undefined || b.resolve !== undefined || b.pin !== undefined || b.name !== undefined || b.kind !== undefined, { message: "selected、resolve、pin、name、kind 至少给一个" });
 
 /** 换匹配弹框的 TMDB 搜索：可以限定类型和年份 */
 const tmdbSearchSchema = z.object({
@@ -230,7 +232,7 @@ export default async function (fastify: FastifyInstance) {
   fastify.put("/api/organize/runs/:id/items", { preHandler: [fastify.authenticate], config: { agentScope: "run", agentToolset: "organize" } }, async (request) => {
     const { id } = parse(idParamsSchema, request.params, "params");
     const body = parse(itemsPatchSchema, request.body);
-    return patchItems(id, body.ids, { selected: body.selected, resolve: body.resolve, pin: body.pin, name: body.name });
+    return patchItems(id, body.ids, { selected: body.selected, resolve: body.resolve, pin: body.pin, name: body.name, kind: body.kind });
   });
 
   /** 换匹配弹框：按关键词搜（可限类型、年份） */
@@ -333,7 +335,7 @@ export default async function (fastify: FastifyInstance) {
     ];
     const movie = renderTemplate(
       movieTpl,
-      { title: "沙丘：第二部", originalTitle: "Dune: Part Two", enTitle: "Dune: Part Two", year: "2024", tmdbId: 693134, imdbId: "tt15239678", idTag: idTagFor(idTag, 693134), resolution: "2160p", source: "WEB-DL", videoCodec: "H.265", audio: "DDP", hdr: "DV", group: "FLUX", ext: "mkv", category: "" },
+      { title: "沙丘：第二部", originalTitle: "Dune: Part Two", enTitle: "Dune: Part Two", year: "2024", tmdbId: 693134, imdbId: "tt15239678", idTag: idTagFor(idTag, 693134), collection: "沙丘（系列）", resolution: "2160p", source: "WEB-DL", videoCodec: "H.265", audio: "DDP", hdr: "DV", group: "FLUX", ext: "mkv", category: "" },
       { colon },
     ).path;
     const tv = renderTemplate(

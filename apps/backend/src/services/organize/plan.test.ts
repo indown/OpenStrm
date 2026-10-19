@@ -564,3 +564,29 @@ test("按文件改名：目录照旧、没写扩展名补上；字幕 / 同名 n
   assert.equal(done[0].action, "rename");
   assert.equal(done[0].dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 01/第一集.mkv");
 });
+
+test("电影系列：{collection} 只有电影有，模板写成 [{collection}/] 没系列时整段消失；作品根包进系列层", () => {
+  const tpl = resolveOrganizeSettings({ organize: { templates: { movie: "[{collection}/]{title} ({year}) {idTag}/{title} ({year}).{ext}" } } });
+  const inSeries = plan(["inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv"], { ...dune, collection: { id: 726871, name: "沙丘（系列）" } }, {}, tpl);
+  assert.equal(inSeries.plan.dstRoot, "沙丘（系列）/沙丘：第二部 (2024) [tmdbid=693134]");
+  assert.equal(inSeries.items.find((i) => i.srcPath.endsWith(".mkv"))!.dstPath, "沙丘（系列）/沙丘：第二部 (2024) [tmdbid=693134]/沙丘：第二部 (2024).mkv");
+  const alone = plan(["inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv"], dune, {}, tpl);
+  assert.equal(alone.plan.dstRoot, "沙丘：第二部 (2024) [tmdbid=693134]");
+});
+
+test("改判类型：被当成花絮的正片改判成正片就按集排；正片改判成花絮进 extras/，没改判的照旧", () => {
+  // 放在花絮目录里的一集：规则按花絮算
+  const paths = ["inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv", "inbox/BEEF.S01.1080p/BEEF.S01E02.1080p.WEB-DL.mkv", "inbox/BEEF.S01.1080p/Featurettes/BEEF.S01E03.1080p.WEB-DL.mkv"];
+  const byDefault = plan(paths, beef).items;
+  assert.equal(byDefault.find((i) => i.srcPath.includes("Featurettes/"))!.dstPath, "怒呛人生 (2023) [tmdbid=153312]/extras/BEEF.S01E03.1080p.WEB-DL.mkv", "花絮目录里的按花絮");
+  const kinds = new Map<string, "video" | "extra">([
+    ["inbox/BEEF.S01.1080p/Featurettes/BEEF.S01E03.1080p.WEB-DL.mkv", "video"],
+    ["inbox/BEEF.S01.1080p/BEEF.S01E02.1080p.WEB-DL.mkv", "extra"],
+  ]);
+  const { items } = plan(paths, beef, { kinds });
+  const dst = (n: string) => items.find((i) => i.srcPath.endsWith(n))!;
+  assert.equal(dst("Featurettes/BEEF.S01E03.1080p.WEB-DL.mkv").dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E03.mkv", "改判成正片：按集命名");
+  assert.equal(dst("S01E02.1080p.WEB-DL.mkv").dstPath, "怒呛人生 (2023) [tmdbid=153312]/extras/BEEF.S01E02.1080p.WEB-DL.mkv", "改判成花絮：进 extras/");
+  assert.equal(dst("S01E02.1080p.WEB-DL.mkv").reason, "按花絮处理（人改判的）");
+  assert.equal(dst("S01E01.1080p.WEB-DL.mkv").dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv");
+});

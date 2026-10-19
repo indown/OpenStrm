@@ -279,7 +279,7 @@ test("设置：坏模板 / 坏识别词存不进去；好的存得进去", async
 
 test("清空 TMDB 缓存：库里的行删掉，还活着的客户端把进程内 memo 一起丢掉", async () => {
   const key = "details:movie:438631:zh-CN";
-  writeTmdbCache(key, { id: 438631, title: "沙丘" });
+  writeTmdbCache(key, { id: 438631, title: "沙丘", collection: null });
   const client = new TmdbClient("x", "zh-CN");
   assert.equal((await client.details("movie", 438631))?.title, "沙丘");
 
@@ -288,14 +288,14 @@ test("清空 TMDB 缓存：库里的行删掉，还活着的客户端把进程�
   assert.equal(readTmdbCache(key, 3600), null);
 
   // 库里换成新的一版：memo 要是没丢，读到的还是旧的「沙丘」
-  writeTmdbCache(key, { id: 438631, title: "沙丘（新译名）" });
+  writeTmdbCache(key, { id: 438631, title: "沙丘（新译名）", collection: null });
   assert.equal((await client.details("movie", 438631))?.title, "沙丘（新译名）");
   assert.ok((await json<{ cleared: number }>("DELETE", "/api/organize/tmdb/cache")).cleared >= 1);
 });
 
 test("刷新 TMDB 信息的客户端：详情跳过库里的值直接问 TMDB、拉到的写回；同一个客户端第二次走 memo", async () => {
   const key = "details:movie:693134:zh-CN";
-  writeTmdbCache(key, { id: 693134, title: "旧译名" });
+  writeTmdbCache(key, { id: 693134, title: "旧译名", collection: null });
   let calls = 0;
   const adapter = axios.defaults.adapter;
   axios.defaults.adapter = async (config) => {
@@ -453,4 +453,31 @@ test("改标题 / 年份、钉季集、改文件名的接口：校验 400、电�
   assert.equal(titles.title, "沙丘：第二部");
   assert.equal(titles.originalTitle, "Dune: Part Two");
   assert.deepEqual(titles.aliases, []);
+});
+
+test("旧缓存没有 collection 键的电影详情：当没缓存重拉一次并写回；补过的不再重拉（海报墙读同一个键，键不带版本）", async () => {
+  const key = "details:movie:603:zh-CN";
+  writeTmdbCache(key, { id: 603, title: "黑客帝国" });
+  let calls = 0;
+  const adapter = axios.defaults.adapter;
+  axios.defaults.adapter = async (config) => {
+    calls += 1;
+    return {
+      data: { id: 603, title: "黑客帝国", original_title: "The Matrix", release_date: "1999-03-30", belongs_to_collection: { id: 2344, name: "黑客帝国（系列）" } },
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      config,
+    } as AxiosResponse;
+  };
+  try {
+    const d = await new TmdbClient("x", "zh-CN").details("movie", 603);
+    assert.equal(calls, 1);
+    assert.deepEqual(d?.collection, { id: 2344, name: "黑客帝国（系列）" });
+    assert.deepEqual(readTmdbCache<{ collection: unknown }>(key, 3600)?.collection, { id: 2344, name: "黑客帝国（系列）" });
+    await new TmdbClient("x", "zh-CN").details("movie", 603);
+    assert.equal(calls, 1, "补过的缓存是新形状，不再重拉");
+  } finally {
+    axios.defaults.adapter = adapter;
+  }
 });

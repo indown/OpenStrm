@@ -226,6 +226,8 @@ export interface TmdbDetails {
   /** 各种别名：alternative_titles + translations 里的标题，识别时拿来对标题 */
   aliases: string[];
   seasons?: TmdbSeasonSummary[];
+  /** 电影所属的系列（belongs_to_collection，名字按请求的语言）：电影总有这个键，不属于系列是 null；剧集没有 */
+  collection?: { id: number; name: string } | null;
 }
 
 interface RawDetails {
@@ -246,6 +248,7 @@ interface RawDetails {
   external_ids?: { imdb_id?: string | null };
   alternative_titles?: { titles?: Array<{ title: string }>; results?: Array<{ title: string }> };
   translations?: { translations?: Array<{ iso_639_1: string; data?: { title?: string; name?: string } }> };
+  belongs_to_collection?: { id: number; name: string } | null;
 }
 
 function toDetails(raw: RawDetails, mediaType: "movie" | "tv"): TmdbDetails {
@@ -276,6 +279,7 @@ function toDetails(raw: RawDetails, mediaType: "movie" | "tv"): TmdbDetails {
       mediaType === "tv"
         ? (raw.seasons ?? []).map((s) => ({ season: s.season_number, episodeCount: s.episode_count, name: s.name }))
         : undefined,
+    ...(mediaType === "movie" ? { collection: raw.belongs_to_collection?.name ? { id: raw.belongs_to_collection.id, name: raw.belongs_to_collection.name } : null } : {}),
   };
 }
 

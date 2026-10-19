@@ -118,3 +118,14 @@
 **A5 预设与说明**：`lib/organize-presets.ts` 五个预设（默认 / 按年份分目录 / 动画带绝对集数 / Plex 风格 / 只归目录保留原文件名），`components/template-preset-picker.tsx` 设置页和任务弹框共用；设置页说明补上 `{absolute000}` `{originalName}` 和「可选段里能放 /」。「按合集」预设等 A2 做完再加。`DEFAULT_TEMPLATES` 搬到 lib 里：预设模块引设置页组件、设置页组件又引预设选择器，浏览器里报「Cannot access 'DEFAULT_TEMPLATES' before initialization」——浏览器冒烟抓出来的，typecheck / lint 都不报。
 
 **测试**：settings.test（任务覆盖 / 留空沿用 / 分类识别词仍全局）、run.itest（任务自己的电影模板 + idTag，剧集沿用全局）、crud.itest（合法模板存得进、坏模板 400）。浏览器：115 tv 任务套「动画：文件名带绝对集数」预设 → 保存 → 重开显示「这个任务单独设了」且模板还在；设置页预设下拉和说明正常。
+
+## 实施记录：第三批 A2 + B3（2026-10-19）
+
+**A2 电影系列**：`getDetails` 收 `belongs_to_collection`（名字按请求语言，zh-CN 下是「沙丘（系列）」这种）→ `TmdbDetails.collection`（电影总有这个键，不属于系列是 null）→ `OrganizeMatch.collection?`；模板变量 `{collection}`（剧集永远空），推荐写法 `[{collection}/]`，作品根的判断（含 title / idTag 的那一层及之上）自然把系列层包进去；设置页试算的电影样例带 `collection`；预设多了「电影按系列归档」。刷新 TMDB 信息比较（`sameMatchData`）把系列名算进去。
+缓存：详情缓存键不能带版本——海报墙 `strm/poster.ts` 直接读同一个键；老条目没有 `collection` 这个键，`TmdbClient.details` 对电影发现缺键就当没缓存重拉一次写回（补过的是新形状，不再重拉），不然 `{collection}` 在老条目上要等七天。
+
+**B3 文件类型改判**：`OrganizeUnit.kinds`（迁移 0027，网盘绝对路径 → video / extra）；`planUnit` 的三处「是不是花絮」（正片循环、字幕找主人、附属处理）都走 `asExtra()`：人改判了听人的，否则看目录和名字；改判成花絮的理由写「按花絮处理（人改判的）」。只给视频文件（KIND_NOT_VIDEO），本地清单 400（NOT_TMDB_RUN）。文件补丁 / 路由 / `ItemsPatch` / 智能体 `changes[].kind`（video / extra / auto，只给文件）/ `fileView.kind` / confirmText「改判正片 / 花絮 N 个文件」/ 前端「…」里「当正片」「当花絮」「撤掉改判」+ 行上小字「改判为正片 / 花絮」。
+
+**测试**：plan.test（`[{collection}/]` 有 / 没有系列；花絮目录里的一集改判成正片按集排、正片改判成花絮进 extras/）、run.itest（改判 → 只给视频 → 撤 → 本地 400）、organize.itest（老缓存自愈一次、新形状不重拉；原来三处缓存夹具补上 `collection: null`）、mcp-p3（kind extra / auto，单元上 kind 报错）。注意：带 `-trailer` 后缀的文件名 parse-name 并不当花絮（测试时发现），花絮目录（Featurettes/）才是；要不要把 `-trailer` 等 Emby 后缀也算花絮另议。
+
+**真机 / 浏览器（115 只读预览，什么都没执行）**：`movie/黑客帝国 (1999) [tmdbid=603]` 真 TMDB 回了 `collection: {id: 2344, name: "黑客帝国（系列）"}`（老缓存缺键自愈重拉了一次）；给 115 movie 任务套「电影按系列归档」预设后预览，作品根变成 `黑客帝国（系列）/黑客帝国 (1999) [tmdbid=603]`、文件 move 进去。`tv/东京三十岁左右` 的 E03 在「…」里选「当花絮」：变 move 到 `…/extras/`、行上「改判为花絮 / 按花絮处理（人改判的）」。实验库、口令、令牌用完已删。

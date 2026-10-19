@@ -437,6 +437,8 @@ export const organizeUnits = sqliteTable(
     pins: text("pins").notNull().default("{}"),
     /** 按文件改的目标文件名（JSON：网盘绝对路径 → 文件名） */
     renames: text("renames").notNull().default("{}"),
+    /** 按文件改判的类型（JSON：网盘绝对路径 → video / extra） */
+    kinds: text("kinds").notNull().default("{}"),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.runId, t.key] }),

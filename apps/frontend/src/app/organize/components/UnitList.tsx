@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, MoreHorizontal, PenLine, RefreshCw, ScanSearch, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
-import type { MediaProbeTags, OrganizeConflictChoice, OrganizeEpisodePin, OrganizeItem, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
+import type { MediaProbeTags, OrganizeConflictChoice, OrganizeEpisodePin, OrganizeItem, OrganizeKindOverride, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -486,6 +486,7 @@ function UnitFiles({
       resolutions={unit.resolutions ?? {}}
       pins={unit.pins ?? {}}
       renames={unit.renames ?? {}}
+      kinds={unit.kinds ?? {}}
       local={local}
       tv={tv}
       pending={pending}
@@ -533,10 +534,26 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 const pinText = (p: OrganizeEpisodePin): string => `${p.season !== undefined ? `S${pad2(p.season)}` : ""}${p.episode !== undefined ? `E${pad2(p.episode)}` : ""}`;
 
 /** 文件行「…」里能做的 */
-export type FileEdit = "pin" | "rename" | "clearPin" | "clearRename";
+export type FileEdit = "pin" | "rename" | "clearPin" | "clearRename" | "kindVideo" | "kindExtra" | "clearKind";
 
-/** 文件行的「…」：钉季 / 集（剧集的视频）、改文件名，钉过 / 改过的能撤 */
-function FileMenu({ canPin, pinned, renamed, disabled, onPick }: { canPin: boolean; pinned: boolean; renamed: boolean; disabled: boolean; onPick: (what: FileEdit) => void }) {
+/** 文件行的「…」：钉季 / 集（剧集的视频）、改文件名、改判正片 / 花絮（视频），钉过 / 改过的能撤 */
+function FileMenu({
+  canPin,
+  canKind,
+  pinned,
+  renamed,
+  kind,
+  disabled,
+  onPick,
+}: {
+  canPin: boolean;
+  canKind: boolean;
+  pinned: boolean;
+  renamed: boolean;
+  kind?: OrganizeKindOverride;
+  disabled: boolean;
+  onPick: (what: FileEdit) => void;
+}) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -563,6 +580,23 @@ function FileMenu({ canPin, pinned, renamed, disabled, onPick }: { canPin: boole
         {renamed && (
           <DropdownMenuItem onSelect={() => onPick("clearRename")} className="text-xs">
             撤掉改名，回到模板的名字
+          </DropdownMenuItem>
+        )}
+        {canKind && kind !== "video" && (
+          <DropdownMenuItem onSelect={() => onPick("kindVideo")} className="flex-col items-start gap-0.5">
+            <span className="text-xs font-medium">当正片</span>
+            <span className="text-[11px] whitespace-normal text-muted-foreground">被当成花絮的其实是正片：按集 / 按电影命名</span>
+          </DropdownMenuItem>
+        )}
+        {canKind && kind !== "extra" && (
+          <DropdownMenuItem onSelect={() => onPick("kindExtra")} className="flex-col items-start gap-0.5">
+            <span className="text-xs font-medium">当花絮</span>
+            <span className="text-[11px] whitespace-normal text-muted-foreground">预告 / 花絮被当成了正片：进作品目录下的 extras/</span>
+          </DropdownMenuItem>
+        )}
+        {canKind && kind && (
+          <DropdownMenuItem onSelect={() => onPick("clearKind")} className="text-xs">
+            撤掉改判，按规则判断
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>
@@ -600,6 +634,7 @@ function ItemsTable({
   resolutions,
   pins,
   renames,
+  kinds,
   local,
   tv,
   pending,
@@ -619,6 +654,7 @@ function ItemsTable({
   /** 钉的季 / 集、改的文件名（网盘绝对路径 → 值） */
   pins: OrganizeUnit["pins"];
   renames: OrganizeUnit["renames"];
+  kinds: OrganizeUnit["kinds"];
   local: boolean;
   tv: boolean;
   pending: boolean;
@@ -663,7 +699,15 @@ function ItemsTable({
                     />
                   )}
                   {editable && it.kind !== "dir" && (
-                    <FileMenu canPin={tv && !local && it.kind === "video"} pinned={!!pins[it.srcPath]} renamed={!!renames[it.srcPath]} disabled={pending} onPick={(what) => onFileEdit(it, what)} />
+                    <FileMenu
+                      canPin={tv && !local && it.kind === "video"}
+                      canKind={!local && it.kind === "video"}
+                      pinned={!!pins[it.srcPath]}
+                      renamed={!!renames[it.srcPath]}
+                      kind={kinds[it.srcPath]}
+                      disabled={pending}
+                      onPick={(what) => onFileEdit(it, what)}
+                    />
                   )}
                 </td>
                 <td className="px-2 py-1.5">
@@ -672,6 +716,7 @@ function ItemsTable({
                   {it.probe && <div className="text-muted-foreground">探测到 {probeLine(it.probe)}</div>}
                   {pins[it.srcPath] && <div className="text-muted-foreground">钉在 {pinText(pins[it.srcPath])}</div>}
                   {renames[it.srcPath] && <div className="break-all text-muted-foreground">改名为 {renames[it.srcPath]}</div>}
+                  {kinds[it.srcPath] && <div className="text-muted-foreground">{kinds[it.srcPath] === "video" ? "改判为正片" : "改判为花絮"}</div>}
                   {it.error ? (
                     <div className="break-all text-destructive">{it.error}</div>
                   ) : it.reason ? (

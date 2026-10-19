@@ -94,8 +94,16 @@ export class TmdbClient implements TmdbApi {
     });
   }
 
-  details(kind: OrganizeMediaType, id: number): Promise<TmdbDetails | null> {
-    return this.cached(`details:${kind}:${id}`, DETAILS_TTL, () => getDetails(this.apiKey, kind, id, this.language), this.fresh);
+  async details(kind: OrganizeMediaType, id: number): Promise<TmdbDetails | null> {
+    // 海报墙（strm/poster.ts）读的是同一个键，所以键不带版本
+    const key = `details:${kind}:${id}`;
+    const fetcher = () => getDetails(this.apiKey, kind, id, this.language);
+    const d = await this.cached(key, DETAILS_TTL, fetcher, this.fresh);
+    if (!d || kind !== "movie" || d.collection !== undefined) return d;
+    // 2026-10-19 之前存的电影详情没有 collection 这个键（现在对电影总会写上，没系列是 null）：当没缓存重拉一次，
+    // 不然 {collection} 在老条目上要等缓存过期才有
+    this.memo.delete(`${key}:${this.language}`);
+    return this.cached(key, DETAILS_TTL, fetcher, true);
   }
 
   season(tvId: number, season: number): Promise<TmdbEpisode[]> {
@@ -269,6 +277,7 @@ async function fromDetails(tmdb: TmdbApi, kind: OrganizeMediaType, id: number, c
     countries: d.countries,
     originalLanguage: d.originalLanguage,
     seasons: d.seasons,
+    ...(d.collection ? { collection: d.collection } : {}),
     candidates,
   };
 }

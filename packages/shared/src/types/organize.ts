@@ -191,6 +191,8 @@ export interface OrganizeMatch {
   countries?: string[];
   originalLanguage?: string;
   seasons?: OrganizeSeasonInfo[];
+  /** 电影所属的系列（TMDB 的 collection）：模板变量 {collection} */
+  collection?: { id: number; name: string };
   /** 备选（预览里「换匹配」时先给这些） */
   candidates?: OrganizeCandidate[];
 }
@@ -323,7 +325,12 @@ export interface OrganizeUnit {
   pins: Record<string, OrganizeEpisodePin>;
   /** 按文件改的目标文件名，键是网盘绝对路径：目录照旧是整理算出来的，没写扩展名就沿用原来的；跟着它的字幕 / nfo 按新名字跟 */
   renames: Record<string, string>;
+  /** 按文件改判的类型（键是网盘绝对路径）：规则把正片当成花絮、或反过来时，人来定；没记的按规则 */
+  kinds: Record<string, OrganizeKindOverride>;
 }
+
+/** 文件类型改判：video 当正片、extra 当花絮 */
+export type OrganizeKindOverride = "video" | "extra";
 
 export interface OrganizeItem {
   id: string;

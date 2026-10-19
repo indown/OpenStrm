@@ -16,7 +16,7 @@
  *
  * 路径：输入输出都是相对任务 originPath 的路径；run.ts 落库时再拼成网盘绝对路径。
  */
-import type { OrganizeAction, OrganizeConflictChoice, OrganizeConflictResolution, OrganizeEpisodePin, OrganizeFileKind, OrganizeMatch } from "@openstrm/shared";
+import type { OrganizeAction, OrganizeConflictChoice, OrganizeConflictResolution, OrganizeEpisodePin, OrganizeFileKind, OrganizeKindOverride, OrganizeMatch } from "@openstrm/shared";
 import { DUPLICATES_DIR, duplicatePathFor } from "../strm/staging.js";
 import { isNamedAfter, normalizeTitle, trailingNumber } from "./parse-name.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
@@ -77,6 +77,8 @@ export interface UnitPlanInput {
   pins?: ReadonlyMap<string, OrganizeEpisodePin>;
   /** 按文件改的目标文件名（相对任务 originPath → 文件名）：目录照旧，没写扩展名就补上；跟着它的字幕 / nfo 按新名字跟 */
   renames?: ReadonlyMap<string, string>;
+  /** 按文件改判的类型（相对任务 originPath）：video 当正片、extra 当花絮，压过规则 */
+  kinds?: ReadonlyMap<string, OrganizeKindOverride>;
 }
 
 /** 单独取消勾选的文件跳过时的原因 */
@@ -296,6 +298,11 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
     const name = r?.how === "custom" ? r.name?.trim() : undefined;
     return name ? withExt(name, file.ext) : undefined;
   };
+  /** 这个文件按花絮处理吗：人改判了听人的，否则看目录和名字 */
+  const asExtra = (file: UnitFile): boolean => {
+    const k = input.kinds?.get(file.path);
+    return k === "extra" || (k !== "video" && (file.inExtrasDir || file.parsed.isExtra === true));
+  };
   /** 用户给这个文件改的名字套在算出来的目标上：目录照旧，没写扩展名就补上 */
   const renamed = (file: UnitFile, dst: string): string => {
     const name = input.renames?.get(file.path)?.trim();
@@ -346,6 +353,8 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
   const year = input.yearOverride?.trim() || match.year;
   const common: TemplateVars = {
     category,
+    // 系列只有电影有；模板里写成 [{collection}/] 没系列时整段消失
+    collection: match.mediaType === "movie" ? (match.collection?.name ?? "") : "",
     title,
     originalTitle: match.originalTitle,
     enTitle: match.enTitle,
@@ -369,7 +378,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
   const excluded = input.excluded ?? new Set<string>();
   let filledCount = 0;
   for (const f of unit.files) {
-    if (f.kind !== "video" || f.inExtrasDir || f.parsed.isExtra) continue;
+    if (f.kind !== "video" || asExtra(f)) continue;
     if (excluded.has(f.path)) {
       push(f, null, EXCLUDED_REASON);
       continue;
@@ -424,7 +433,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
 
   const videos = [...videoDst.keys()];
   // 单元里所有的正片（排没排上都算）：字幕在它们里面找主人
-  const unitVideos = unit.files.filter((v) => v.kind === "video" && !v.inExtrasDir && !v.parsed.isExtra);
+  const unitVideos = unit.files.filter((v) => v.kind === "video" && !asExtra(v));
   const allVideos = videos.map((v) => v.path);
   // 单元根是这部作品自己的目录：分单元时就认出来了的，或者（不是从大目录里拆出来的）目录名就是识别出来的片名——
   // 「中文目录名 + 英文文件名」分单元时对不上，TMDB 认出来之后才知道是一回事
@@ -473,8 +482,8 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
 
     // 花絮（sample 也算）：跟着正片进作品目录下的 extras/，平铺、原名（媒体服务器不认 extras 里再套目录）；设置成留在原处就不动。
     // 算附属：正片一个都没挪它也不挪，目标被占就留下、不算冲突
-    if (f.inExtrasDir || f.parsed.isExtra) {
-      if (s.extras === "move" && dstRoot && !inWork) push(f, join(join(dstRoot, "extras"), f.name), "按花絮处理", undefined, { follows: allVideos, soft: true });
+    if (asExtra(f)) {
+      if (s.extras === "move" && dstRoot && !inWork) push(f, join(join(dstRoot, "extras"), f.name), input.kinds?.get(f.path) === "extra" ? "按花絮处理（人改判的）" : "按花絮处理", undefined, { follows: allVideos, soft: true });
       else push(f, f.path, "花絮不动", "keep");
       continue;
     }

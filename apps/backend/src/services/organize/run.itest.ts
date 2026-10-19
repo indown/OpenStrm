@@ -2705,3 +2705,25 @@ test("任务自己的命名模板 / id 标签 / 集标题：按任务上的规�
   assert.ok(items.some((i) => i.dstPath === "/tv/沙丘：第二部 (2024) [tmdbid=693134]/沙丘：第二部.2024.mkv"), items.map((i) => i.dstPath).join("\n"));
   assert.ok(items.some((i) => i.dstPath === "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv"), "剧集模板任务上没设，沿用全局默认；id 标签按任务上的 emby");
 });
+
+test("改判正片 / 花絮：按文件改、只给视频、撤掉回到按规则；本地清单 400", async () => {
+  drive.tree.addFile("/tv/inbox/BEEF.S01.1080p/Featurettes/BEEF.S01E03.1080p.WEB-DL.mkv");
+  const run = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(run.id, ["ready"]);
+  const key = "inbox/BEEF.S01.1080p";
+  const trailer = () => listItems(run.id).find((i) => i.srcPath.includes("/Featurettes/"))!;
+  assert.ok(trailer().dstPath.endsWith("/extras/BEEF.S01E03.1080p.WEB-DL.mkv"), trailer().dstPath);
+  await patchItems(run.id, [trailer().id], { kind: "video" });
+  assert.deepEqual(listUnits(run.id).find((u) => u.key === key)!.kinds, { [trailer().srcPath]: "video" });
+  assert.equal(trailer().dstPath, "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E03.mkv");
+  const srt = listItems(run.id).find((i) => i.kind === "subtitle")!;
+  await assert.rejects(patchItems(run.id, [srt.id], { kind: "extra" }), (err: unknown) => err instanceof HttpError && err.extra.code === "KIND_NOT_VIDEO");
+  await patchItems(run.id, [trailer().id], { kind: null });
+  assert.deepEqual(listUnits(run.id).find((u) => u.key === key)!.kinds, {});
+  assert.ok(trailer().dstPath.endsWith("/extras/BEEF.S01E03.1080p.WEB-DL.mkv"));
+  await cancelRun(run.id);
+  const local = await createRun({ taskId: "t1", subPath: "inbox", naming: "local" });
+  await untilStatus(local.id, ["ready"]);
+  const video = listItems(local.id).find((i) => i.kind === "video")!;
+  await assert.rejects(patchItems(local.id, [video.id], { kind: "extra" }), (err: unknown) => err instanceof HttpError && err.extra.code === "NOT_TMDB_RUN");
+});

@@ -11,7 +11,7 @@
 import type { OrganizeColonStyle } from "@openstrm/shared";
 
 export const TEMPLATE_VARS = [
-  "category", "title", "originalTitle", "enTitle", "year", "tmdbId", "imdbId", "idTag",
+  "category", "collection", "title", "originalTitle", "enTitle", "year", "tmdbId", "imdbId", "idTag",
   "season", "season00", "episode", "episode00", "absolute", "absolute000", "episodeTitle",
   "part", "edition", "resolution", "source", "videoCodec", "audio", "hdr", "group", "ext", "originalName",
 ] as const;

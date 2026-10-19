@@ -329,6 +329,7 @@ export function planFingerprint(runId: string, known?: { units: OrganizeUnit[]; 
         u.yearOverride ?? "",
         Object.entries(u.pins ?? {}).sort(),
         Object.entries(u.renames ?? {}).sort(),
+        Object.entries(u.kinds ?? {}).sort(),
       ]),
     );
   }

@@ -99,8 +99,8 @@ export function OrganizeSection({ value, onChange }: Props) {
       <h2 className="text-base font-medium">整理与规范化命名</h2>
       <p className="text-sm text-muted-foreground">
         「整理」页按 TMDB 识别网盘里的文件，套下面的模板在网盘上改名 / 归位，本地 strm 跟着走。模板变量：
-        <code className="text-xs">{"{title} {originalTitle} {enTitle} {year} {tmdbId} {imdbId} {idTag} {category} {season} {season00} {episode} {episode00} {absolute} {absolute000} {episodeTitle} {part} {edition} {resolution} {source} {videoCodec} {audio} {hdr} {group} {originalName} {ext}"}</code>
-        ；<code className="text-xs">[ … ]</code> 里的变量全为空就整段丢掉，段里可以带 <code className="text-xs">/</code>（比如 <code className="text-xs">{"[{year}/]"}</code> 多一层年份目录）。任务弹框里能给某个任务单独设模板。
+        <code className="text-xs">{"{title} {originalTitle} {enTitle} {year} {tmdbId} {imdbId} {idTag} {category} {collection} {season} {season00} {episode} {episode00} {absolute} {absolute000} {episodeTitle} {part} {edition} {resolution} {source} {videoCodec} {audio} {hdr} {group} {originalName} {ext}"}</code>
+        ；<code className="text-xs">[ … ]</code> 里的变量全为空就整段丢掉，段里可以带 <code className="text-xs">/</code>（比如 <code className="text-xs">{"[{year}/]"}</code> 多一层年份目录、<code className="text-xs">{"[{collection}/]"}</code> 电影按系列归档）。任务弹框里能给某个任务单独设模板。
       </p>
 
       <div className="grid grid-cols-1 gap-4">

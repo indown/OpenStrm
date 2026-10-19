@@ -36,6 +36,7 @@ import type { OrganizeNaming,
   OrganizeMatchMemory,
   OrganizeRun,
   OrganizeEpisodePin,
+  OrganizeKindOverride,
   OrganizeProbeResult,
   OrganizeRunDetail,
   OrganizeRunSummary,
@@ -771,9 +772,9 @@ export const api = {
       data(axiosInstance.put<{ changed: number }>(`/api/organize/runs/${encodeURIComponent(id)}/units`, { keys, ...patch }, { timeout: 120_000 })),
     /**
      * 按文件改：勾选 / 取消勾选（取消的跳过，跟着它的字幕 / nfo 一起留下）、给冲突项选办法（resolve 为 null 是回到「留在原处」）、
-     * 钉季 / 集（pin 为 null 撤掉）、改目标文件名（name 为 null 撤掉）；ids 用最新清单里的
+     * 钉季 / 集（pin 为 null 撤掉）、改目标文件名（name 为 null 撤掉）、改判正片 / 花絮（kind 为 null 回到按规则）；ids 用最新清单里的
      */
-    patchItems: (id: string, ids: string[], patch: { selected?: boolean; resolve?: OrganizeConflictResolution | null; pin?: OrganizeEpisodePin | null; name?: string | null }) =>
+    patchItems: (id: string, ids: string[], patch: { selected?: boolean; resolve?: OrganizeConflictResolution | null; pin?: OrganizeEpisodePin | null; name?: string | null; kind?: OrganizeKindOverride | null }) =>
       data(axiosInstance.put<{ changed: number }>(`/api/organize/runs/${encodeURIComponent(id)}/items`, { ids, ...patch }, { timeout: 60_000 })),
     /**
      * 探测视频编码（读文件头）：key 探这个单元的全部视频（连上次失败的一起重试）；keys 探这些单元里文件名缺模板标签的视频。

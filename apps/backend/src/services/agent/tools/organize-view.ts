@@ -198,6 +198,7 @@ export function confirmTextOf(run: OrganizeRun, units: OrganizeUnit[], task: Tas
   const retitled = picked.filter((u) => u.titleOverride || u.yearOverride).length;
   const pinned = picked.reduce((n, u) => n + Object.keys(u.pins ?? {}).length, 0);
   const renamed = picked.reduce((n, u) => n + Object.keys(u.renames ?? {}).length, 0);
+  const rekinded = picked.reduce((n, u) => n + Object.keys(u.kinds ?? {}).length, 0);
   const parts: string[] = [];
   const head = [`改名 / 移动 ${movingFiles(run)} 个文件`, s.plannedMkdir ? `新建 ${s.plannedMkdir} 个目录` : "", s.plannedRmdir ? `删掉 ${s.plannedRmdir} 个腾空的目录` : ""]
     .filter(Boolean)
@@ -209,7 +210,7 @@ export function confirmTextOf(run: OrganizeRun, units: OrganizeUnit[], task: Tas
       ? `名字和位置照本地 strm 的目录结构来，不经过 TMDB 识别${skippedByChoice ? `；${skippedByChoice} 部没勾，这次不动` : ""}。`
       : `识别：${confText}${manual ? `（其中手动指定 ${manual}）` : ""}${unmatched ? `；${unmatched} 部认不出来，这次不动` : ""}${skippedByChoice ? `；${skippedByChoice} 部没勾，这次不动` : ""}。`,
   );
-  const manualEdits = [retitled ? `改了标题 / 年份 ${retitled} 部` : "", pinned ? `钉了季 / 集 ${pinned} 个文件` : "", renamed ? `手动改名 ${renamed} 个文件` : ""].filter(Boolean);
+  const manualEdits = [retitled ? `改了标题 / 年份 ${retitled} 部` : "", pinned ? `钉了季 / 集 ${pinned} 个文件` : "", renamed ? `手动改名 ${renamed} 个文件` : "", rekinded ? `改判正片 / 花絮 ${rekinded} 个文件` : ""].filter(Boolean);
   if (manualEdits.length) parts.push(`其中${manualEdits.join("、")}。`);
   if (s.conflicts) parts.push(`还有 ${s.conflicts} 个冲突没处理，这些文件留在原处。`);
   if (s.plannedDelete) parts.push(`会删掉 ${s.plannedDelete} 个文件（进网盘回收站，撤销退不回来）。`);
@@ -393,6 +394,7 @@ export function fileView(
     ...(extra.excluded ? { excluded: true } : {}),
     ...(u.pins?.[it.srcPath] ? { pin: u.pins[it.srcPath] } : {}),
     ...(u.renames?.[it.srcPath] ? { newName: u.renames[it.srcPath] } : {}),
+    ...(u.kinds?.[it.srcPath] ? { kind: u.kinds[it.srcPath] } : {}),
     ...(it.status !== "pending" ? { status: it.status } : {}),
     ...(it.error ? { error: it.error } : {}),
     ...(it.errorKind ? { errorKind: it.errorKind } : {}),

@@ -564,13 +564,14 @@ const changeSchema = z
       .optional()
       .describe("文件（冲突项）：rename 改名保留、custom 自己起名（要给 newName）、duplicate 挪进重复文件目录、delete 删掉这一份、replace 覆盖目标那份、keep 撤回选过的办法（留在原处）。只能给现在是冲突、或者已经选过办法的文件。选了 delete / replace 的清单，执行时要「删除与花费」档"),
     newName: z.string().max(200).optional().describe("文件：目标文件名，不带目录，没写扩展名就沿用原来的；目录照旧是整理算出来的，跟着它的字幕 / nfo 按新名字跟；空串取消改名。和 resolve: custom 一起给时是冲突时才用的名字"),
+    kind: z.enum(["video", "extra", "auto"]).optional().describe("文件（视频）：规则判错了就改判——video 当正片（按集 / 按电影命名），extra 当花絮（进 extras/）；auto 回到按规则判断"),
   })
   .strict();
 
 export const organizeAdjustTool = defineTool({
   name: "organize_adjust",
   title: "改整理清单",
-  description: `改一份待确认的整理清单，只改清单、不动网盘，一次可以改多处（只重新规划一次）：select 批量勾选单元（all 全选 / none 全不选 / confident 只选把握大的）；conflicts 把还没选办法的冲突统一改名保留（rename）或挪进重复文件目录（duplicate）；changes 逐条改单元（换匹配、季、集偏移、改标题 / 年份、勾选、记住、刷新 TMDB 信息）或文件（勾选、冲突办法、钉季 / 集、改目标文件名）。先做 select，再做 conflicts，最后按顺序做 changes；有一条不合法整批都不改。重新规划是整体的，改一处可能挤出别处的新冲突，结果里的 newConflicts 会列出来。冲突办法只能给冲突的文件，也只在真撞上时起作用；文件的去处由匹配、季、集偏移和命名模板决定。换了匹配 / 季 / 集偏移的单元，它原来选的冲突办法会清掉，同一次调用里也不能再给它选（等重新规划后看新的冲突）。选「删掉 / 覆盖」也只是写进清单：执行带删除项的清单要「删除与花费」档，没有这一档就把 confirmText 给用户看、请用户在 OpenStrm 的整理页点执行。返回新的 planVersion 和 confirmText：把改了什么、为什么和 confirmText 告诉用户，同意后再调 organize_apply。`,
+  description: `改一份待确认的整理清单，只改清单、不动网盘，一次可以改多处（只重新规划一次）：select 批量勾选单元（all 全选 / none 全不选 / confident 只选把握大的）；conflicts 把还没选办法的冲突统一改名保留（rename）或挪进重复文件目录（duplicate）；changes 逐条改单元（换匹配、季、集偏移、改标题 / 年份、勾选、记住、刷新 TMDB 信息）或文件（勾选、冲突办法、钉季 / 集、改目标文件名、改判正片 / 花絮）。先做 select，再做 conflicts，最后按顺序做 changes；有一条不合法整批都不改。重新规划是整体的，改一处可能挤出别处的新冲突，结果里的 newConflicts 会列出来。冲突办法只能给冲突的文件，也只在真撞上时起作用；文件的去处由匹配、季、集偏移和命名模板决定。换了匹配 / 季 / 集偏移的单元，它原来选的冲突办法会清掉，同一次调用里也不能再给它选（等重新规划后看新的冲突）。选「删掉 / 覆盖」也只是写进清单：执行带删除项的清单要「删除与花费」档，没有这一档就把 confirmText 给用户看、请用户在 OpenStrm 的整理页点执行。返回新的 planVersion 和 confirmText：把改了什么、为什么和 confirmText 告诉用户，同意后再调 organize_apply。`,
   scope: "run",
   toolset: "organize",
   annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: true },
@@ -598,7 +599,17 @@ export const organizeAdjustTool = defineTool({
       // 按本地 strm 结构的清单没有识别这一步：换匹配 / 季集 / 记住 / 刷新都没有对象，「只选把握大的」也没有把握之分
       if (args.select === "confident") throw new ToolError("VALIDATION", "按本地 strm 结构整理的清单没有把握之分，select 只能 all / none");
       const bad = (args.changes ?? []).findIndex(
-        (c) => c.tmdbId !== undefined || c.mediaType !== undefined || c.season !== undefined || c.episode !== undefined || c.episodeOffset !== undefined || c.remember !== undefined || c.refresh !== undefined || c.title !== undefined || c.year !== undefined,
+        (c) =>
+          c.tmdbId !== undefined ||
+          c.mediaType !== undefined ||
+          c.season !== undefined ||
+          c.episode !== undefined ||
+          c.episodeOffset !== undefined ||
+          c.remember !== undefined ||
+          c.refresh !== undefined ||
+          c.title !== undefined ||
+          c.year !== undefined ||
+          c.kind !== undefined,
       );
       if (bad !== -1) {
         throw new ToolError("VALIDATION", `changes[${bad}]：按本地 strm 结构整理的清单没有识别结果，不能换匹配、改季集、改标题、记住或刷新 TMDB 信息`, "这种清单只能勾选 / 取消勾选单元和文件、给冲突选办法、改文件名。");
@@ -688,6 +699,7 @@ function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, Organize
         throw new ToolError("VALIDATION", `${at}：没识别出来的单元没法刷新 TMDB 信息`, "先用 tmdb_search 找到它，再在同一条里给 tmdbId 和 mediaType。");
       }
       if (c.episode !== undefined) throw new ToolError("VALIDATION", `${at}：episode 是给文件的（钉某个文件是第几集），单元用 episodeOffset`);
+      if (c.kind !== undefined) throw new ToolError("VALIDATION", `${at}：kind 是给文件的（当正片 / 当花絮），单元不能用`);
       if ((c.title || c.year) && !row.match && !c.tmdbId) throw new ToolError("VALIDATION", `${at}：没识别出来的单元没法改标题 / 年份`, "先用 tmdb_search 找到它，再在同一条里给 tmdbId 和 mediaType。");
       if (c.title?.includes("/")) throw new ToolError("VALIDATION", `${at}：标题不能带 /`);
       if (c.year && !/^\d{4}$/.test(c.year)) throw new ToolError("VALIDATION", `${at}：年份是四位数字`);
@@ -731,7 +743,9 @@ function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, Organize
       );
     }
     const rename = c.resolve !== "custom" && c.newName !== undefined;
-    if (c.resolve === undefined && c.selected === undefined && pin === undefined && !rename) throw new ToolError("VALIDATION", `${at}：文件要给 selected、resolve、season / episode 或 newName`);
+    if (c.resolve === undefined && c.selected === undefined && pin === undefined && !rename && c.kind === undefined) {
+      throw new ToolError("VALIDATION", `${at}：文件要给 selected、resolve、season / episode、newName 或 kind`);
+    }
     files.push({
       unitKey: file.unitKey,
       srcPath: file.srcPath,
@@ -739,6 +753,7 @@ function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, Organize
       ...(c.resolve !== undefined ? { resolve: c.resolve === "keep" ? null : c.resolve === "custom" ? { how: "custom", name: c.newName!.trim() } : { how: c.resolve } } : {}),
       ...(pin !== undefined ? { pin } : {}),
       ...(rename ? { name: c.newName!.trim() || null } : {}),
+      ...(c.kind !== undefined ? { kind: c.kind === "auto" ? null : c.kind } : {}),
     });
   });
   return { ...(args.select ? { select: args.select } : {}), ...(args.conflicts ? { conflicts: args.conflicts } : {}), units, files };

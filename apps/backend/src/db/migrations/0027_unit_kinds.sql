@@ -1,0 +1,1 @@
+ALTER TABLE `organize_units` ADD `kinds` text DEFAULT '{}' NOT NULL;

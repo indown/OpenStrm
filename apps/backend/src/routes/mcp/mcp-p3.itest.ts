@@ -1231,6 +1231,17 @@ test("整理：智能体改标题 / 钉季集 / 改文件名都进清单，confi
     assert.equal(bad.data.code, "VALIDATION");
     const badTitle = await call(client, "organize_adjust", { run: runId, changes: [{ target: beef.ref, title: "a/b" }] });
     assert.equal(badTitle.data.code, "VALIDATION");
+
+    // 改判：E02 当花絮进 extras/，再 auto 回来
+    const asExtra = await call(client, "organize_adjust", { run: runId, changes: [{ target: e02.ref, kind: "extra", newName: "" }] });
+    assert.equal(asExtra.isError, false, JSON.stringify(asExtra.data));
+    assert.match(asExtra.data.confirmText, /改判正片 \/ 花絮 1 个文件/);
+    const after3 = (await call(client, "organize_detail", { run: runId, unit: beef.ref })).data.files as Array<Record<string, any>>;
+    const f3 = after3.find((f) => f.ref === e02.ref)!;
+    assert.equal(f3.kind, "extra");
+    assert.match(String(f3.to), /^extras\//);
+    const unitKind = await call(client, "organize_adjust", { run: runId, changes: [{ target: beef.ref, kind: "video" }] });
+    assert.equal(unitKind.data.code, "VALIDATION", "kind 只给文件");
   } finally {
     await client.close();
   }
