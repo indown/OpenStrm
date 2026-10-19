@@ -58,6 +58,7 @@ import {
   patchPlan,
   patchUnit,
   patchUnits,
+  planFingerprint,
   probeUnits,
   collapseStaleReadyRuns,
   reconcileInterruptedRuns,
@@ -2593,4 +2594,104 @@ test("探测编码：设置关着预览不探；按单元探后重新规划；�
   } finally {
     setProbeDeps(null);
   }
+});
+
+/* ------------------------------- 改标题 / 钉季集 / 改文件名 ------------------------------- */
+
+test("改标题 / 年份：按改后的命名重新规划，TMDB 的译名不动；清掉回到 TMDB 的；换匹配时清掉、同一次给的照给；记住后下次预览照用", async () => {
+  const run = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(run.id, ["ready"]);
+  const key = "inbox/BEEF.S01.1080p";
+  const u = await patchUnit(run.id, key, { title: "怒呛人生：第一季", year: "2024" });
+  assert.equal(u.titleOverride, "怒呛人生：第一季");
+  assert.equal(u.yearOverride, "2024");
+  assert.equal(u.dstRoot, "怒呛人生：第一季 (2024) [tmdbid=153312]");
+  assert.equal(u.match?.title, "怒呛人生");
+  assert.ok(listItems(run.id).some((i) => i.dstPath === "/tv/怒呛人生：第一季 (2024) [tmdbid=153312]/Season 01/怒呛人生：第一季 - S01E01.mkv"), listItems(run.id).map((i) => i.dstPath).join("\n"));
+  await assert.rejects(patchUnit(run.id, key, { title: "a/b" }), /不能带/);
+  await assert.rejects(patchUnit(run.id, key, { year: "24" }), /四位/);
+  const back = await patchUnit(run.id, key, { title: null, year: "" });
+  assert.equal(back.titleOverride, "");
+  assert.equal(back.yearOverride, "");
+  assert.equal(back.dstRoot, "怒呛人生 (2023) [tmdbid=153312]");
+  await patchUnit(run.id, key, { title: "另一个名字" });
+  const swapped = await patchUnit(run.id, key, { match: { mediaType: "tv", tmdbId: 999 } });
+  assert.equal(swapped.titleOverride, "", "换了作品，改的标题是上一部的");
+  const both = await patchUnit(run.id, key, { match: { mediaType: "tv", tmdbId: 153312 }, title: "一起给的" });
+  assert.equal(both.titleOverride, "一起给的");
+  assert.equal(both.dstRoot, "一起给的 (2023) [tmdbid=153312]");
+
+  // 记住：执行后记进记忆，下次在新位置认出同一部就照用
+  await patchUnit(run.id, key, { title: "怒呛人生：第一季", year: "2024", remember: true });
+  await applyRun(run.id);
+  await untilStatus(run.id, ["done"]);
+  const mem = recallMatch("acc", "/tv/怒呛人生：第一季 (2024) [tmdbid=153312]")!;
+  assert.ok(mem, "记住了");
+  assert.equal(mem.titleOverride, "怒呛人生：第一季");
+  assert.equal(mem.yearOverride, "2024");
+  const next = await createRun({ taskId: "t1", subPath: "怒呛人生：第一季 (2024) [tmdbid=153312]" });
+  await untilStatus(next.id, ["ready"]);
+  const row = listUnits(next.id)[0];
+  assert.equal(row.titleOverride, "怒呛人生：第一季");
+  assert.equal(row.yearOverride, "2024");
+  assert.ok(row.notes.some((n) => n.includes("按记住的识别：标题用「怒呛人生：第一季」、年份用 2024")), row.notes.join("\n"));
+  assert.equal(row.dstRoot, "怒呛人生：第一季 (2024) [tmdbid=153312]");
+  assert.ok(listItems(next.id).filter((i) => i.kind === "video").every((i) => i.action === "keep"), "已经按改的名字放好了");
+});
+
+test("钉季 / 集：看不出集数的文件钉了集就能排；钉了的不受季覆盖 / 集偏移影响；只给剧集的视频；撤掉回到原样", async () => {
+  drive.tree.addFile("/tv/inbox/BEEF.S01.1080p/BEEF.1080p.WEB-DL.mkv");
+  const run = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(run.id, ["ready"]);
+  const key = "inbox/BEEF.S01.1080p";
+  const noEp = listItems(run.id).find((i) => i.srcPath.endsWith("/BEEF.1080p.WEB-DL.mkv"))!;
+  assert.equal(noEp.action, "skip");
+  assert.equal(noEp.reason, "看不出是第几集");
+  const v1 = planFingerprint(run.id);
+  await patchItems(run.id, [noEp.id], { pin: { season: 2, episode: 7 } });
+  assert.notEqual(planFingerprint(run.id), v1);
+  assert.deepEqual(listUnits(run.id).find((x) => x.key === key)!.pins, { [noEp.srcPath]: { season: 2, episode: 7 } });
+  const at = () => listItems(run.id).find((i) => i.srcPath === noEp.srcPath)!;
+  assert.equal(at().dstPath, "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 02/怒呛人生 - S02E07.mkv");
+  await patchUnit(run.id, key, { seasonOverride: 3, episodeOffset: 10 });
+  assert.equal(at().dstPath, "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 02/怒呛人生 - S02E07.mkv", "钉了的不受季覆盖 / 偏移影响");
+  assert.ok(listItems(run.id).some((i) => i.dstPath.endsWith("/Season 03/怒呛人生 - S03E11.mkv")), "没钉的照旧");
+  const srt = listItems(run.id).find((i) => i.kind === "subtitle")!;
+  await assert.rejects(patchItems(run.id, [srt.id], { pin: { episode: 1 } }), (err: unknown) => err instanceof HttpError && err.extra.code === "PIN_NOT_VIDEO");
+  const movie = listItems(run.id).find((i) => i.srcPath.endsWith("Dune.Part.Two.2024.2160p.WEB-DL.mkv"))!;
+  await assert.rejects(patchItems(run.id, [movie.id], { pin: { episode: 1 } }), (err: unknown) => err instanceof HttpError && err.extra.code === "PIN_NOT_TV");
+  await patchItems(run.id, [at().id], { pin: null });
+  assert.deepEqual(listUnits(run.id).find((x) => x.key === key)!.pins, {});
+  assert.equal(at().action, "skip");
+});
+
+test("改文件名：目录照旧、扩展名补上、字幕跟着；不能带目录；撤掉回到模板的名字", async () => {
+  const run = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(run.id, ["ready"]);
+  const key = "inbox/BEEF.S01.1080p";
+  const e01 = listItems(run.id).find((i) => i.srcPath.endsWith("BEEF.S01E01.1080p.WEB-DL.mkv"))!;
+  const at = () => listItems(run.id).find((i) => i.srcPath === e01.srcPath)!;
+  await patchItems(run.id, [e01.id], { name: "怒呛人生 第一集" });
+  assert.deepEqual(listUnits(run.id).find((x) => x.key === key)!.renames, { [e01.srcPath]: "怒呛人生 第一集" });
+  assert.equal(at().dstPath, "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 第一集.mkv");
+  assert.equal(listItems(run.id).find((i) => i.srcPath.endsWith(".chs.srt"))!.dstPath, "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 第一集.zh-CN.srt");
+  await assert.rejects(patchItems(run.id, [at().id], { name: "a/b" }), /不能带目录/);
+  await patchItems(run.id, [at().id], { name: null });
+  assert.deepEqual(listUnits(run.id).find((x) => x.key === key)!.renames, {});
+  assert.equal(at().dstPath, "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv");
+});
+
+test("本地结构的清单：能改文件名（字幕跟着），不能改标题、钉季集", async () => {
+  const run = await createRun({ taskId: "t1", subPath: "inbox", naming: "local" });
+  await untilStatus(run.id, ["ready"]);
+  const video = listItems(run.id).find((i) => i.kind === "video" && i.srcPath.endsWith("BEEF.S01E01.1080p.WEB-DL.mkv"))!;
+  assert.ok(video, listItems(run.id).map((i) => i.srcPath).join("\n"));
+  await assert.rejects(patchUnit(run.id, video.unitKey, { title: "x" }), (err: unknown) => err instanceof HttpError && err.extra.code === "NOT_TMDB_RUN");
+  await assert.rejects(patchItems(run.id, [video.id], { pin: { episode: 3 } }), (err: unknown) => err instanceof HttpError && err.extra.code === "NOT_TMDB_RUN");
+  await patchItems(run.id, [video.id], { name: "自己起的名" });
+  const after = listItems(run.id).find((i) => i.srcPath === video.srcPath)!;
+  assert.equal(after.action, "rename");
+  assert.equal(after.dstPath, "/tv/inbox/BEEF.S01.1080p/自己起的名.mkv");
+  const srt = listItems(run.id).find((i) => i.srcPath.endsWith("BEEF.S01E01.1080p.WEB-DL.chs.srt"))!;
+  assert.equal(srt.dstPath, "/tv/inbox/BEEF.S01.1080p/自己起的名.chs.srt", "本地的附属文件按视频的新主名跟");
 });

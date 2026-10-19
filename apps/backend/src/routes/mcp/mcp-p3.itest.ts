@@ -1191,3 +1191,47 @@ test("整理：探测编码——按单元探全部视频、结果带摘要和 p
     setProbeDeps(null);
   }
 });
+
+test("整理：智能体改标题 / 钉季集 / 改文件名都进清单，confirmText 里有数；文件上 season / episode 是钉、-1 取消；单元上 episode 报错", async () => {
+  const client = await connect(dailyToken);
+  try {
+    const preview = await call(client, "organize_preview", { task: "tv", subPath: "inbox" });
+    const runId = preview.data.runId as string;
+    const beef = unitBySource(preview.data.attention, "BEEF")!;
+    const files = (await call(client, "organize_detail", { run: runId, unit: beef.ref })).data.files as Array<Record<string, any>>;
+    const e02 = files.find((f) => String(f.from).includes("E02"))!;
+    const r = await call(client, "organize_adjust", {
+      run: runId,
+      changes: [
+        { target: beef.ref, title: "怒呛人生 第一季", year: "2024" },
+        { target: e02.ref, season: 2, episode: 9 },
+      ],
+    });
+    assert.equal(r.isError, false, JSON.stringify(r.data));
+    const unit = (r.data.units as Array<Record<string, any>>).find((u) => u.ref === beef.ref)!;
+    assert.equal(unit.title, "怒呛人生 第一季");
+    assert.equal(unit.year, "2024");
+    assert.equal(unit.match.title, "怒呛人生", "TMDB 的译名照旧");
+    assert.match(r.data.confirmText, /改了标题 \/ 年份 1 部、钉了季 \/ 集 1 个文件/);
+    const after = (await call(client, "organize_detail", { run: runId, unit: beef.ref })).data.files as Array<Record<string, any>>;
+    const pinned = after.find((f) => f.ref === e02.ref)!;
+    assert.deepEqual(pinned.pin, { season: 2, episode: 9 });
+    assert.match(String(pinned.to), /Season 02\/怒呛人生 第一季 - S02E09\.mkv$/);
+
+    const renamed = await call(client, "organize_adjust", { run: runId, changes: [{ target: e02.ref, newName: "第九集", season: -1, episode: -1 }] });
+    assert.equal(renamed.isError, false, JSON.stringify(renamed.data));
+    const after2 = (await call(client, "organize_detail", { run: runId, unit: beef.ref })).data.files as Array<Record<string, any>>;
+    const f2 = after2.find((f) => f.ref === e02.ref)!;
+    assert.equal(f2.pin, undefined);
+    assert.equal(f2.newName, "第九集");
+    assert.match(String(f2.to), /Season 01\/第九集\.mkv$/);
+    assert.match(renamed.data.confirmText, /手动改名 1 个文件/);
+
+    const bad = await call(client, "organize_adjust", { run: runId, changes: [{ target: beef.ref, episode: 3 }] });
+    assert.equal(bad.data.code, "VALIDATION");
+    const badTitle = await call(client, "organize_adjust", { run: runId, changes: [{ target: beef.ref, title: "a/b" }] });
+    assert.equal(badTitle.data.code, "VALIDATION");
+  } finally {
+    await client.close();
+  }
+});

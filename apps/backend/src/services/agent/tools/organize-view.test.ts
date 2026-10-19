@@ -35,6 +35,10 @@ function unit(key: string, extra: Partial<OrganizeUnit> = {}): OrganizeUnit {
     notes: [],
     excluded: [],
     resolutions: {},
+    titleOverride: "",
+    yearOverride: "",
+    pins: {},
+    renames: {},
     ...extra,
   };
 }

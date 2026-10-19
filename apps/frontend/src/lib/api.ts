@@ -35,6 +35,7 @@ import type { OrganizeNaming,
   OrganizeItem,
   OrganizeMatchMemory,
   OrganizeRun,
+  OrganizeEpisodePin,
   OrganizeProbeResult,
   OrganizeRunDetail,
   OrganizeRunSummary,
@@ -65,6 +66,15 @@ import type { OrganizeNaming,
   TaskExecutionSummary,
   TelegramNotifySettings,
 } from "@openstrm/shared";
+
+/** 改标题弹框：这部作品在 TMDB 上的译名、原名、英文名和别名 */
+export interface OrganizeTitleOptions {
+  title: string;
+  originalTitle: string;
+  enTitle: string;
+  year: string;
+  aliases: string[];
+}
 
 /* ------------------------------- 类型 ------------------------------- */
 
@@ -760,10 +770,10 @@ export const api = {
     patchUnits: (id: string, keys: string[], patch: { selected?: boolean; remember?: boolean }) =>
       data(axiosInstance.put<{ changed: number }>(`/api/organize/runs/${encodeURIComponent(id)}/units`, { keys, ...patch }, { timeout: 120_000 })),
     /**
-     * 按文件改：勾选 / 取消勾选（取消的跳过，跟着它的字幕 / nfo 一起留下），或给冲突项选办法
-     * （resolve 为 null 是回到「留在原处」）；ids 用最新清单里的
+     * 按文件改：勾选 / 取消勾选（取消的跳过，跟着它的字幕 / nfo 一起留下）、给冲突项选办法（resolve 为 null 是回到「留在原处」）、
+     * 钉季 / 集（pin 为 null 撤掉）、改目标文件名（name 为 null 撤掉）；ids 用最新清单里的
      */
-    patchItems: (id: string, ids: string[], patch: { selected?: boolean; resolve?: OrganizeConflictResolution | null }) =>
+    patchItems: (id: string, ids: string[], patch: { selected?: boolean; resolve?: OrganizeConflictResolution | null; pin?: OrganizeEpisodePin | null; name?: string | null }) =>
       data(axiosInstance.put<{ changed: number }>(`/api/organize/runs/${encodeURIComponent(id)}/items`, { ids, ...patch }, { timeout: 60_000 })),
     /**
      * 探测视频编码（读文件头）：key 探这个单元的全部视频（连上次失败的一起重试）；keys 探这些单元里文件名缺模板标签的视频。
@@ -776,6 +786,8 @@ export const api = {
       data(axiosInstance.post<{ results: OrganizeCandidate[] }>("/api/organize/tmdb/search", q)),
     /** 换匹配弹框：按 TMDB 编号查 */
     tmdbLookup: (type: "movie" | "tv", id: number) => data(axiosInstance.get<OrganizeCandidate>(`/api/organize/tmdb/${type}/${id}`)),
+    /** 改标题弹框：译名、原名、英文名、别名 */
+    tmdbTitles: (type: "movie" | "tv", id: number) => data(axiosInstance.get<OrganizeTitleOptions>(`/api/organize/tmdb/${type}/${id}/titles`)),
     /** 设置页「清空 TMDB 缓存」：返回删掉的行数 */
     clearTmdbCache: () => data(axiosInstance.delete<{ cleared: number }>("/api/organize/tmdb/cache")),
     /** 不带 ids：ready 的执行全部，其它状态重试失败 / 没做的（默认只重试临时失败）；带 ids 只重试点名的项 */

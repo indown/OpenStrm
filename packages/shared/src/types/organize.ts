@@ -276,6 +276,12 @@ export interface OrganizeRun {
   progress?: OrganizeProgress;
 }
 
+/** 按文件钉的季 / 集：钉了的那一项不再受季覆盖 / 集偏移影响（和识别词直指一个待遇） */
+export interface OrganizeEpisodePin {
+  season?: number;
+  episode?: number;
+}
+
 export interface OrganizeUnit {
   runId: string;
   key: string;
@@ -305,6 +311,13 @@ export interface OrganizeUnit {
   excluded: string[];
   /** 用户给冲突项选的处理，键是网盘绝对路径；没有这一项就是默认的「留在原处」 */
   resolutions: Record<string, OrganizeConflictResolution>;
+  /** 用户改的标题 / 年份（空串是用 TMDB 的）：只影响命名，换匹配时清掉；勾了「记住」会一起记进识别记忆 */
+  titleOverride: string;
+  yearOverride: string;
+  /** 按文件钉的季 / 集，键是网盘绝对路径（只有剧集单元里的视频能钉） */
+  pins: Record<string, OrganizeEpisodePin>;
+  /** 按文件改的目标文件名，键是网盘绝对路径：目录照旧是整理算出来的，没写扩展名就沿用原来的；跟着它的字幕 / nfo 按新名字跟 */
+  renames: Record<string, string>;
 }
 
 export interface OrganizeItem {
@@ -443,6 +456,9 @@ export interface OrganizeUnitPatch {
    * 拉回来和原来一样就什么都不改。还没识别出来的单元不能刷新（400 NO_MATCH）
    */
   refresh?: boolean;
+  /** 改标题 / 年份（只影响命名）：null 或空串回到 TMDB 的；换匹配时自动清掉 */
+  title?: string | null;
+  year?: string | null;
 }
 
 /** 用户确认过的识别，按账号 + 目录记住 */
@@ -456,6 +472,9 @@ export interface OrganizeMatchMemory {
   year: string;
   season: number | null;
   episodeOffset: number;
+  /** 记住时单元上改的标题 / 年份（空串是没改）：下次同目录认出同一部作品时照用 */
+  titleOverride: string;
+  yearOverride: string;
   updatedAt: number;
 }
 

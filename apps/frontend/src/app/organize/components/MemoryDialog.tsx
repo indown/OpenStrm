@@ -103,6 +103,8 @@ export function MemoryDialog({ open, onOpenChange }: { open: boolean; onOpenChan
                       </a>
                       {m.season != null && <span className="text-xs text-muted-foreground">季 → {m.season}</span>}
                       {m.episodeOffset !== 0 && <span className="text-xs text-muted-foreground">集偏移 {m.episodeOffset > 0 ? `+${m.episodeOffset}` : m.episodeOffset}</span>}
+                      {m.titleOverride && <span className="break-all text-xs text-muted-foreground">标题 → {m.titleOverride}</span>}
+                      {m.yearOverride && <span className="text-xs text-muted-foreground">年份 → {m.yearOverride}</span>}
                     </div>
                     <div className="break-all text-xs text-muted-foreground">
                       {m.accountName} · {m.srcPath}

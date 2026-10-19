@@ -674,10 +674,23 @@
                 "minimum": -1,
                 "maximum": 99
               },
+              "episode": {
+                "type": "integer",
+                "minimum": -1,
+                "maximum": 9999
+              },
               "episodeOffset": {
                 "type": "integer",
                 "minimum": -2000,
                 "maximum": 2000
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "year": {
+                "type": "string",
+                "maxLength": 4
               },
               "remember": {
                 "type": "boolean"

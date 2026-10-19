@@ -108,6 +108,10 @@ function toUnit(row: UnitRow): OrganizeUnit {
     notes: parseJson<string[]>(row.notes, []),
     excluded: parseJson<string[]>(row.excluded, []),
     resolutions: parseJson<OrganizeUnit["resolutions"]>(row.resolutions, {}),
+    titleOverride: row.titleOverride ?? "",
+    yearOverride: row.yearOverride ?? "",
+    pins: parseJson<OrganizeUnit["pins"]>(row.pins, {}),
+    renames: parseJson<OrganizeUnit["renames"]>(row.renames, {}),
   };
 }
 
@@ -144,6 +148,8 @@ function toMemory(row: MatchRow): OrganizeMatchMemory {
     year: row.year,
     season: row.season ?? null,
     episodeOffset: row.episodeOffset,
+    titleOverride: row.titleOverride ?? "",
+    yearOverride: row.yearOverride ?? "",
     updatedAt: row.updatedAt,
   };
 }
@@ -345,6 +351,10 @@ export function replaceUnits(runId: string, units: OrganizeUnit[]): void {
           notes: JSON.stringify(u.notes),
           excluded: JSON.stringify(u.excluded ?? []),
           resolutions: JSON.stringify(u.resolutions ?? {}),
+          titleOverride: u.titleOverride ?? "",
+          yearOverride: u.yearOverride ?? "",
+          pins: JSON.stringify(u.pins ?? {}),
+          renames: JSON.stringify(u.renames ?? {}),
         })
         .run();
     }
@@ -377,6 +387,10 @@ export function updateUnit(runId: string, key: string, patch: Partial<OrganizeUn
         notes: JSON.stringify(merged.notes),
         excluded: JSON.stringify(merged.excluded ?? []),
         resolutions: JSON.stringify(merged.resolutions ?? {}),
+        titleOverride: merged.titleOverride ?? "",
+        yearOverride: merged.yearOverride ?? "",
+        pins: JSON.stringify(merged.pins ?? {}),
+        renames: JSON.stringify(merged.renames ?? {}),
         parsedTitle: merged.parsedTitle,
         parsedYear: merged.parsedYear,
       })
@@ -558,7 +572,8 @@ export function listLeftoverDirs(taskId: string, excludeRunId: string, paths: st
 
 /* ------------------------------- 识别记忆 ------------------------------- */
 
-export function rememberMatch(m: Omit<OrganizeMatchMemory, "updatedAt">): void {
+/** 记一条识别记忆（改的标题 / 年份可不给，当没改） */
+export function rememberMatch(m: Omit<OrganizeMatchMemory, "updatedAt" | "titleOverride" | "yearOverride"> & Partial<Pick<OrganizeMatchMemory, "titleOverride" | "yearOverride">>): void {
   const updatedAt = Math.floor(Date.now() / 1000);
   db.insert(organizeMatches)
     .values({
@@ -570,11 +585,23 @@ export function rememberMatch(m: Omit<OrganizeMatchMemory, "updatedAt">): void {
       year: m.year,
       season: m.season,
       episodeOffset: m.episodeOffset,
+      titleOverride: m.titleOverride ?? "",
+      yearOverride: m.yearOverride ?? "",
       updatedAt,
     })
     .onConflictDoUpdate({
       target: [organizeMatches.accountName, organizeMatches.srcPath],
-      set: { mediaType: m.mediaType, tmdbId: m.tmdbId, title: m.title, year: m.year, season: m.season, episodeOffset: m.episodeOffset, updatedAt },
+      set: {
+        mediaType: m.mediaType,
+        tmdbId: m.tmdbId,
+        title: m.title,
+        year: m.year,
+        season: m.season,
+        episodeOffset: m.episodeOffset,
+        titleOverride: m.titleOverride ?? "",
+        yearOverride: m.yearOverride ?? "",
+        updatedAt,
+      },
     })
     .run();
 }

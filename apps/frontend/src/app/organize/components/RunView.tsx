@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Ban, ChevronDown, ChevronRight, Film, Loader2, Play, RefreshCw, RotateCw, Search, Square, Trash2, Undo2 } from "lucide-react";
 import { toast } from "sonner";
-import type { OrganizeConflictChoice, OrganizeConflictResolution, OrganizeItem, OrganizeRun, OrganizeRunDetail, OrganizeRunStatus, OrganizeUnit, OrganizeUnitPatch } from "@openstrm/shared";
+import type { OrganizeConflictChoice, OrganizeConflictResolution, OrganizeEpisodePin, OrganizeItem, OrganizeRun, OrganizeRunDetail, OrganizeRunStatus, OrganizeUnit, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
@@ -31,7 +31,9 @@ import { AdjustDialog } from "./AdjustDialog";
 import { FailurePanel } from "./FailurePanel";
 import { MatchDialog } from "@/components/MatchDialog";
 import { RenameDialog } from "./RenameDialog";
-import { UnitList } from "./UnitList";
+import { PinDialog } from "./PinDialog";
+import { TitleDialog } from "./TitleDialog";
+import { UnitList, type FileEdit } from "./UnitList";
 import { POLL_MS, plannedText, toastRunError } from "./helpers";
 
 /** 执行 / 撤销中每隔几次 summary 拉一次完整详情：单元卡上的数字、展开着的文件表跟着变 */
@@ -62,7 +64,9 @@ export function RunView({
   const [matching, setMatching] = useState<OrganizeUnit | null>(null);
   const [adjusting, setAdjusting] = useState<OrganizeUnit | null>(null);
   /** 冲突项「自己改名」弹框：要改的项和它所在的单元 */
-  const [renaming, setRenaming] = useState<{ unit: OrganizeUnit; item: OrganizeItem } | null>(null);
+  const [renaming, setRenaming] = useState<{ unit: OrganizeUnit; item: OrganizeItem; mode: "conflict" | "any" } | null>(null);
+  const [titling, setTitling] = useState<OrganizeUnit | null>(null);
+  const [pinning, setPinning] = useState<{ unit: OrganizeUnit; item: OrganizeItem } | null>(null);
   const [confirm, setConfirm] = useState<"apply" | "revert" | "delete" | null>(null);
   const [showLog, setShowLog] = useState(false);
   const [showScopes, setShowScopes] = useState(false);
@@ -289,9 +293,33 @@ export function RunView({
     }
   };
 
+  /** 钉季 / 集、改文件名：和冲突办法一样按文件改、重新规划 */
+  const editItem = async (unit: OrganizeUnit, item: OrganizeItem, patch: { pin?: OrganizeEpisodePin | null; name?: string | null }): Promise<boolean> => {
+    markPatching([unit.key], true);
+    try {
+      await api.organize.patchItems(runId, [item.id], patch);
+      await load();
+      return true;
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "修改失败"));
+      await load();
+      return false;
+    } finally {
+      markPatching([unit.key], false);
+    }
+  };
+
+  /** 文件行「…」里选的：钉 / 改名先弹框，撤掉直接重规划 */
+  const fileEdit = (unit: OrganizeUnit, item: OrganizeItem, what: FileEdit) => {
+    if (what === "pin") setPinning({ unit, item });
+    else if (what === "rename") setRenaming({ unit, item, mode: "any" });
+    else if (what === "clearPin") void editItem(unit, item, { pin: null });
+    else void editItem(unit, item, { name: null });
+  };
+
   /** 下拉里选的：自己改名先弹框问名字，其余直接重规划 */
   const pickResolve = (unit: OrganizeUnit, item: OrganizeItem, how: OrganizeConflictChoice | "stay") => {
-    if (how === "custom") setRenaming({ unit, item });
+    if (how === "custom") setRenaming({ unit, item, mode: "conflict" });
     else void resolveItem(unit, [item.id], how === "stay" ? null : { how });
   };
 
@@ -623,6 +651,8 @@ export function RunView({
           onRefresh={(u) => void refreshUnit(u)}
           onProbe={(u) => void probeUnit(u)}
           onProbeMissing={(keys) => void probeMissing(keys)}
+          onTitle={setTitling}
+          onFileEdit={fileEdit}
         />
       )}
 
@@ -635,9 +665,24 @@ export function RunView({
       <AdjustDialog unit={adjusting} onOpenChange={(o) => !o && setAdjusting(null)} onSave={(p) => (adjusting ? patchUnit(adjusting, p) : Promise.resolve(false))} />
       <RenameDialog
         item={renaming?.item ?? null}
+        title={renaming?.mode === "any" ? "改文件名" : "自己改名"}
+        initialName={renaming?.mode === "any" ? renaming.unit.renames?.[renaming.item.srcPath] : undefined}
         onOpenChange={(o) => !o && setRenaming(null)}
-        onSave={(name) => (renaming ? resolveItem(renaming.unit, [renaming.item.id], { how: "custom", name }) : Promise.resolve(false))}
+        onSave={(name) =>
+          renaming
+            ? renaming.mode === "any"
+              ? editItem(renaming.unit, renaming.item, { name })
+              : resolveItem(renaming.unit, [renaming.item.id], { how: "custom", name })
+            : Promise.resolve(false)
+        }
+        onClear={renaming?.mode === "any" && renaming.unit.renames?.[renaming.item.srcPath] ? () => editItem(renaming.unit, renaming.item, { name: null }) : undefined}
       />
+      <PinDialog
+        target={pinning ? { item: pinning.item, pin: pinning.unit.pins?.[pinning.item.srcPath] } : null}
+        onOpenChange={(o) => !o && setPinning(null)}
+        onSave={(pin) => (pinning ? editItem(pinning.unit, pinning.item, { pin }) : Promise.resolve(false))}
+      />
+      <TitleDialog unit={titling} onOpenChange={(o) => !o && setTitling(null)} onSave={(p) => (titling ? patchUnit(titling, p) : Promise.resolve(false))} />
 
       <AlertDialog open={confirm != null} onOpenChange={(o) => !o && setConfirm(null)}>
         <AlertDialogContent>

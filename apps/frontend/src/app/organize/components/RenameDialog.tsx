@@ -22,24 +22,32 @@ const schema = z.object({
 
 type Values = z.infer<typeof schema>;
 
-/** 冲突项「自己改名」：目录还是整理算出来的位置，名字自己填 */
+/** 冲突项「自己改名」、任意文件「改文件名」：目录还是整理算出来的位置，名字自己填 */
 export function RenameDialog({
   item,
+  title = "自己改名",
+  initialName,
   onOpenChange,
   onSave,
+  onClear,
 }: {
   item: OrganizeItem | null;
+  title?: string;
+  /** 输入框的初始值；不给就用整理算出来的目标名 */
+  initialName?: string;
   onOpenChange: (open: boolean) => void;
   /** 成功返回 true 才关弹框；失败的提示由调用方给 */
   onSave: (name: string) => Promise<boolean>;
+  /** 已经改过名：撤掉、回到模板算的名字 */
+  onClear?: () => Promise<boolean>;
 }) {
   const open = item != null;
   const form = useForm<Values>({ resolver: zodResolver(schema), defaultValues: { name: "" } });
   const saving = form.formState.isSubmitting;
 
   useEffect(() => {
-    if (item) form.reset({ name: baseName(item.dstPath) });
-  }, [item, form]);
+    if (item) form.reset({ name: initialName ?? baseName(item.dstPath) });
+  }, [item, initialName, form]);
 
   const submit = async (values: Values) => {
     if (await onSave(values.name)) onOpenChange(false);
@@ -49,7 +57,7 @@ export function RenameDialog({
     <Dialog open={open} onOpenChange={(o) => !saving && onOpenChange(o)}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>自己改名</DialogTitle>
+          <DialogTitle>{title}</DialogTitle>
           <DialogDescription className="break-all">{item ? baseName(item.srcPath) : ""}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -71,6 +79,11 @@ export function RenameDialog({
               )}
             />
             <DialogFooter className="pt-2">
+              {onClear && (
+                <Button type="button" variant="ghost" onClick={() => void onClear().then((ok) => ok && onOpenChange(false))} disabled={saving}>
+                  撤掉改名
+                </Button>
+              )}
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
                 取消
               </Button>

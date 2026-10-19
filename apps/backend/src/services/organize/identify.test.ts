@@ -105,7 +105,7 @@ test("证据优先：识别词直指 > 记忆 > 影库 / nfo，都不搜索", as
   const a = await identifyUnit({ unit: { ...unit, direct: { tmdbId: 7, mediaType: "tv" } }, evidence: {}, episodeTitles: false }, tmdb);
   assert.equal(a.match?.title, "直指");
   assert.equal(a.match?.reason, "识别词直接指定");
-  const b = await identifyUnit({ unit, evidence: { memory: { accountName: "a", srcPath: "/x", mediaType: "movie", tmdbId: 8, title: "", year: "", season: null, episodeOffset: 0, updatedAt: 0 } }, episodeTitles: false }, tmdb);
+  const b = await identifyUnit({ unit, evidence: { memory: { accountName: "a", srcPath: "/x", mediaType: "movie", tmdbId: 8, title: "", year: "", season: null, episodeOffset: 0, titleOverride: "", yearOverride: "", updatedAt: 0 } }, episodeTitles: false }, tmdb);
   assert.equal(b.match?.title, "记忆");
   const c = await identifyUnit({ unit, evidence: { known: { tmdbId: 9, mediaType: "tv", source: "影库条目" } }, episodeTitles: false }, tmdb);
   assert.equal(c.match?.title, "影库");

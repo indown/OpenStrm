@@ -428,3 +428,29 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     setProbeDeps(null);
   }
 });
+
+test("改标题 / 年份、钉季集、改文件名的接口：校验 400、电影不能钉；别名接口给译名 / 原名 / 别名", async () => {
+  const run = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe" }, 201);
+  const ready = await untilStatus(run.id, ["ready"]);
+  const unit = ready.units.find((u) => u.match?.tmdbId === 693134)!;
+  const titled = await json<OrganizeUnit>("PUT", `/api/organize/runs/${run.id}/unit`, { key: unit.key, title: "沙丘 2", year: "2024" });
+  assert.equal(titled.titleOverride, "沙丘 2");
+  assert.match(titled.dstRoot, /^沙丘 2 \(2024\) \[tmdbid[=-]693134\]$/, "前面的测试可能把 id 标签写法换成了 jellyfin 的");
+  assert.equal((await app.inject({ method: "PUT", url: `/api/organize/runs/${run.id}/unit`, headers: auth, payload: { key: unit.key, title: "a/b" } })).statusCode, 400);
+  assert.equal((await app.inject({ method: "PUT", url: `/api/organize/runs/${run.id}/unit`, headers: auth, payload: { key: unit.key, year: "20x4" } })).statusCode, 400);
+  const { items } = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${run.id}/items?unit=${encodeURIComponent(unit.key)}`);
+  const movie = items.find((i) => i.kind === "video")!;
+  assert.equal((await app.inject({ method: "PUT", url: `/api/organize/runs/${run.id}/items`, headers: auth, payload: { ids: [movie.id], pin: {} } })).statusCode, 400, "季或集至少给一个");
+  const pinned = await app.inject({ method: "PUT", url: `/api/organize/runs/${run.id}/items`, headers: auth, payload: { ids: [movie.id], pin: { episode: 1 } } });
+  assert.equal(pinned.statusCode, 400);
+  assert.equal(pinned.json().code, "PIN_NOT_TV");
+  assert.equal((await app.inject({ method: "PUT", url: `/api/organize/runs/${run.id}/items`, headers: auth, payload: { ids: [movie.id] } })).statusCode, 400);
+  await json<{ changed: number }>("PUT", `/api/organize/runs/${run.id}/items`, { ids: [movie.id], name: "沙丘第二部 4K" });
+  const after = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${run.id}/items?unit=${encodeURIComponent(unit.key)}`);
+  const video = after.items.find((i) => i.kind === "video")!;
+  assert.match(video.dstPath, /\/沙丘 2 \(2024\) \[tmdbid[=-]693134\]\/沙丘第二部 4K\.mkv$/, video.dstPath);
+  const titles = await json<{ title: string; originalTitle: string; enTitle: string; year: string; aliases: string[] }>("GET", "/api/organize/tmdb/movie/693134/titles");
+  assert.equal(titles.title, "沙丘：第二部");
+  assert.equal(titles.originalTitle, "Dune: Part Two");
+  assert.deepEqual(titles.aliases, []);
+});

@@ -2,7 +2,7 @@
  * 预览：建 run → 列范围 → 分单元 → 识别（TMDB）→ 规划 → 落库；预览里改单元 / 换匹配；换匹配弹框的 TMDB 搜索。
  */
 import { randomUUID } from "node:crypto";
-import type { OrganizeProbeResult, MediaProbeTags, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeEpisodePin, OrganizeProbeResult, MediaProbeTags, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
 import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
@@ -230,7 +230,7 @@ function ownWorkRoot(state: PlanState, unit: Unit, titles: string[]): boolean {
  * 只看里面有什么都知道的：等于某个范围根，或者越到范围外、整棵列过（state.outsideRoots）；范围里面的目录腾空了本来就删。
  * 自动整理照旧：不删范围外、也不删新增路径所在的目录。按当时的匹配现算：预览、换匹配后的重规划都调它
  */
-function cleanupRoots(state: PlanState, matchOf: (key: string) => OrganizeMatch | null): ScopeRoot[] {
+function cleanupRoots(state: PlanState, titlesOf: (key: string) => string[]): ScopeRoot[] {
   const roots = state.scopeRoots.map((r) => ({ ...r }));
   if (!state.handPicked) return roots;
   for (const u of state.units.values()) {
@@ -240,7 +240,7 @@ function cleanupRoots(state: PlanState, matchOf: (key: string) => OrganizeMatch 
     if (equal?.removable) continue;
     const inside = state.scopeRoots.some((r) => r.path === "" || p.startsWith(`${r.path}/`));
     if (!equal && (inside || !state.outsideRoots.has(p))) continue;
-    if (!ownWorkRoot(state, u, workTitles(matchOf(u.key)))) continue;
+    if (!ownWorkRoot(state, u, titlesOf(u.key))) continue;
     if (equal) equal.removable = true;
     else roots.push({ path: p, removable: true });
   }
@@ -255,6 +255,9 @@ function workTitles(m: OrganizeMatch | null, withCandidates = false): string[] {
   if (!m) return [];
   return [m.title, m.originalTitle, m.enTitle ?? "", ...(withCandidates ? (m.candidates ?? []).map((c) => c.title) : [])].filter(Boolean);
 }
+
+/** 单元行的片名：识别出来的几个名字，加上用户改的标题（改了标题的目录名要按新名字对） */
+const unitTitles = (row: OrganizeUnit | undefined): string[] => (row ? [...workTitles(row.match), row.titleOverride].filter(Boolean) : []);
 
 /**
  * 单元的引用数（追更 / 云下载回执 / 复制队列里有多少条落在它下面）：单元根在范围里，或者这次会腾空删掉（范围外、作品独占的目录，
@@ -323,6 +326,16 @@ const excludedRel = (task: TaskDefinition, unit: OrganizeUnit): Set<string> => n
 /** 单元上按网盘绝对路径记的冲突处理 → 相对任务 originPath（规划用的路径） */
 const resolutionsRel = (task: TaskDefinition, unit: OrganizeUnit): Map<string, OrganizeConflictResolution> =>
   new Map(Object.entries(unit.resolutions ?? {}).map(([p, r]) => [relOf(task, p), r]));
+const pinsRel = (task: TaskDefinition, unit: OrganizeUnit): Map<string, OrganizeEpisodePin> => new Map(Object.entries(unit.pins ?? {}).map(([p, r]) => [relOf(task, p), r]));
+const renamesRel = (task: TaskDefinition, unit: OrganizeUnit): Map<string, string> => new Map(Object.entries(unit.renames ?? {}).map(([p, r]) => [relOf(task, p), r]));
+
+/** 规划里要用的、单元行上的人为设定（标题 / 年份、钉的季集、改的文件名）换成相对路径 */
+const overridesOf = (task: TaskDefinition, unit: OrganizeUnit): Pick<UnitPlanInput, "titleOverride" | "yearOverride" | "pins" | "renames"> => ({
+  titleOverride: unit.titleOverride,
+  yearOverride: unit.yearOverride,
+  pins: pinsRel(task, unit),
+  renames: renamesRel(task, unit),
+});
 
 /** 整棵列一个目录（相对任务 originPath）：有 walkSubtree 的（夸克 / OpenList）带 id，115 只有路径，id 到执行时再解析 */
 async function listTree(provider: DriveProvider, task: TaskDefinition, rel: string, signal: AbortSignal, id?: string): Promise<ScopeEntry[]> {
@@ -453,6 +466,10 @@ function toUnitRow(runId: string, unit: Unit, match: OrganizeMatch | null, plan:
     notes: plan?.notes ?? [],
     excluded: [],
     resolutions: {},
+    titleOverride: "",
+    yearOverride: "",
+    pins: {},
+    renames: {},
   };
 }
 
@@ -566,8 +583,17 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
       fill = hint.seasonFallback !== null ? { season: hint.seasonFallback, episodeOffset: 0, from: `沿用${hintSource(hint)}` } : null;
     } else fill = memoryFill(evidence.memory, match);
     if (fill) state.fills.set(unit.key, fill);
+    // 记住的标题 / 年份：认出来的还是记忆里那一部才照用
+    const mem = evidence.memory;
+    if (!hint && mem && match && mem.tmdbId === match.tmdbId && mem.mediaType === match.mediaType && (mem.titleOverride || mem.yearOverride)) {
+      row.titleOverride = mem.titleOverride;
+      row.yearOverride = mem.yearOverride;
+      const what = [mem.titleOverride ? `标题用「${mem.titleOverride}」` : "", mem.yearOverride ? `年份用 ${mem.yearOverride}` : ""].filter(Boolean).join("、");
+      identifyNotes = [...identifyNotes, `按记住的识别：${what}`];
+      state.identifyNotes.set(unit.key, identifyNotes);
+    }
     const plan = planUnit(
-      { unit, match, seasonOverride: row.seasonOverride, episodeOffset: row.episodeOffset, fill, episodeTitles, selected: row.selected },
+      { unit, match, seasonOverride: row.seasonOverride, episodeOffset: row.episodeOffset, fill, episodeTitles, selected: row.selected, titleOverride: row.titleOverride, yearOverride: row.yearOverride },
       { settings: org, libraryType: task.organize?.libraryType },
     );
     row.dstRoot = plan.dstRoot;
@@ -579,15 +605,15 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
 
   setProgress(job, "plan", 0, 0, "规划目标路径");
   // 单元根越到范围外、又是这部作品独占的目录（范围直接选在季目录上）：整棵列一遍，腾空后删不删得知道里面还有什么
-  const matches = new Map(rows.map((r) => [r.key, r.match]));
-  const rootEntries = await listOutsideUnitRoots(provider, state, plans, signal, (u) => workTitles(matches.get(u.key) ?? null, true));
+  const rowByKey = new Map(rows.map((r) => [r.key, r]));
+  const rootEntries = await listOutsideUnitRoots(provider, state, plans, signal, (u) => [...workTitles(rowByKey.get(u.key)?.match ?? null, true), rowByKey.get(u.key)?.titleOverride ?? ""].filter(Boolean));
   const known = [...walked.entries, ...rootEntries];
   // 目标目录在范围之外（整理到任务根下的作品目录）时，冲突检测得知道那边已经有什么：每个目标目录列一次。
   // 有 walkSubtree 的网盘整棵列过的单元根里 id、内容都全了，落在里面的不再列；115 整棵列只有路径，照列，合并时留带 id 的
   const listedRoots = provider.walkSubtree ? [...walked.roots, ...state.outsideRoots] : walked.roots;
   const extra = await listOutsideDstDirs(provider, task, listedRoots, plans, known, signal, state.listed);
   state.entries = mergePreferId(known, extra);
-  const items = finalizeItems(plans, { entries: state.entries, scopeRoots: cleanupRoots(state, (key) => matches.get(key) ?? null), items: [], cleanupEmptyDirs: org.cleanupEmptyDirs });
+  const items = finalizeItems(plans, { entries: state.entries, scopeRoots: cleanupRoots(state, (key) => unitTitles(rowByKey.get(key))), items: [], cleanupEmptyDirs: org.cleanupEmptyDirs });
   const rmdirs = rmdirsOf(items);
   for (const row of rows) row.referencedBy = refsOf(state, state.units.get(row.key)!, rmdirs);
   planStates.set(runId, state);
@@ -689,7 +715,7 @@ async function previewLocal(
   setProgress(job, "plan", 0, 0, "规划目标路径");
   const extra = await listOutsideDstDirs(provider, task, walked.roots, plans, walked.entries, signal, state.listed);
   state.entries = mergePreferId(walked.entries, extra);
-  const items = finalizeItems(plans, { entries: state.entries, scopeRoots: cleanupRoots(state, () => null), items: [], cleanupEmptyDirs: org.cleanupEmptyDirs });
+  const items = finalizeItems(plans, { entries: state.entries, scopeRoots: cleanupRoots(state, () => []), items: [], cleanupEmptyDirs: org.cleanupEmptyDirs });
   const rmdirs = rmdirsOf(items);
   for (const row of rows) row.referencedBy = refsOf(state, state.units.get(row.key)!, rmdirs);
   planStates.set(runId, state);
@@ -849,7 +875,7 @@ export function decorateItemsWithProbes(runId: string, items: OrganizeItem[]): O
 /** 规划一个单元：按本地 strm 结构的 run 走 planLocalUnit，其余走 planUnit */
 function planUnitFor(state: PlanState, unit: Unit, input: Omit<UnitPlanInput, "unit">): UnitPlan {
   const local = state.local?.get(unit.key);
-  if (local) return planLocalUnit(local, { selected: input.selected, excluded: input.excluded, resolutions: input.resolutions });
+  if (local) return planLocalUnit(local, { selected: input.selected, excluded: input.excluded, resolutions: input.resolutions, renames: input.renames });
   return planUnit({ unit, ...input }, planContext(state));
 }
 
@@ -881,8 +907,11 @@ async function afterAutoPreview(runId: string, task: TaskDefinition, mode: Organ
 
 const NOT_EDITABLE = "这次预览是上次启动时做的，单元结构没保存下来，改不了；可以直接执行，或者重新预览";
 
-/** 把 patch 套在一个单元行上（换匹配时带上新的识别结果）；dstRoot / notes 由重新规划填 */
-function applyUnitPatch(row: OrganizeUnit, patch: OrganizeUnitPatch, picked?: OrganizeMatch): OrganizeUnit {
+/**
+ * 把 patch 套在一个单元行上（换匹配时带上新的识别结果）；dstRoot / notes 由重新规划填。
+ * 换了作品（resetOverrides）原来改的标题 / 年份是上一部的，清掉；同一次里又给了新的照给
+ */
+function applyUnitPatch(row: OrganizeUnit, patch: OrganizeUnitPatch, picked?: OrganizeMatch, resetOverrides = false): OrganizeUnit {
   return {
     ...row,
     match: picked ?? row.match,
@@ -890,6 +919,8 @@ function applyUnitPatch(row: OrganizeUnit, patch: OrganizeUnitPatch, picked?: Or
     episodeOffset: patch.episodeOffset ?? row.episodeOffset,
     selected: patch.selected ?? (patch.match ? true : row.selected),
     remember: patch.remember ?? row.remember,
+    titleOverride: patch.title !== undefined ? (patch.title ?? "").trim() : resetOverrides ? "" : row.titleOverride,
+    yearOverride: patch.year !== undefined ? (patch.year ?? "").trim() : resetOverrides ? "" : row.yearOverride,
   };
 }
 
@@ -914,12 +945,13 @@ function replanRun(run: OrganizeRun, state: PlanState, changed: Map<string, Orga
       selected: r.selected,
       excluded: excludedRel(state.task, r),
       resolutions: resolutionsRel(state.task, r),
+      ...overridesOf(state.task, r),
     });
     planned.push({ row: r, plan });
     plans.push(plan);
   }
-  const matchOf = (key: string) => (changed.get(key) ?? rows.get(key))?.match ?? null;
-  const all = finalizeItems(plans, { entries: state.entries, scopeRoots: cleanupRoots(state, matchOf), items: [], cleanupEmptyDirs: state.org.cleanupEmptyDirs });
+  const titlesOf = (key: string) => unitTitles(changed.get(key) ?? rows.get(key));
+  const all = finalizeItems(plans, { entries: state.entries, scopeRoots: cleanupRoots(state, titlesOf), items: [], cleanupEmptyDirs: state.org.cleanupEmptyDirs });
   const rmdirs = rmdirsOf(all);
   // 选过的冲突办法这一轮没用上（没撞上：单元取消了勾选、别的单元让开了位置……）就清掉。挂着不清，哪天又撞上了
   // （重新勾上、换回原来的季）会悄悄生效，其中「删掉 / 覆盖」就成了没人再看一眼的删除；撞上了但办法没成的（候选名都被占）留着
@@ -998,18 +1030,24 @@ export interface PlanPatch {
    * 办法只能给现在是冲突、或者已经选过办法的文件：取消勾选的文件要先勾回来（还冲突再选）。
    * 取消勾选的文件规划时跳过、跟着它的字幕 / nfo 一起留下
    */
-  files?: Array<{ unitKey: string; srcPath: string; selected?: boolean; resolve?: OrganizeConflictResolution | null }>;
+  files?: Array<{ unitKey: string; srcPath: string } & FilePatch>;
 }
 
-type FilePatch = { selected?: boolean; resolve?: OrganizeConflictResolution | null };
+/**
+ * 文件级的改动：勾选、冲突办法、钉季 / 集（只给剧集单元里的视频；null 撤掉）、改目标文件名（null 或空串撤掉；不能带目录）。
+ * 钉了、改了名的文件会重新勾上
+ */
+type FilePatch = { selected?: boolean; resolve?: OrganizeConflictResolution | null; pin?: OrganizeEpisodePin | null; name?: string | null };
 
 /**
  * 一个单元套上文件级的改动：勾选记在 excluded、冲突办法记在 resolutions。
  * 选了办法的项本来就勾着（取消勾选的选不了办法，见 patchPlan）；撤回办法（null）= 留在原处，记成取消勾选；取消勾选同时撤掉办法
  */
-function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>): Pick<OrganizeUnit, "excluded" | "resolutions"> {
+function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>): Pick<OrganizeUnit, "excluded" | "resolutions" | "pins" | "renames"> {
   const excluded = new Set(row.excluded);
   const resolutions = { ...row.resolutions };
+  const pins = { ...(row.pins ?? {}) };
+  const renames = { ...(row.renames ?? {}) };
   for (const [path, fp] of files) {
     const selected = fp.resolve !== undefined ? fp.resolve !== null : fp.selected;
     if (selected !== false) excluded.delete(path);
@@ -1018,8 +1056,18 @@ function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>):
       if (fp.resolve) resolutions[path] = fp.resolve;
       else delete resolutions[path];
     }
+    if (fp.pin !== undefined) {
+      const pin = fp.pin && (fp.pin.season !== undefined || fp.pin.episode !== undefined) ? { ...(fp.pin.season !== undefined ? { season: fp.pin.season } : {}), ...(fp.pin.episode !== undefined ? { episode: fp.pin.episode } : {}) } : null;
+      if (pin) pins[path] = pin;
+      else delete pins[path];
+    }
+    if (fp.name !== undefined) {
+      const name = fp.name?.trim();
+      if (name) renames[path] = name;
+      else delete renames[path];
+    }
   }
-  return { excluded: [...excluded].sort(), resolutions };
+  return { excluded: [...excluded].sort(), resolutions, pins, renames };
 }
 
 /** 两个单元行在规划上有没有区别（换了匹配是新对象，按引用比就够） */
@@ -1042,8 +1090,12 @@ function sameUnitRow(a: OrganizeUnit, b: OrganizeUnit): boolean {
     a.remember === b.remember &&
     a.seasonOverride === b.seasonOverride &&
     a.episodeOffset === b.episodeOffset &&
+    (a.titleOverride ?? "") === (b.titleOverride ?? "") &&
+    (a.yearOverride ?? "") === (b.yearOverride ?? "") &&
     [...a.excluded].sort().join("\n") === [...b.excluded].sort().join("\n") &&
-    JSON.stringify(Object.entries(a.resolutions ?? {}).sort()) === JSON.stringify(Object.entries(b.resolutions ?? {}).sort())
+    JSON.stringify(Object.entries(a.resolutions ?? {}).sort()) === JSON.stringify(Object.entries(b.resolutions ?? {}).sort()) &&
+    JSON.stringify(Object.entries(a.pins ?? {}).sort()) === JSON.stringify(Object.entries(b.pins ?? {}).sort()) &&
+    JSON.stringify(Object.entries(a.renames ?? {}).sort()) === JSON.stringify(Object.entries(b.renames ?? {}).sort())
   );
 }
 
@@ -1055,9 +1107,12 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
     const unitPatches = new Map<string, OrganizeUnitPatch>();
     for (const { key, ...patch } of input.units ?? []) {
       if (!state.units.has(key) || !rows.has(key)) throw new HttpError(404, "单元不存在");
-      if (state.local && (patch.match !== undefined || patch.seasonOverride !== undefined || patch.episodeOffset !== undefined || patch.refresh || patch.remember)) {
-        throw new HttpError(400, "按本地 strm 结构整理的清单没有识别结果，不能换匹配、改季集、刷新或记住", { code: "NOT_TMDB_RUN" });
+      if (state.local && (patch.match !== undefined || patch.seasonOverride !== undefined || patch.episodeOffset !== undefined || patch.refresh || patch.remember || patch.title !== undefined || patch.year !== undefined)) {
+        throw new HttpError(400, "按本地 strm 结构整理的清单没有识别结果，不能换匹配、改季集、改标题、刷新或记住", { code: "NOT_TMDB_RUN" });
       }
+      if (patch.title && patch.title.includes("/")) throw new HttpError(400, "标题不能带 /");
+      if (patch.year && !/^\d{4}$/.test(patch.year.trim())) throw new HttpError(400, "年份是四位数字");
+      if (!rows.get(key)!.match && !patch.match && (patch.title || patch.year)) throw new HttpError(400, "这部还没识别出来，先换匹配", { code: "NO_MATCH" });
       unitPatches.set(key, { ...unitPatches.get(key), ...patch });
     }
     // 换了匹配 / 季 / 集偏移的单元：文件的目标跟着变，原来给冲突选的办法对着的是旧目标（「覆盖」删的会是另一份），
@@ -1074,11 +1129,21 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
     // 点名的文件：单元 + 路径要是现在清单里的一项（建目录 / 删空目录不属于任何单元）
     const items = listItems(runId);
     const fileKey = (unitKey: string, srcPath: string) => JSON.stringify([unitKey, srcPath]);
-    const known = new Set(items.filter((it) => it.unitKey !== "" && it.kind !== "dir").map((it) => fileKey(it.unitKey, it.srcPath)));
+    const known = new Map(items.filter((it) => it.unitKey !== "" && it.kind !== "dir").map((it) => [fileKey(it.unitKey, it.srcPath), it]));
     const conflicts = new Set(items.filter((it) => it.action === "conflict").map((it) => fileKey(it.unitKey, it.srcPath)));
     const named = new Map<string, Map<string, FilePatch>>();
     for (const { unitKey, srcPath, ...patch } of input.files ?? []) {
-      if (!known.has(fileKey(unitKey, srcPath))) throw new HttpError(404, "清单里没有这个文件");
+      const it = known.get(fileKey(unitKey, srcPath));
+      if (!it) throw new HttpError(404, "清单里没有这个文件");
+      if (patch.pin) {
+        // 钉季 / 集只对剧集单元里的视频有意义；本地结构的清单不识别，没有季集
+        if (state.local) throw new HttpError(400, "按本地 strm 结构整理的清单不按季集命名，不能钉季 / 集", { code: "NOT_TMDB_RUN" });
+        if (it.kind !== "video") throw new HttpError(400, "只有视频能钉季 / 集", { code: "PIN_NOT_VIDEO" });
+        const row = rows.get(unitKey);
+        const mediaType = unitPatches.get(unitKey)?.match?.mediaType ?? row?.match?.mediaType;
+        if (mediaType !== "tv") throw new HttpError(400, "只有剧集的视频能钉季 / 集", { code: "PIN_NOT_TV" });
+      }
+      if (patch.name && patch.name.includes("/")) throw new HttpError(400, "目标文件名不能带目录");
       // 办法只给冲突项（和界面一样）；已经选过的可以改主意，撤回总可以。
       // 不然「自己起名」能给任意文件起任意名字，别的办法也会记在单元上、等以后撞上了才生效
       if (patch.resolve && !conflicts.has(fileKey(unitKey, srcPath)) && !rows.get(unitKey)?.resolutions?.[srcPath]) {
@@ -1154,7 +1219,8 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
         next = { ...next, selected: input.select === "all" || (input.select === "confident" && row.match.confidence === "high") };
       }
       const up = unitPatches.get(row.key);
-      if (up) next = applyUnitPatch(next, up, picked.get(row.key)?.match);
+      const pk = picked.get(row.key);
+      if (up) next = applyUnitPatch(next, up, pk?.match, !!pk && !pk.keep);
       if (reidentified.has(row.key)) next = { ...next, resolutions: {} };
       const files = filesByUnit.get(row.key);
       if (files) next = { ...next, ...applyFilePatches(next, files) };
@@ -1177,6 +1243,7 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
           selected: true,
           excluded: excludedRel(state.task, next),
           resolutions: resolutionsRel(state.task, next),
+          ...overridesOf(state.task, next),
         }),
       );
     }
@@ -1232,6 +1299,10 @@ export interface ItemsPatch {
   selected?: boolean;
   /** 给冲突项选的办法；null 是撤回选择，回到「留在原处」 */
   resolve?: OrganizeConflictResolution | null;
+  /** 钉季 / 集（剧集单元里的视频）；null 撤掉 */
+  pin?: OrganizeEpisodePin | null;
+  /** 改目标文件名（不带目录，没写扩展名沿用原来的）；null 撤掉 */
+  name?: string | null;
 }
 
 export async function patchItems(runId: string, ids: string[], patch: ItemsPatch): Promise<{ changed: number }> {
@@ -1244,6 +1315,8 @@ export async function patchItems(runId: string, ids: string[], patch: ItemsPatch
       srcPath: it.srcPath,
       ...(patch.selected !== undefined ? { selected: patch.selected } : {}),
       ...(patch.resolve !== undefined ? { resolve: patch.resolve } : {}),
+      ...(patch.pin !== undefined ? { pin: patch.pin } : {}),
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
     }));
   const { changed } = await patchPlan(runId, { files });
   return { changed: changed.length };
@@ -1309,6 +1382,21 @@ export async function lookupWork(
     originalTitle: d.originalTitle,
     ...(d.seasons ? { seasons: d.seasons } : {}),
   };
+}
+
+/** 改标题弹框用：这部作品在 TMDB 上的译名、原名、英文名和别名（alternative_titles + 各语言翻译），人从里面挑或照着改 */
+export async function lookupTitles(mediaType: OrganizeCandidate["mediaType"], tmdbId: number): Promise<{ title: string; originalTitle: string; enTitle: string; year: string; aliases: string[] }> {
+  const tmdb = tmdbOrThrow();
+  let d: TmdbDetails | null;
+  try {
+    d = await tmdb.details(mediaType, tmdbId);
+  } catch (err) {
+    throw upstreamError(`TMDB 查询失败：${messageOf(err)}`);
+  }
+  if (!d) throw new HttpError(404, `TMDB 上没有${mediaType === "movie" ? "电影" : "剧集"} ${tmdbId}`);
+  const main = new Set([d.title, d.originalTitle, d.enTitle].map((t) => t.trim()).filter(Boolean));
+  const aliases = [...new Set(d.aliases.map((a) => a.trim()).filter((a) => a && !main.has(a)))];
+  return { title: d.title || d.originalTitle, originalTitle: d.originalTitle, enTitle: d.enTitle, year: d.year, aliases };
 }
 
 export async function lookupCandidate(mediaType: OrganizeCandidate["mediaType"], tmdbId: number): Promise<OrganizeCandidate> {

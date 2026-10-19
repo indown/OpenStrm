@@ -22,7 +22,7 @@ import { nestedForeignRoots } from "../strm/manage.js";
 import { decodeSegments, safeDecode, stripStrmExt } from "../strm/naming.js";
 import { isStagingDir } from "../strm/staging.js";
 import { parseMediaName } from "./parse-name.js";
-import { EXCLUDED_REASON, actionFor, renameVariants, type UnitPlan } from "./plan.js";
+import { withExt, EXCLUDED_REASON, actionFor, renameVariants, type UnitPlan } from "./plan.js";
 import { fileKindOf, type ScopeEntry, type Unit, type UnitFile } from "./units.js";
 
 /** 本地结构的单元 key 前缀：run-state 里按它认出「没有 TMDB 匹配也算排上了」的单元 */
@@ -31,6 +31,7 @@ export const isLocalUnitKey = (key: string): boolean => key.startsWith(LOCAL_UNI
 
 const EXT_RE = /^\.[a-z0-9]{1,10}$/i;
 const baseOf = (p: string): string => p.slice(p.lastIndexOf("/") + 1);
+const joinDir = (dir: string, name: string): string => (dir ? `${dir}/${name}` : name);
 const dirOf = (p: string): string => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 const extOf = (name: string): string => {
   const i = name.lastIndexOf(".");
@@ -245,14 +246,15 @@ export function mapLocalStrm(entries: ScopeEntry[], index: LocalStrmIndex, opts:
     videos.push({ file, dst });
   }
 
-  // 附属文件：同目录、同名前缀的字幕 / nfo / 图片跟着视频；一个附属只跟一个视频（stem 最长的那个），被 strm 指着的视频不算附属
+  // 附属文件：同目录、同名前缀的字幕 / nfo / 图片跟着视频；一个附属只跟一个视频（stem 最长的那个），被 strm 指着的视频不算附属。
+  // 不动的视频也带上它的附属（都是 keep）：预览里给视频改了名，附属才有得跟
   const byDir = new Map<string, ScopeEntry[]>();
   for (const e of byPath.values()) byDir.set(dirOf(e.path), [...(byDir.get(dirOf(e.path)) ?? []), e]);
   const claimed = new Set<string>(videos.map((v) => v.file.path));
   const sidecarsOf = new Map<Video, LocalUnitFile[]>();
   for (const v of [...videos].sort((a, b) => b.file.stem.length - a.file.stem.length)) {
     const list: LocalUnitFile[] = [];
-    if (!v.skip && v.dst !== v.file.path) {
+    if (!v.skip) {
       const dstStem = `${dirOf(v.dst) ? `${dirOf(v.dst)}/` : ""}${stemOf(baseOf(v.dst))}`;
       for (const e of byDir.get(dirOf(v.file.path)) ?? []) {
         if (claimed.has(e.path)) continue;
@@ -302,15 +304,29 @@ export interface LocalPlanInput {
   excluded?: ReadonlySet<string>;
   /** 用户给冲突项选的处理（相对 originPath） */
   resolutions?: ReadonlyMap<string, OrganizeConflictResolution>;
+  /** 按文件改的目标文件名（相对 originPath → 文件名）：目录照旧，没写扩展名就补上；跟着的字幕 / nfo 按新名字跟 */
+  renames?: ReadonlyMap<string, string>;
 }
 
 /** 本地结构的单元 → 计划项（和 planUnit 同样的形状；冲突办法、附属文件跟随都交给 finalizeItems） */
 export function planLocalUnit(unit: LocalUnit, input: LocalPlanInput): UnitPlan {
   const items: UnitPlan["items"] = [];
   const excluded = input.excluded ?? new Set<string>();
+  /** 用户改过名的目标：视频按填的名字，跟着它的附属文件按视频的新主名重算 */
+  const byPath = new Map(unit.files.map((f) => [f.file.path, f]));
+  const dstOf = (f: LocalUnitFile): string => {
+    const own = input.renames?.get(f.file.path)?.trim();
+    if (own) return joinDir(dirOf(f.dst), withExt(own, f.file.ext));
+    const owner = f.role === "sidecar" && f.follows ? byPath.get(f.follows) : undefined;
+    const ownerName = owner ? input.renames?.get(owner.file.path)?.trim() : undefined;
+    if (!owner || !ownerName) return f.dst;
+    const stem = withExt(ownerName, owner.file.ext).replace(/\.[^./]+$/, "");
+    return joinDir(dirOf(f.dst), `${stem}${f.file.name.slice(owner.file.stem.length)}`);
+  };
   for (const f of unit.files) {
     const file = f.file;
     const base = { unitKey: unit.key, kind: file.kind, srcPath: file.path, nodeId: file.id ?? "" };
+    const dst = dstOf(f);
     if (!input.selected) {
       items.push({ ...base, action: "skip", dstPath: file.path, reason: "未勾选" });
       continue;
@@ -323,20 +339,20 @@ export function planLocalUnit(unit: LocalUnit, input: LocalPlanInput): UnitPlan 
       items.push({ ...base, action: "skip", dstPath: file.path, reason: EXCLUDED_REASON });
       continue;
     }
-    if (f.dst === file.path) {
+    if (dst === file.path) {
       items.push({ ...base, action: "keep", dstPath: file.path, reason: "已经和本地一样" });
       continue;
     }
     const r = input.resolutions?.get(file.path);
     const resolve = r?.how;
-    const customName = r?.how === "custom" && r.name?.trim() ? (r.name.trim().toLowerCase().endsWith(file.ext) ? r.name.trim() : `${r.name.trim()}${file.ext}`) : undefined;
+    const customName = r?.how === "custom" && r.name?.trim() ? withExt(r.name.trim(), file.ext) : undefined;
     items.push({
       ...base,
-      action: actionFor(file.path, f.dst),
-      dstPath: f.dst,
+      action: actionFor(file.path, dst),
+      dstPath: dst,
       reason: "",
       resolve,
-      variants: resolve === "rename" ? renameVariants(f.dst, file) : undefined,
+      variants: resolve === "rename" ? renameVariants(dst, file) : undefined,
       customName,
       ...(f.role === "sidecar" ? { follows: [f.follows!], soft: true } : {}),
     });

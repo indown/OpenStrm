@@ -16,7 +16,7 @@
  *
  * 路径：输入输出都是相对任务 originPath 的路径；run.ts 落库时再拼成网盘绝对路径。
  */
-import type { OrganizeAction, OrganizeConflictChoice, OrganizeConflictResolution, OrganizeFileKind, OrganizeMatch } from "@openstrm/shared";
+import type { OrganizeAction, OrganizeConflictChoice, OrganizeConflictResolution, OrganizeEpisodePin, OrganizeFileKind, OrganizeMatch } from "@openstrm/shared";
 import { DUPLICATES_DIR, duplicatePathFor } from "../strm/staging.js";
 import { isNamedAfter, normalizeTitle, trailingNumber } from "./parse-name.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
@@ -70,6 +70,13 @@ export interface UnitPlanInput {
   excluded?: ReadonlySet<string>;
   /** 用户给冲突项选的处理（相对任务 originPath）：撞上了按它来，没选就留在原处 */
   resolutions?: ReadonlyMap<string, OrganizeConflictResolution>;
+  /** 用户改的标题 / 年份（空串是用 TMDB 的）：进 {title} {year}，作品根目录跟着变 */
+  titleOverride?: string;
+  yearOverride?: string;
+  /** 按文件钉的季 / 集（相对任务 originPath）：压过文件名、季覆盖、集偏移 */
+  pins?: ReadonlyMap<string, OrganizeEpisodePin>;
+  /** 按文件改的目标文件名（相对任务 originPath → 文件名）：目录照旧，没写扩展名就补上；跟着它的字幕 / nfo 按新名字跟 */
+  renames?: ReadonlyMap<string, string>;
 }
 
 /** 单独取消勾选的文件跳过时的原因 */
@@ -142,9 +149,11 @@ export function resolveEpisode(
   seasonOverride: number | null,
   episodeOffset: number,
   fill?: EpisodeFill | null,
+  userPin?: OrganizeEpisodePin,
 ): SeasonEpisode | null {
   const p = file.parsed;
-  const pin = file.direct && file.direct.tmdbId === match.tmdbId ? file.direct : undefined;
+  // 人在预览里钉的季 / 集最优先，其次是识别词直指；两者的待遇一样：钉了季就不看季覆盖，钉了集就不偏移
+  const pin: OrganizeEpisodePin | undefined = userPin && (userPin.season !== undefined || userPin.episode !== undefined) ? userPin : file.direct && file.direct.tmdbId === match.tmdbId ? file.direct : undefined;
   const ruleSeason = pin?.season === undefined && unit.dirDirect && unit.dirDirect.tmdbId === match.tmdbId ? unit.dirDirect.season : undefined;
   const own = pin?.season ?? p.season ?? ruleSeason ?? file.seasonFromDir ?? unit.parsed.season;
   const fillSeason = own === undefined && fill && fill.season !== null ? fill.season : undefined;
@@ -269,6 +278,11 @@ function subtitleName(videoDst: string, sub: UnitFile): string {
   return `${parts.join(".")}${sub.ext}`;
 }
 
+/** 文件名没带这个扩展名就补上（用户自己填的名字） */
+export function withExt(name: string, ext: string): string {
+  return !ext || name.toLowerCase().endsWith(ext) ? name : `${name}${ext}`;
+}
+
 export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
   const { unit, match } = input;
   const notes: string[] = [];
@@ -280,15 +294,34 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
   const customNameOf = (file: UnitFile): string | undefined => {
     const r = resolutions?.get(file.path);
     const name = r?.how === "custom" ? r.name?.trim() : undefined;
-    if (!name) return undefined;
-    return name.toLowerCase().endsWith(file.ext) ? name : `${name}${file.ext}`;
+    return name ? withExt(name, file.ext) : undefined;
+  };
+  /** 用户给这个文件改的名字套在算出来的目标上：目录照旧，没写扩展名就补上 */
+  const renamed = (file: UnitFile, dst: string): string => {
+    const name = input.renames?.get(file.path)?.trim();
+    return name ? join(dirOf(dst), withExt(name, file.ext)) : dst;
   };
   const push = (file: UnitFile, dst: string | null, reason = "", forced?: OrganizeAction, extra?: Pick<PlannedItem, "follows" | "soft">) => {
-    const action = forced ?? (dst === null ? "skip" : actionFor(file.path, dst));
+    const target = dst === null ? null : renamed(file, dst);
+    // 本来「不动」的文件（花絮留在原处、认不出类型的）被改了名：按改名算，原来的理由也就不对了
+    const renamedHere = target !== null && target !== dst;
+    const action = forced && !renamedHere ? forced : target === null ? "skip" : actionFor(file.path, target);
     const resolve = resolutions?.get(file.path)?.how;
-    const variants = resolve === "rename" && dst ? renameVariants(dst, file) : undefined;
+    const variants = resolve === "rename" && target ? renameVariants(target, file) : undefined;
     const customName = resolve === "custom" ? customNameOf(file) : undefined;
-    items.push({ unitKey: unit.key, kind: file.kind, action, srcPath: file.path, dstPath: dst ?? file.path, nodeId: file.id ?? "", reason, resolve, variants, customName, ...extra });
+    items.push({
+      unitKey: unit.key,
+      kind: file.kind,
+      action,
+      srcPath: file.path,
+      dstPath: target ?? file.path,
+      nodeId: file.id ?? "",
+      reason: renamedHere && forced ? "按填的名字改名" : reason,
+      resolve,
+      variants,
+      customName,
+      ...extra,
+    });
   };
 
   if (!match) {
@@ -308,12 +341,15 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
         originalLanguage: match.originalLanguage,
       })
     : "";
+  // 用户改过的标题 / 年份只换掉 {title} {year}；原名、英文名照旧
+  const title = input.titleOverride?.trim() || match.title;
+  const year = input.yearOverride?.trim() || match.year;
   const common: TemplateVars = {
     category,
-    title: match.title,
+    title,
     originalTitle: match.originalTitle,
     enTitle: match.enTitle,
-    year: match.year,
+    year,
     tmdbId: match.tmdbId,
     imdbId: match.imdbId,
     idTag: idTagFor(s.idTag, match.tmdbId),
@@ -340,7 +376,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
     }
     let vars: TemplateVars = { ...common, ...fileVars(f) };
     if (match.mediaType === "tv") {
-      const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset, input.fill);
+      const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset, input.fill, input.pins?.get(f.path));
       if (!se) {
         push(f, null, "看不出是第几集");
         continue;
@@ -365,7 +401,8 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
       push(f, null, `模板有问题：${r.errors.join("；") || "空路径"}`);
       continue;
     }
-    videoDst.set(f, r.path);
+    // 跟着它的字幕 / nfo 按改过名的目标跟
+    videoDst.set(f, renamed(f, r.path));
     push(f, r.path);
   }
 
@@ -391,7 +428,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
   const allVideos = videos.map((v) => v.path);
   // 单元根是这部作品自己的目录：分单元时就认出来了的，或者（不是从大目录里拆出来的）目录名就是识别出来的片名——
   // 「中文目录名 + 英文文件名」分单元时对不上，TMDB 认出来之后才知道是一回事
-  const ownsDir = unit.ownsDir || (!!unit.rootPath && !unit.key.includes("|") && isNamedAfter(baseOf(unit.rootPath), [match.title, match.originalTitle, match.enTitle]));
+  const ownsDir = unit.ownsDir || (!!unit.rootPath && !unit.key.includes("|") && isNamedAfter(baseOf(unit.rootPath), [title, match.title, match.originalTitle, match.enTitle]));
   // 季目录 → 里面的视频要去的新季目录（取最多的那个）：季目录里的 poster.jpg / season.nfo 跟过去
   const bySeasonDir = new Map<string, UnitFile[]>();
   for (const v of videos) {
@@ -446,7 +483,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
       // 就跟着留下——不能退到「唯一排上的那个视频」，那会把别的视频的字幕配给它
       let owner: UnitFile | undefined;
       if (match.mediaType === "tv") {
-        const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset, input.fill);
+        const se = resolveEpisode(f, unit, match, input.seasonOverride, input.episodeOffset, input.fill, input.pins?.get(f.path));
         if (se) owner = videos.find((v) => videoKey.get(v) === `${se.season}:${se.episode}`);
       }
       owner ??= unitVideos.filter((v) => f.stem.startsWith(v.stem)).sort((a, b) => b.stem.length - a.stem.length)[0];

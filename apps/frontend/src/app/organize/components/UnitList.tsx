@@ -3,8 +3,8 @@
 import { useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, RefreshCw, ScanSearch, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
-import type { MediaProbeTags, OrganizeConflictChoice, OrganizeItem, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
+import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, MoreHorizontal, PenLine, RefreshCw, ScanSearch, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
+import type { MediaProbeTags, OrganizeConflictChoice, OrganizeEpisodePin, OrganizeItem, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -74,6 +74,8 @@ export function UnitList({
   onRefresh,
   onProbe,
   onProbeMissing,
+  onTitle,
+  onFileEdit,
 }: {
   runId: string;
   units: OrganizeUnit[];
@@ -105,6 +107,10 @@ export function UnitList({
   onProbe: (unit: OrganizeUnit) => void;
   /** 探测这些单元里文件名缺模板标签的视频 */
   onProbeMissing: (keys: string[]) => void;
+  /** 改这部的标题 / 年份（只影响命名） */
+  onTitle: (unit: OrganizeUnit) => void;
+  /** 文件行「…」里选的：钉季 / 集、改文件名、撤掉 */
+  onFileEdit: (unit: OrganizeUnit, item: OrganizeItem, what: FileEdit) => void;
 }) {
   const [filter, setFilter] = useState<UnitFilter>("all");
   const [query, setQuery] = useState("");
@@ -203,6 +209,8 @@ export function UnitList({
           onAdjust={() => onAdjust(r.unit)}
           onRefresh={() => onRefresh(r.unit)}
           onProbe={() => onProbe(r.unit)}
+          onTitle={() => onTitle(r.unit)}
+          onFileEdit={(item, what) => onFileEdit(r.unit, item, what)}
         />
       ))}
       {folded.length > 0 && (
@@ -247,6 +255,8 @@ function UnitCard({
   onAdjust,
   onRefresh,
   onProbe,
+  onTitle,
+  onFileEdit,
 }: {
   runId: string;
   unit: OrganizeUnit;
@@ -266,6 +276,8 @@ function UnitCard({
   onAdjust: () => void;
   onRefresh: () => void;
   onProbe: () => void;
+  onTitle: () => void;
+  onFileEdit: (item: OrganizeItem, what: FileEdit) => void;
 }) {
   const [open, setOpen] = useState(false);
   // 海报加载失败（TMDB 图片被墙）就退回图标，别把 alt 文字画在卡片上
@@ -336,6 +348,8 @@ function UnitCard({
             {counts.failed > 0 && <span className="text-destructive">{counts.failed} 项{stage === "revert" ? "没退回" : "要处理"}</span>}
             {counts.excluded > 0 && <span>{counts.excluded} 个文件没勾选</span>}
             {unit.referencedBy > 0 && <span>被 {unit.referencedBy} 条追更 / 云下载引用，执行后自动改写</span>}
+            {unit.titleOverride && <span className="break-all">标题 → {unit.titleOverride}</span>}
+            {unit.yearOverride && <span>年份 → {unit.yearOverride}</span>}
             {unit.seasonOverride != null && <span>季 → {unit.seasonOverride}</span>}
             {unit.episodeOffset !== 0 && <span>集偏移 {unit.episodeOffset > 0 ? `+${unit.episodeOffset}` : unit.episodeOffset}</span>}
           </div>
@@ -354,6 +368,12 @@ function UnitCard({
               <Button variant="outline" size="sm" className="h-8" onClick={onAdjust} disabled={pending}>
                 <SlidersHorizontal className="size-4" />
                 季 / 集偏移
+              </Button>
+            )}
+            {m && !local && (
+              <Button variant="outline" size="sm" className="h-8" onClick={onTitle} disabled={pending} title="只改目录和文件名里的标题 / 年份：从 TMDB 的译名、原名、别名里挑，或自己填；识别不变">
+                <PenLine className="size-4" />
+                改标题
               </Button>
             )}
             {m && !local && (
@@ -402,10 +422,13 @@ function UnitCard({
           unit={unit}
           stage={stage}
           version={version}
-          editable={editable && unit.selected && !!m}
+          editable={editable && unit.selected && (!!m || local)}
+          local={local}
+          tv={m?.mediaType === "tv"}
           pending={pending}
           onToggleItems={onToggleItems}
           onResolve={onResolve}
+          onFileEdit={onFileEdit}
         />
       )}
     </div>
@@ -428,18 +451,26 @@ function UnitFiles({
   stage,
   version,
   editable,
+  local,
+  tv,
   pending,
   onToggleItems,
   onResolve,
+  onFileEdit,
 }: {
   runId: string;
   unit: OrganizeUnit;
   stage: OrganizeRunStage;
   version: number;
   editable: boolean;
+  /** 按本地 strm 结构的清单：能改文件名，不能钉季集 */
+  local: boolean;
+  /** 剧集：视频能钉季 / 集 */
+  tv: boolean;
   pending: boolean;
   onToggleItems: (ids: string[], selected: boolean) => void;
   onResolve: (item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
+  onFileEdit: (item: OrganizeItem, what: FileEdit) => void;
 }) {
   const { items, error } = useRunItems(runId, { unit: unit.key }, true, version);
   const excluded = useMemo(() => new Set(unit.excluded), [unit.excluded]);
@@ -453,9 +484,14 @@ function UnitFiles({
       editable={editable}
       excluded={excluded}
       resolutions={unit.resolutions ?? {}}
+      pins={unit.pins ?? {}}
+      renames={unit.renames ?? {}}
+      local={local}
+      tv={tv}
       pending={pending}
       onToggleItems={onToggleItems}
       onResolve={onResolve}
+      onFileEdit={onFileEdit}
     />
   );
 }
@@ -492,6 +528,48 @@ function reasonClass(it: OrganizeItem, unitSelected: boolean, userExcluded: bool
 }
 
 /** 冲突怎么办：下拉菜单，当前选了什么就显示什么 */
+/** 钉的季 / 集一眼能看：S02E05、只钉集是 E05 */
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const pinText = (p: OrganizeEpisodePin): string => `${p.season !== undefined ? `S${pad2(p.season)}` : ""}${p.episode !== undefined ? `E${pad2(p.episode)}` : ""}`;
+
+/** 文件行「…」里能做的 */
+export type FileEdit = "pin" | "rename" | "clearPin" | "clearRename";
+
+/** 文件行的「…」：钉季 / 集（剧集的视频）、改文件名，钉过 / 改过的能撤 */
+function FileMenu({ canPin, pinned, renamed, disabled, onPick }: { canPin: boolean; pinned: boolean; renamed: boolean; disabled: boolean; onPick: (what: FileEdit) => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon" className="mt-1 size-6" disabled={disabled} aria-label="更多改法">
+          <MoreHorizontal className="size-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-w-[min(20rem,calc(100vw-2rem))]">
+        {canPin && (
+          <DropdownMenuItem onSelect={() => onPick("pin")} className="flex-col items-start gap-0.5">
+            <span className="text-xs font-medium">{pinned ? "改钉的季 / 集…" : "钉季 / 集…"}</span>
+            <span className="text-[11px] whitespace-normal text-muted-foreground">看不出集数的文件靠它排进去；钉了的不受季覆盖 / 集偏移影响</span>
+          </DropdownMenuItem>
+        )}
+        {canPin && pinned && (
+          <DropdownMenuItem onSelect={() => onPick("clearPin")} className="text-xs">
+            撤掉钉的季 / 集
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem onSelect={() => onPick("rename")} className="flex-col items-start gap-0.5">
+          <span className="text-xs font-medium">改文件名…</span>
+          <span className="text-[11px] whitespace-normal text-muted-foreground">目录照旧是整理算出来的；跟着它的字幕 / nfo 按新名字跟</span>
+        </DropdownMenuItem>
+        {renamed && (
+          <DropdownMenuItem onSelect={() => onPick("clearRename")} className="text-xs">
+            撤掉改名，回到模板的名字
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function ConflictMenu({ current, disabled, onPick }: { current?: string; disabled: boolean; onPick: (how: OrganizeConflictChoice | "stay") => void }) {
   return (
     <DropdownMenu>
@@ -520,9 +598,14 @@ function ItemsTable({
   editable,
   excluded,
   resolutions,
+  pins,
+  renames,
+  local,
+  tv,
   pending,
   onToggleItems,
   onResolve,
+  onFileEdit,
 }: {
   items: OrganizeItem[];
   stage: OrganizeRunStage;
@@ -533,9 +616,15 @@ function ItemsTable({
   excluded: ReadonlySet<string>;
   /** 冲突项选过的办法（网盘绝对路径 → 办法） */
   resolutions: OrganizeUnit["resolutions"];
+  /** 钉的季 / 集、改的文件名（网盘绝对路径 → 值） */
+  pins: OrganizeUnit["pins"];
+  renames: OrganizeUnit["renames"];
+  local: boolean;
+  tv: boolean;
   pending: boolean;
   onToggleItems: (ids: string[], selected: boolean) => void;
   onResolve: (item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
+  onFileEdit: (item: OrganizeItem, what: FileEdit) => void;
 }) {
   // 能单独勾的：要改名 / 移动的、冲突的（勾掉一份另一份就能走），和已经被勾掉的
   const toggleable = (it: OrganizeItem) => it.kind !== "dir" && (excluded.has(it.srcPath) || it.action === "rename" || it.action === "move" || it.action === "conflict");
@@ -573,11 +662,16 @@ function ItemsTable({
                       onPick={(how) => onResolve(it, how)}
                     />
                   )}
+                  {editable && it.kind !== "dir" && (
+                    <FileMenu canPin={tv && !local && it.kind === "video"} pinned={!!pins[it.srcPath]} renamed={!!renames[it.srcPath]} disabled={pending} onPick={(what) => onFileEdit(it, what)} />
+                  )}
                 </td>
                 <td className="px-2 py-1.5">
                   <div className="break-all">{baseName(it.srcPath)}</div>
                   <div className="break-all text-muted-foreground">{dirName(it.srcPath)}</div>
                   {it.probe && <div className="text-muted-foreground">探测到 {probeLine(it.probe)}</div>}
+                  {pins[it.srcPath] && <div className="text-muted-foreground">钉在 {pinText(pins[it.srcPath])}</div>}
+                  {renames[it.srcPath] && <div className="break-all text-muted-foreground">改名为 {renames[it.srcPath]}</div>}
                   {it.error ? (
                     <div className="break-all text-destructive">{it.error}</div>
                   ) : it.reason ? (

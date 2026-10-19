@@ -430,6 +430,13 @@ export const organizeUnits = sqliteTable(
     excluded: text("excluded").notNull().default("[]"),
     /** 用户给冲突项选的处理（JSON：网盘绝对路径 → rename / duplicate），重规划不丢 */
     resolutions: text("resolutions").notNull().default("{}"),
+    /** 用户改的标题 / 年份（空串是用 TMDB 的） */
+    titleOverride: text("title_override").notNull().default(""),
+    yearOverride: text("year_override").notNull().default(""),
+    /** 按文件钉的季 / 集（JSON：网盘绝对路径 → { season?, episode? }） */
+    pins: text("pins").notNull().default("{}"),
+    /** 按文件改的目标文件名（JSON：网盘绝对路径 → 文件名） */
+    renames: text("renames").notNull().default("{}"),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.runId, t.key] }),
@@ -485,6 +492,9 @@ export const organizeMatches = sqliteTable(
     year: text("year").notNull().default(""),
     season: integer("season"),
     episodeOffset: integer("episode_offset").notNull().default(0),
+    /** 记住时单元上改的标题 / 年份（空串是没改） */
+    titleOverride: text("title_override").notNull().default(""),
+    yearOverride: text("year_override").notNull().default(""),
     updatedAt: integer("updated_at").notNull().default(sql`(unixepoch())`),
   },
   (t) => ({

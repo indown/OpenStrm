@@ -471,6 +471,8 @@ export function afterApply(task: TaskDefinition, provider: DriveProvider, units:
       year: u.match.year,
       season: u.seasonOverride ?? kept?.season ?? null,
       episodeOffset: u.episodeOffset || kept?.episodeOffset || 0,
+      titleOverride: u.titleOverride || kept?.titleOverride || "",
+      yearOverride: u.yearOverride || kept?.yearOverride || "",
     });
   }
   // 复制队列按文件跟：整理最常见的是「一集挪进作品目录、顺手改名」，所在目录没腾空，目录级映射里没有它

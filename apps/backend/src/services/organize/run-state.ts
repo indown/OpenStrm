@@ -310,7 +310,7 @@ export const planStates = new Map<string, PlanState>();
 
 /**
  * 清单内容的指纹：人点头的是哪一版，执行的就是哪一版（智能体执行前核对）。只看会改变执行结果的东西——
- * 单元的勾选、匹配、季、偏移、排除、冲突办法，各项的动作和 src → dst；不看 id、时间、「记住」
+ * 单元的勾选、匹配、季、偏移、排除、冲突办法、改的标题 / 年份、钉的季集、改的文件名，各项的动作和 src → dst；不看 id、时间、「记住」
  */
 export function planFingerprint(runId: string, known?: { units: OrganizeUnit[]; items: OrganizeItem[] }): string {
   const h = createHash("sha1");
@@ -325,6 +325,10 @@ export function planFingerprint(runId: string, known?: { units: OrganizeUnit[]; 
         u.episodeOffset,
         [...u.excluded].sort(),
         Object.entries(u.resolutions ?? {}).sort(),
+        u.titleOverride ?? "",
+        u.yearOverride ?? "",
+        Object.entries(u.pins ?? {}).sort(),
+        Object.entries(u.renames ?? {}).sort(),
       ]),
     );
   }

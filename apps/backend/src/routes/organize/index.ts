@@ -26,6 +26,7 @@ import {
   listRunItems,
   listRuns,
   lookupCandidate,
+  lookupTitles,
   patchItems,
   patchUnit,
   patchUnits,
@@ -93,6 +94,9 @@ const unitPatchSchema = z.object({
   remember: z.boolean().optional(),
   /** 刷新 TMDB 信息：按现在的匹配跳过缓存重新拉详情和季集 */
   refresh: z.boolean().optional(),
+  /** 改标题 / 年份（只影响命名）：null 或空串回到 TMDB 的 */
+  title: z.string().trim().max(200).refine((t) => !t.includes("/"), { message: "标题不能带 /" }).nullable().optional(),
+  year: z.string().trim().refine((y) => y === "" || /^\d{4}$/.test(y), { message: "年份是四位数字" }).nullable().optional(),
 });
 
 const previewNameSchema = z.object({
@@ -120,9 +124,20 @@ const conflictResolveSchema = z
     name: z.string().trim().min(1).max(200).refine((n) => !n.includes("/"), { message: "目标文件名不能带目录" }).optional(),
   })
   .refine((r) => r.how !== "custom" || !!r.name, { message: "自己改名要填目标文件名" });
+/** 钉季 / 集：至少给一个；null 撤掉 */
+const pinSchema = z
+  .object({ season: z.number().int().min(0).max(99).optional(), episode: z.number().int().min(0).max(9999).optional() })
+  .refine((p) => p.season !== undefined || p.episode !== undefined, { message: "季或集至少给一个" });
+
 const itemsPatchSchema = z
-  .object({ ids: z.array(z.string().min(1)).min(1).max(5000), selected: z.boolean().optional(), resolve: conflictResolveSchema.nullable().optional() })
-  .refine((b) => b.selected !== undefined || b.resolve !== undefined, { message: "selected 或 resolve 至少给一个" });
+  .object({
+    ids: z.array(z.string().min(1)).min(1).max(5000),
+    selected: z.boolean().optional(),
+    resolve: conflictResolveSchema.nullable().optional(),
+    pin: pinSchema.nullable().optional(),
+    name: z.string().trim().max(200).refine((n) => !n.includes("/"), { message: "目标文件名不能带目录" }).nullable().optional(),
+  })
+  .refine((b) => b.selected !== undefined || b.resolve !== undefined || b.pin !== undefined || b.name !== undefined, { message: "selected、resolve、pin、name 至少给一个" });
 
 /** 换匹配弹框的 TMDB 搜索：可以限定类型和年份 */
 const tmdbSearchSchema = z.object({
@@ -215,7 +230,7 @@ export default async function (fastify: FastifyInstance) {
   fastify.put("/api/organize/runs/:id/items", { preHandler: [fastify.authenticate], config: { agentScope: "run", agentToolset: "organize" } }, async (request) => {
     const { id } = parse(idParamsSchema, request.params, "params");
     const body = parse(itemsPatchSchema, request.body);
-    return patchItems(id, body.ids, { selected: body.selected, resolve: body.resolve });
+    return patchItems(id, body.ids, { selected: body.selected, resolve: body.resolve, pin: body.pin, name: body.name });
   });
 
   /** 换匹配弹框：按关键词搜（可限类型、年份） */
@@ -228,6 +243,12 @@ export default async function (fastify: FastifyInstance) {
   fastify.get("/api/organize/tmdb/:type/:id", { preHandler: [fastify.authenticate], config: { agentScope: "read", agentToolset: "organize" } }, async (request) => {
     const p = parse(tmdbParamsSchema, request.params, "params");
     return lookupCandidate(p.type, p.id);
+  });
+
+  /** 改标题弹框：这部作品的译名、原名、英文名、别名 */
+  fastify.get("/api/organize/tmdb/:type/:id/titles", { preHandler: [fastify.authenticate], config: { agentScope: "read", agentToolset: "organize" } }, async (request) => {
+    const p = parse(tmdbParamsSchema, request.params, "params");
+    return lookupTitles(p.type, p.id);
   });
 
   /** 设置页「清空 TMDB 缓存」：TMDB 上改了译名 / 海报，不等缓存过期就重新拉。只给人用，令牌不开放 */

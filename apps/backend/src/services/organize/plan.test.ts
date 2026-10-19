@@ -514,3 +514,53 @@ test("单独取消勾选的文件：跳过，跟着它的字幕留下；同一�
   const resolved = planUnit({ unit: u2, match: beef, seasonOverride: null, episodeOffset: 0, selected: true, excluded: new Set(["x/BEEF.S01E01.1080p.WEB-DL.mkv"]) }, { settings }).items;
   assert.equal(resolved.find((i) => i.srcPath.endsWith("720p.HDTV.mkv"))!.action, "move");
 });
+
+test("改标题 / 年份：只换 {title} {year}，作品根跟着变，原名照旧；空白等于没改", () => {
+  const paths = ["inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv"];
+  const { plan: p, items } = plan(paths, beef, { titleOverride: "怒呛人生：第一季", yearOverride: "2024" });
+  assert.equal(p.dstRoot, "怒呛人生：第一季 (2024) [tmdbid=153312]");
+  assert.equal(items.find((i) => i.srcPath.endsWith(".mkv"))!.dstPath, "怒呛人生：第一季 (2024) [tmdbid=153312]/Season 01/怒呛人生：第一季 - S01E01.mkv");
+  assert.equal(plan(paths, beef, { titleOverride: "  ", yearOverride: "" }).plan.dstRoot, "怒呛人生 (2023) [tmdbid=153312]");
+});
+
+test("钉季 / 集：压过文件名、季覆盖和集偏移；只钉集的季照旧算、集不再偏移；看不出集数的文件钉了集就能排；字幕按名字跟着钉了的视频", () => {
+  const paths = [
+    "inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv",
+    "inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.chs.srt",
+    "inbox/BEEF.S01.1080p/BEEF.S01E02.1080p.WEB-DL.mkv",
+    "inbox/BEEF.S01.1080p/BEEF.1080p.WEB-DL.mkv",
+  ];
+  assert.equal(plan(paths, beef).items.find((i) => i.srcPath.endsWith("/BEEF.1080p.WEB-DL.mkv"))!.reason, "看不出是第几集");
+  const pins = new Map([
+    ["inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv", { season: 2, episode: 5 }],
+    ["inbox/BEEF.S01.1080p/BEEF.1080p.WEB-DL.mkv", { episode: 8 }],
+  ]);
+  const { items } = plan(paths, beef, { seasonOverride: 3, episodeOffset: 10, pins });
+  const dst = (n: string) => items.find((i) => i.srcPath.endsWith(n))!.dstPath;
+  assert.equal(dst("S01E01.1080p.WEB-DL.mkv"), "怒呛人生 (2023) [tmdbid=153312]/Season 02/怒呛人生 - S02E05.mkv", "钉了季集：季覆盖、偏移都不管");
+  assert.equal(dst("chs.srt"), "怒呛人生 (2023) [tmdbid=153312]/Season 02/怒呛人生 - S02E05.zh-CN.srt");
+  assert.equal(dst("S01E02.1080p.WEB-DL.mkv"), "怒呛人生 (2023) [tmdbid=153312]/Season 03/怒呛人生 - S03E12.mkv", "没钉的照旧季覆盖 + 偏移");
+  assert.equal(dst("/BEEF.1080p.WEB-DL.mkv"), "怒呛人生 (2023) [tmdbid=153312]/Season 03/怒呛人生 - S03E08.mkv", "只钉了集：季按覆盖，集不偏移");
+});
+
+test("按文件改名：目录照旧、没写扩展名补上；字幕 / 同名 nfo / thumb 按新名字跟；没改的照旧", () => {
+  const paths = [
+    "inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv",
+    "inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.chs.srt",
+    "inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.nfo",
+    "inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL-thumb.jpg",
+    "inbox/BEEF.S01.1080p/BEEF.S01E02.1080p.WEB-DL.mkv",
+  ];
+  const renames = new Map([["inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv", "怒呛人生 第1集 导演剪辑版"]]);
+  const { items } = plan(paths, beef, { renames });
+  const dst = (n: string) => items.find((i) => i.srcPath.endsWith(n))!.dstPath;
+  assert.equal(dst("S01E01.1080p.WEB-DL.mkv"), "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 第1集 导演剪辑版.mkv");
+  assert.equal(dst("chs.srt"), "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 第1集 导演剪辑版.zh-CN.srt");
+  assert.equal(dst("WEB-DL.nfo"), "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 第1集 导演剪辑版.nfo");
+  assert.equal(dst("-thumb.jpg"), "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 第1集 导演剪辑版-thumb.jpg");
+  assert.equal(dst("S01E02.1080p.WEB-DL.mkv"), "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E02.mkv");
+  // 已经规范的文件改个名：原地改名
+  const done = plan(["怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv"], beef, { renames: new Map([["怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv", "第一集.mkv"]]) }).items;
+  assert.equal(done[0].action, "rename");
+  assert.equal(done[0].dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 01/第一集.mkv");
+});

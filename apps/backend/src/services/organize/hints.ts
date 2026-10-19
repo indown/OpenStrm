@@ -70,7 +70,7 @@ export function organizedVideos(task: TaskDefinition, units: OrganizeUnit[], ite
       dst,
       season: seasonOfPath(dst),
       titles: titlesOfName(baseOf(src), rules),
-      unit: { mediaType: u.match.mediaType, tmdbId: u.match.tmdbId, title: u.match.title, year: u.match.year, seasonOverride: u.seasonOverride, episodeOffset: u.episodeOffset, dstRoot: u.dstRoot },
+      unit: { mediaType: u.match.mediaType, tmdbId: u.match.tmdbId, title: u.titleOverride || u.match.title, year: u.yearOverride || u.match.year, seasonOverride: u.seasonOverride, episodeOffset: u.episodeOffset, dstRoot: u.dstRoot },
     });
   }
   return out;

@@ -124,3 +124,22 @@ test("规划：没勾选全 skip；单独取消勾选的文件 skip、字幕跟�
   const d = units.find((u) => u.key === "local:inbox")!;
   assert.deepEqual(planLocalUnit(d, { selected: true }).items.map((i) => i.action), ["keep"]);
 });
+
+test("规划：按文件改名——视频按填的名字（补扩展名），跟着它的附属文件按新主名跟；已经和本地一样的改了名就是原地改名", () => {
+  const entries = [file("inbox/A.mkv"), file("inbox/A.chs.srt"), file("inbox/A-thumb.jpg"), file("inbox/D.mkv")];
+  const index = { strms: [strm("Movies/A (2020)/A (2020).strm", ["inbox/A.mkv"]), strm("inbox/D.strm", ["inbox/D.mkv"])], truncated: false };
+  const { units } = mapLocalStrm(entries, index, { videoExts, inScope: () => true });
+  const a = units.find((u) => u.key === "local:Movies/A (2020)")!;
+  const plan = planLocalUnit(a, { selected: true, renames: new Map([["inbox/A.mkv", "A 导演剪辑版"]]) });
+  assert.deepEqual(
+    plan.items.map((i) => [i.srcPath, i.action, i.dstPath]),
+    [
+      ["inbox/A.mkv", "move", "Movies/A (2020)/A 导演剪辑版.mkv"],
+      ["inbox/A.chs.srt", "move", "Movies/A (2020)/A 导演剪辑版.chs.srt"],
+      ["inbox/A-thumb.jpg", "move", "Movies/A (2020)/A 导演剪辑版-thumb.jpg"],
+    ],
+  );
+  const d = units.find((u) => u.key === "local:inbox")!;
+  const renamed = planLocalUnit(d, { selected: true, renames: new Map([["inbox/D.mkv", "D v2.mkv"]]) });
+  assert.deepEqual(renamed.items.map((i) => [i.action, i.dstPath]), [["rename", "inbox/D v2.mkv"]]);
+});
