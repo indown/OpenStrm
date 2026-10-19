@@ -119,6 +119,7 @@ test("确认摘要：只有数字、任务名和固定措辞，不带文件名�
     scopePaths: [],
     mode: "manual",
     trigger: "agent",
+    naming: "tmdb",
     status: "ready",
     stage: "apply",
     stats: { ...emptyStats(), units: 2, planned: 5, plannedMkdir: 1, plannedDelete: 1, conflicts: 1 },

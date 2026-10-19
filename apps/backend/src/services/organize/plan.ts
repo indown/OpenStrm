@@ -95,7 +95,7 @@ const ART_KINDS = "poster|fanart|banner|logo|clearart|clearlogo|thumb|landscape|
 const RE_FOLDER_ART = new RegExp(`^(?:${ART_KINDS})\\d*\\.[a-z0-9]+$`, "i");
 const RE_SEASON_ART = new RegExp(`^season(?:\\d+|-all|-specials)(?:-(?:${ART_KINDS}))?\\.[a-z0-9]+$`, "i");
 
-function actionFor(src: string, dst: string): OrganizeAction {
+export function actionFor(src: string, dst: string): OrganizeAction {
   if (src === dst) return "keep";
   return dirOf(src) === dirOf(dst) ? "rename" : "move";
 }
@@ -228,7 +228,7 @@ function fileVars(file: UnitFile): TemplateVars {
  * 改名保留时依次试的目标名：先拿这个文件自己的版本标签区分（`凡人修仙传 - S01E135 - 2160p.mp4`，Emby 认这种多版本写法），
  * 标签都用上了还撞就 `(2)`、`(3)`。目标名里已经有的标签不再重复加
  */
-function renameVariants(dst: string, file: UnitFile): string[] {
+export function renameVariants(dst: string, file: UnitFile): string[] {
   const dir = dirOf(dst);
   const name = baseOf(dst);
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";

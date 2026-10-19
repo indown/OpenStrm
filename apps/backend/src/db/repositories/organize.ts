@@ -13,6 +13,7 @@ import type {
   OrganizeItemStatus,
   OrganizeMatch,
   OrganizeMatchMemory,
+  OrganizeNaming,
   OrganizeMediaType,
   OrganizeRun,
   OrganizeRunMode,
@@ -75,6 +76,7 @@ function toRun(row: RunRow): OrganizeRun {
     scopePaths: parseJson<string[]>(row.scopePaths, []),
     mode: row.mode === "auto" ? "auto" : row.mode === "review" ? "review" : "manual",
     trigger: coerce<OrganizeTrigger>(row.trigger, ["manual", "agent", "share", "follow", "offline", "monitor", "copy"], "manual"),
+    naming: row.naming === "local" ? "local" : "tmdb",
     status: coerce(row.status, RUN_STATUSES, "failed"),
     stage: row.stage === "revert" ? "revert" : "apply",
     stats: { ...emptyStats(), ...parseJson<Partial<OrganizeRunStats>>(row.stats, {}) },
@@ -158,6 +160,7 @@ export interface NewRun {
   hints?: OrganizeHint[];
   mode: OrganizeRunMode;
   trigger: OrganizeTrigger;
+  naming?: OrganizeNaming;
 }
 
 export function insertRun(run: NewRun): OrganizeRun {
@@ -172,6 +175,7 @@ export function insertRun(run: NewRun): OrganizeRun {
       hints: JSON.stringify(run.hints ?? []),
       mode: run.mode,
       trigger: run.trigger,
+      naming: run.naming ?? "tmdb",
       status: "planning",
       stats: JSON.stringify(emptyStats()),
       createdAt,

@@ -169,6 +169,13 @@
       "when": 1792006936014,
       "tag": "0023_follow_organized",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1792430643079,
+      "tag": "0024_local_naming",
+      "breakpoints": true
     }
   ]
 }

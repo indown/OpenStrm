@@ -98,6 +98,7 @@ export function AttentionList({ tasks, onOpen }: { tasks: TaskRow[] | null; onOp
                 </span>
                 <span className="text-xs text-muted-foreground tabular-nums">
                   {attentionSummary(a)} · {TRIGGER_LABEL[r.trigger]}
+                  {r.naming === "local" ? " · 按本地 strm 结构" : ""}
                 </span>
               </button>
             </li>

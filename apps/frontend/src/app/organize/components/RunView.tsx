@@ -26,7 +26,7 @@ import { usePolling } from "@/hooks/use-polling";
 import { apiErrorBody, apiErrorMessage } from "@/lib/axios";
 import { accountLabel } from "@/lib/drive";
 import { fmtTime } from "@/lib/format";
-import { RUN_STATUS_META, TRIGGER_LABEL, handPicked, isBusyStatus, notifyOrganizeChanged } from "@/lib/organize";
+import { NAMING_LABEL, RUN_STATUS_META, TRIGGER_LABEL, handPicked, isBusyStatus, notifyOrganizeChanged } from "@/lib/organize";
 import { AdjustDialog } from "./AdjustDialog";
 import { FailurePanel } from "./FailurePanel";
 import { MatchDialog } from "@/components/MatchDialog";
@@ -334,7 +334,7 @@ export function RunView({
   // 预览没做完（列目录 / 识别中途失败或被取消）：没有单元，也没有统计可看
   const previewFailed = units.length === 0 && run.stage === "apply" && (run.status === "failed" || run.status === "cancelled");
   const mirrorLeft = run.stats.failedByKind.mirror;
-  const unsure = units.filter((u) => u.selected && (!u.match || u.match.confidence !== "high")).length;
+  const unsure = run.naming === "local" ? 0 : units.filter((u) => u.selected && (!u.match || u.match.confidence !== "high")).length;
   const task = tasks?.find((t) => t.id === run.taskId) ?? null;
   const origin = task ? task.originPath.replace(/\/+$/, "") : "";
   const full = (p: string) => (origin ? `${origin}/${p}` : p);
@@ -354,6 +354,11 @@ export function RunView({
               <span className="text-xs text-muted-foreground">
                 {TRIGGER_LABEL[run.trigger]} · {fmtTime(run.createdAt * 1000)}
               </span>
+              {run.naming === "local" && (
+                <StatusBadge tone="info" title="名字和位置照本地 strm 的目录结构来，不经过 TMDB 识别">
+                  {NAMING_LABEL.local}
+                </StatusBadge>
+              )}
             </div>
             {task && (
               <div className="break-all text-xs text-muted-foreground">
@@ -487,6 +492,16 @@ export function RunView({
           </div>
         )}
 
+        {run.naming === "local" && run.status === "ready" && task && (task.removeExtraFiles || task.cronExpression) && (
+          <div className="flex items-start gap-1 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+            <span>
+              {task.removeExtraFiles ? "任务开着「删除本地多余文件」：执行前别跑同步，不然改过名的 strm 会被当多余删掉。" : ""}
+              {task.cronExpression ? "任务有定时同步：整理进行中那一轮会跳过，建议先把这次整理执行完。" : ""}
+            </span>
+          </div>
+        )}
+
         {run.log.length > 0 && (
           <div>
             <button type="button" className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" onClick={() => setShowLog((v) => !v)}>
@@ -557,6 +572,7 @@ export function RunView({
           version={version}
           ready={run.status === "ready"}
           editable={editable}
+          naming={run.naming}
           patching={patching}
           busy={locked}
           onPatch={(u, patch) => void patchUnit(u, patch)}
@@ -595,9 +611,12 @@ export function RunView({
             <AlertDialogDescription>
               {confirm === "apply" &&
                 (run.status === "ready"
-                  ? `会在网盘上${plannedText(run.stats)}，本地 strm 跟着挪。Emby 会把改名后的条目当新条目，播放记录可能丢失。${run.stats.plannedDelete > 0 ? `其中 ${run.stats.plannedDelete} 个文件是冲突选了删除 / 覆盖的，会进网盘回收站，撤销退不回来。` : ""}${unsure > 0 ? `有 ${unsure} 部识别把握不大，建议先确认。` : ""}`
+                  ? `会在网盘上${plannedText(run.stats)}，${run.naming === "local" ? "本地 strm 的内容改成新的网盘路径（名字和位置不变，Emby 不受影响）。" : "本地 strm 跟着挪。Emby 会把改名后的条目当新条目，播放记录可能丢失。"}${run.stats.plannedDelete > 0 ? `其中 ${run.stats.plannedDelete} 个文件是冲突选了删除 / 覆盖的，会进网盘回收站，撤销退不回来。` : ""}${unsure > 0 ? `有 ${unsure} 部识别把握不大，建议先确认。` : ""}`
                   : `只重试失败和没做的 ${applicable.count} 项（临时失败、风控中断、本地没跟上的），已完成的不会重做。${applicable.deletes ? `其中 ${applicable.deletes} 个是删除（冲突选了删掉 / 覆盖），会在网盘上删掉，进网盘回收站，撤销退不回来。` : ""}「预览后变了」「名字不被接受」的项不在里面，在上面的面板里单独处理。`)}
-              {confirm === "revert" && (reverting ? "把还没退回的项接着退回原处；已经退回的不会重做。" : "按记录把文件退回原来的位置和名字；已经被别的操作动过的项会跳过，之后可以放弃。")}
+              {confirm === "revert" &&
+                (reverting
+                  ? "把还没退回的项接着退回原处；已经退回的不会重做。"
+                  : `按记录把文件退回原来的位置和名字；已经被别的操作动过的项会跳过，之后可以放弃。${run.naming === "local" ? "本地 strm 也会挪回同步时的位置和名字。" : ""}`)}
               {confirm === "delete" && "只删这条记录，网盘和本地文件都不动；删掉之后就不能撤销这次整理了。"}
             </AlertDialogDescription>
           </AlertDialogHeader>

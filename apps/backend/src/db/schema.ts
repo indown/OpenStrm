@@ -388,6 +388,8 @@ export const organizeRuns = sqliteTable(
     hints: text("hints").notNull().default("[]"),
     mode: text("mode").notNull().default("manual"),
     trigger: text("trigger").notNull().default("manual"),
+    /** 命名来源：tmdb 按识别 + 模板；local 按本地 strm 的目录结构 */
+    naming: text("naming").notNull().default("tmdb"),
     status: text("status").notNull().default("planning"),
     /** apply 执行 / revert 撤销：开始撤销之后只能继续撤销 */
     stage: text("stage").notNull().default("apply"),

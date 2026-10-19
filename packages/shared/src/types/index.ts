@@ -95,6 +95,7 @@ export type {
   OrganizeRun,
   OrganizeRunDetail,
   OrganizeRunMode,
+  OrganizeNaming,
   OrganizeRunStage,
   OrganizeRunStats,
   OrganizeRunStatus,

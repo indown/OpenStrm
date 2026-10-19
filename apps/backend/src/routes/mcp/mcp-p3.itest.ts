@@ -1128,3 +1128,23 @@ test("刷新 TMDB 信息：organize_preview 带 refreshTmdb 跳过缓存；organ
     await client.close();
   }
 });
+
+test("按本地 strm 结构：organize_preview naming=local 不用 TMDB、run 带 naming；organize_adjust 拒绝换匹配 / 季集 / 刷新和「只选把握大的」", async () => {
+  const client = await connect(dailyToken);
+  try {
+    const preview = await call(client, "organize_preview", { task: "tv", subPath: "inbox", naming: "local" });
+    assert.equal(preview.isError, false, JSON.stringify(preview.data));
+    assert.equal(preview.data.state, "ready");
+    assert.equal((preview.data.run as Record<string, unknown>).naming, "local");
+    const runId = preview.data.runId as string;
+    const bad = await call(client, "organize_adjust", { run: runId, changes: [{ target: "u1", tmdbId: 999, mediaType: "tv" }] });
+    assert.equal(bad.isError, true, JSON.stringify(bad.data));
+    assert.equal(bad.data.code, "VALIDATION");
+    assert.match(String(bad.data.error), /本地 strm 结构/);
+    const confident = await call(client, "organize_adjust", { run: runId, select: "confident" });
+    assert.equal(confident.isError, true);
+    assert.match(String(confident.data.error), /把握之分/);
+  } finally {
+    await client.close();
+  }
+});

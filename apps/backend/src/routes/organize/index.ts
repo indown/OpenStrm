@@ -50,6 +50,8 @@ const createSchema = z.object({
   fresh: z.boolean().optional(),
   /** 刷新 TMDB 信息：这次预览的详情和季集跳过缓存重新拉 */
   refreshTmdb: z.boolean().optional(),
+  /** 命名来源：tmdb（默认）按识别 + 模板；local 按本地 strm 的目录结构 */
+  naming: z.enum(["tmdb", "local"]).optional(),
 });
 
 /** 令牌一次最多点这么多个目录（和 organize_preview 一样）：手动范围要逐个去网盘确认存在 */
@@ -151,7 +153,7 @@ export default async function (fastify: FastifyInstance) {
     if (isToken(request) && (body.paths?.length ?? 0) > TOKEN_PATHS_MAX) throw new HttpError(400, `一次最多整理 ${TOKEN_PATHS_MAX} 个目录`);
     guardSupersede(request, body.taskId, { subPath: body.subPath, paths: body.paths }, body.fresh);
     const trigger = isToken(request) ? "agent" : "manual";
-    const run = await createRun({ taskId: body.taskId, subPath: body.subPath, paths: body.paths, mode: "manual", trigger, refreshTmdb: body.refreshTmdb });
+    const run = await createRun({ taskId: body.taskId, subPath: body.subPath, paths: body.paths, mode: "manual", trigger, refreshTmdb: body.refreshTmdb, naming: body.naming });
     return reply.code(201).send(run);
   });
 

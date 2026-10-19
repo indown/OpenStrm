@@ -17,6 +17,7 @@ import { extSet } from "../strm/naming.js";
 import { notify } from "../notify.js";
 import { messageOf, retryableItem, revertPendingItem, revertWorkItem } from "./failures.js";
 import { TmdbClient, type TmdbApi, type TmdbClientOptions } from "./identify.js";
+import { isLocalUnitKey, type LocalUnit } from "./local-naming.js";
 import type { EpisodeFill, ScopeRoot } from "./plan.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
 import { AUDIO_EXTS, type ScopeEntry, type Unit } from "./units.js";
@@ -163,11 +164,14 @@ export function videoExtsOf(settings: AppSettings): Set<string> {
   return all;
 }
 
+/** 单元算不算「排上了」：勾选且识别出来；按本地 strm 结构的单元没有识别这一步，勾选就算 */
+export const unitActive = (u: Pick<OrganizeUnit, "key" | "selected" | "match">): boolean => u.selected && (!!u.match || isLocalUnitKey(u.key));
+
 export function computeStats(units: OrganizeUnit[], items: OrganizeItem[], stage: OrganizeRunStage): OrganizeRunStats {
   const stats = emptyStats();
   stats.units = units.length;
   for (const u of units) stats.confidence[u.match?.confidence ?? "none"]++;
-  const selectedUnits = new Set(units.filter((u) => u.selected && u.match).map((u) => u.key));
+  const selectedUnits = new Set(units.filter(unitActive).map((u) => u.key));
   for (const it of items) {
     if (it.kind !== "dir") stats.items++;
     const active = it.unitKey === "" || selectedUnits.has(it.unitKey);
@@ -279,6 +283,8 @@ export interface PlanState {
   outsideRoots: Set<string>;
   /** 单元的补空值（记住的识别、追更上次的整理，见 plan.ts 的 EpisodeFill）：重规划照用；人换了匹配就清掉，那是上一部作品的 */
   fills: Map<string, EpisodeFill>;
+  /** 按本地 strm 结构整理的 run（naming = local）：每个单元的文件映射，规划不走 planUnit 走 planLocalUnit；tmdb 的 run 没有 */
+  local?: Map<string, LocalUnit>;
 }
 
 export const planContext = (state: PlanState) => ({ settings: state.org, libraryType: state.task.organize?.libraryType });
@@ -332,7 +338,11 @@ export const WORK_ACTIONS = new Set<OrganizeItem["action"]>(["mkdir", "rename", 
 /** 只有勾选且识别出来的单元的项才动；目录项（unitKey 为空）随时动 */
 export function activeItemFilter(runId: string, known: OrganizeUnit[] = listUnits(runId)): (it: OrganizeItem) => boolean {
   const units = new Map(known.map((u) => [u.key, u]));
-  return (it) => it.unitKey === "" || !!(units.get(it.unitKey)?.selected && units.get(it.unitKey)?.match);
+  return (it) => {
+    if (it.unitKey === "") return true;
+    const u = units.get(it.unitKey);
+    return !!u && unitActive(u);
+  };
 }
 
 /** 移动项在源目录里的中间名字（先原地改名再挪）；同名的没有 */
@@ -358,7 +368,7 @@ export function dirMappings(task: TaskDefinition, units: OrganizeUnit[], items: 
   const out: DirMapping[] = [];
   const isFile = (it: OrganizeItem) => it.action === "rename" || it.action === "move";
   for (const u of units) {
-    if (u.match && u.dstRoot && u.rootPath && removed.has(u.rootPath) && u.rootPath !== u.dstRoot) {
+    if ((u.match || isLocalUnitKey(u.key)) && u.dstRoot && u.rootPath && removed.has(u.rootPath) && u.rootPath !== u.dstRoot) {
       out.push({ from: u.rootPath, to: u.dstRoot, root: true, items: items.filter((it) => it.unitKey === u.key && isFile(it)) });
     }
   }
@@ -445,7 +455,7 @@ export function revertability(run: OrganizeRun, items: OrganizeItem[] = listItem
  */
 export function failureGroups(run: OrganizeRun, items: OrganizeItem[], units: OrganizeUnit[]): OrganizeFailureGroup[] {
   if (!["done", "failed", "cancelled", "reverted"].includes(run.status)) return [];
-  const selected = new Set(units.filter((u) => u.selected && u.match).map((u) => u.key));
+  const selected = new Set(units.filter(unitActive).map((u) => u.key));
   const active = (it: OrganizeItem) => it.unitKey === "" || selected.has(it.unitKey);
   const isFile = (it: OrganizeItem) => it.action === "rename" || it.action === "move";
   const live = items.filter((it) => !it.givenUp);

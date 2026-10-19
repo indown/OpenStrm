@@ -2,11 +2,11 @@
  * 预览：建 run → 列范围 → 分单元 → 识别（TMDB）→ 规划 → 落库；预览里改单元 / 换匹配；换匹配弹框的 TMDB 搜索。
  */
 import { randomUUID } from "node:crypto";
-import type { OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
 import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
-import { getTask } from "../../db/repositories/tasks.js";
+import { listTasks, getTask } from "../../db/repositories/tasks.js";
 import { isAbortError } from "../../lib/errors.js";
 import { HttpError, upstreamError } from "../../lib/http-error.js";
 import { resolveInDataDir } from "../../paths.js";
@@ -22,7 +22,9 @@ import { idTagFromName, identifyUnit, type IdEvidence, type KnownId, type TmdbAp
 import { nfoEvidence } from "./nfo.js";
 import { hintFor, hintSource } from "./hints.js";
 import { duplicatePathFor, isStagingDir } from "../strm/staging.js";
-import { finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan } from "./plan.js";
+import { type UnitPlanInput, finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan } from "./plan.js";
+import { indexLocalStrm, mapLocalStrm, planLocalUnit, toSyntheticUnit } from "./local-naming.js";
+import { isTaskRunning } from "../task/registry.js";
 import { parseRules } from "./rules.js";
 import { resolveOrganizeSettings } from "./settings.js";
 import { isNamedAfter, looksLikeReleaseDir } from "./parse-name.js";
@@ -45,6 +47,8 @@ export interface CreateRunInput {
   trigger?: OrganizeTrigger;
   /** 刷新 TMDB 信息：这次预览每部作品的详情和季集都跳过缓存重新向 TMDB 拉（作品多会慢） */
   refreshTmdb?: boolean;
+  /** 命名来源：默认按 TMDB 识别 + 模板；local 按本地 strm 的目录结构（只有手动模式） */
+  naming?: OrganizeNaming;
 }
 
 export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
@@ -52,7 +56,13 @@ export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
   if (!task) throw new HttpError(404, `Task not found: ${input.taskId}`);
   const provider = providerForTask(task, "write");
   const settings = readAppSettings();
-  if (!deps.tmdb(settings)) throw new HttpError(400, "TMDB 未配置 apiKey，请先在设置中填入");
+  const naming: OrganizeNaming = input.naming ?? "tmdb";
+  if (naming === "tmdb" && !deps.tmdb(settings)) throw new HttpError(400, "TMDB 未配置 apiKey，请先在设置中填入");
+  if (naming === "local") {
+    // 只有手动：按本地结构没有「把握大小」可言，不自动执行；同步正在改同一棵树（会把改过名的 strm 当多余删掉）时不做
+    if (input.mode && input.mode !== "manual") throw new HttpError(400, "按本地 strm 结构整理只能手动预览", { code: "LOCAL_MANUAL_ONLY" });
+    if (isTaskRunning(task.id)) throw new HttpError(409, "任务正在同步，等它结束再按本地结构整理", { code: "TASK_SYNCING" });
+  }
   const rules = parseRules(resolveOrganizeSettings(settings).rules);
   if (rules.errors.length > 0) throw new HttpError(400, `识别词有语法错误：${rules.errors.join("；")}`);
   const scopePath = splitPath(input.subPath ?? "").join("/");
@@ -97,6 +107,7 @@ export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
     hints,
     mode: input.mode ?? "manual",
     trigger,
+    naming,
   });
   runStartedAt.set(run.id, startedAt);
   startJob(run.id, (job) => preview(job, run.id, { refreshTmdb: input.refreshTmdb === true }));
@@ -471,8 +482,8 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
   const provider = providerForTask(task, "write");
   const settings = readAppSettings();
   const org = resolveOrganizeSettings(settings);
-  const tmdb = deps.tmdb(settings, { fresh: opts.refreshTmdb });
-  if (!tmdb) throw new Error("TMDB 未配置 apiKey");
+  // 按本地 strm 结构的不识别，不要 TMDB；缺 key 的检查放在分支之后
+  const tmdb = run.naming === "local" ? null : deps.tmdb(settings, { fresh: opts.refreshTmdb });
   const signal = job.abort.signal;
   updateRun(runId, { startedAt: Math.floor(Date.now() / 1000) });
 
@@ -484,6 +495,12 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
   const walked = await walkScope(provider, task, run, signal);
   jobLog(job, `列到 ${walked.files} 个文件`);
   signal.throwIfAborted();
+
+  if (run.naming === "local") {
+    await previewLocal(job, runId, run, task, provider, settings, org, walked, signal);
+    return;
+  }
+  if (!tmdb) throw new Error("TMDB 未配置 apiKey");
 
   const rules = parseRules(org.rules).rules;
   const scopes = unitScopesOf(run);
@@ -498,28 +515,7 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
   });
   jobLog(job, `分成 ${units.length} 个作品单元`);
 
-  const state: PlanState = {
-    task,
-    settings,
-    org,
-    entries: walked.entries,
-    roots: walked.roots,
-    units: new Map(units.map((u) => [u.key, u])),
-    episodeTitles: new Map(),
-    identifyNotes: new Map(),
-    scopeRoots: scopeRootsOf(run, walked.roots),
-    listed: new Set(),
-    handPicked: handPicked(run.trigger),
-    scopes,
-    refPaths: [],
-    offlineRefs: rewriteOfflineSubPaths(task.id, [], true),
-    otherTaskRoots: accountTasks(provider.account.name)
-      .filter((t) => t.id !== task.id)
-      .map((t) => normalizePath(t.originPath)),
-    outsideRoots: new Set(),
-    fills: new Map(),
-  };
-  state.refPaths = [...rewriteFollowSubPaths(task.id, [], true), ...state.offlineRefs, ...rewriteCopyPaths(task.id, task.originPath, [], true)];
+  const state = newPlanState({ task, settings, org, run, walked, provider, units });
   const library = listLibraryEntries();
   const hints = getRunHints(runId);
   const rows: OrganizeUnit[] = [];
@@ -604,6 +600,112 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
   if (run.mode !== "manual") await afterAutoPreview(runId, task, run.mode, rows, stats);
 }
 
+/** 预览的规划状态，两种命名来源共用：范围里的条目、单元、删空目录的边界、追更 / 云下载 / 复制队列指着的路径…… */
+function newPlanState(args: {
+  task: TaskDefinition;
+  settings: PlanState["settings"];
+  org: PlanState["org"];
+  run: OrganizeRun;
+  walked: Walked;
+  provider: Parameters<typeof walkScope>[0];
+  units: Unit[];
+}): PlanState {
+  const { task, settings, org, run, walked, provider, units } = args;
+  const state: PlanState = {
+    task,
+    settings,
+    org,
+    entries: walked.entries,
+    roots: walked.roots,
+    units: new Map(units.map((u) => [u.key, u])),
+    episodeTitles: new Map(),
+    identifyNotes: new Map(),
+    scopeRoots: scopeRootsOf(run, walked.roots),
+    listed: new Set(),
+    handPicked: handPicked(run.trigger),
+    scopes: unitScopesOf(run),
+    refPaths: [],
+    offlineRefs: rewriteOfflineSubPaths(task.id, [], true),
+    otherTaskRoots: accountTasks(provider.account.name)
+      .filter((t) => t.id !== task.id)
+      .map((t) => normalizePath(t.originPath)),
+    outsideRoots: new Set(),
+    fills: new Map(),
+  };
+  state.refPaths = [...rewriteFollowSubPaths(task.id, [], true), ...state.offlineRefs, ...rewriteCopyPaths(task.id, task.originPath, [], true)];
+  return state;
+}
+
+/**
+ * 按本地 strm 的目录结构预览（naming = local）：不分单元、不识别，本地 strm 指着谁就把谁挪到本地的相对位置。
+ * 单元是本地的作品目录，没有 TMDB 匹配；勾选、按文件勾选、冲突办法照常，换匹配 / 季集 / 记住没有
+ */
+async function previewLocal(
+  job: Job,
+  runId: string,
+  run: OrganizeRun,
+  task: TaskDefinition,
+  provider: Parameters<typeof walkScope>[0],
+  settings: PlanState["settings"],
+  org: PlanState["org"],
+  walked: Walked,
+  signal: AbortSignal,
+): Promise<void> {
+  setProgress(job, "identify", 0, 0, "读本地 strm");
+  const index = await indexLocalStrm(task, listTasks(), { limit: ORGANIZE_LIMITS.MAX_FILES, signal });
+  const inScope = (rel: string) => walked.roots.some((r) => r === "" || rel === r || rel.startsWith(`${r}/`));
+  const mapping = mapLocalStrm(walked.entries, index, { videoExts: videoExtsOf(settings), inScope });
+  const s = mapping.summary;
+  const extras = [
+    s.duplicates ? `${s.duplicates} 个文件被多个 strm 指着（跳过）` : "",
+    s.outside ? `${s.outside} 个 strm 指着这次范围之外` : "",
+    s.missing ? `${s.missing} 个 strm 指着的文件已不在网盘上（strm 管理页能体检）` : "",
+    s.foreign ? `${s.foreign} 个 strm 的内容对不上这个任务（别的任务的、或手改过的）` : "",
+    s.truncated ? `本地 strm 超过 ${ORGANIZE_LIMITS.MAX_FILES} 个，只读了前面的` : "",
+  ].filter(Boolean);
+  jobLog(job, `本地 ${s.strms} 个 strm：对上范围里 ${s.matched} 个文件，${s.moving} 个要改名 / 挪动，${s.unchanged} 个已经一样${extras.length > 0 ? `；${extras.join("；")}` : ""}`);
+  if (task.removeExtraFiles) jobLog(job, "注意：任务开着「删除本地多余文件」，执行前别跑同步，不然改过名的 strm 会被当多余删掉");
+  if (task.cronExpression) jobLog(job, "注意：任务有定时同步，整理进行中那一轮会跳过；建议先把这次整理执行完");
+  signal.throwIfAborted();
+
+  const state = newPlanState({ task, settings, org, run, walked, provider, units: mapping.units.map(toSyntheticUnit) });
+  state.local = new Map(mapping.units.map((u) => [u.key, u]));
+  const rows: OrganizeUnit[] = [];
+  const plans: UnitPlan[] = [];
+  for (const lu of mapping.units) {
+    const plan = planLocalUnit(lu, { selected: true });
+    const row = toUnitRow(runId, state.units.get(lu.key)!, null, plan, 0);
+    row.selected = true;
+    row.parsedTitle = "";
+    row.parsedYear = "";
+    rows.push(row);
+    plans.push(plan);
+  }
+  jobLog(job, `按本地的作品目录分成 ${rows.length} 个单元`);
+
+  setProgress(job, "plan", 0, 0, "规划目标路径");
+  const extra = await listOutsideDstDirs(provider, task, walked.roots, plans, walked.entries, signal, state.listed);
+  state.entries = mergePreferId(walked.entries, extra);
+  const items = finalizeItems(plans, { entries: state.entries, scopeRoots: cleanupRoots(state, () => null), items: [], cleanupEmptyDirs: org.cleanupEmptyDirs });
+  const rmdirs = rmdirsOf(items);
+  for (const row of rows) row.referencedBy = refsOf(state, state.units.get(row.key)!, rmdirs);
+  planStates.set(runId, state);
+  replaceUnits(runId, rows);
+  replaceItems(runId, toItemRows(task, items));
+  const stats = computeStats(rows, listItems(runId), "apply");
+  const superseded = supersedeCovered(run);
+  if (superseded > 0) jobLog(job, `作废了 ${superseded} 个范围被这次覆盖的旧预览`);
+  jobLog(job, `预览完成：${stats.units} 个单元，${stats.planned} 项要动，${stats.conflicts} 项冲突`);
+  updateRun(runId, { status: "ready", stats, log: job.logs, error: "" });
+}
+
+/** 规划一个单元：按本地 strm 结构的 run 走 planLocalUnit，其余走 planUnit */
+function planUnitFor(state: PlanState, unit: Unit, input: Omit<UnitPlanInput, "unit">): UnitPlan {
+  const local = state.local?.get(unit.key);
+  if (local) return planLocalUnit(local, { selected: input.selected, excluded: input.excluded, resolutions: input.resolutions });
+  return planUnit({ unit, ...input }, planContext(state));
+}
+
 /** 自动整理：run 是 auto 模式、全是 high 且没冲突就直接执行；否则留着等人确认并通知 */
 async function afterAutoPreview(runId: string, task: TaskDefinition, mode: OrganizeRunMode, units: OrganizeUnit[], stats: OrganizeRunStats): Promise<void> {
   const run = getRun(runId);
@@ -656,20 +758,16 @@ function replanRun(run: OrganizeRun, state: PlanState, changed: Map<string, Orga
   for (const u of state.units.values()) {
     const r = changed.get(u.key) ?? rows.get(u.key);
     if (!r) continue;
-    const plan = planUnit(
-      {
-        unit: u,
-        match: r.match,
-        seasonOverride: r.seasonOverride,
-        episodeOffset: r.episodeOffset,
-        fill: state.fills.get(u.key),
-        episodeTitles: state.episodeTitles.get(u.key),
-        selected: r.selected,
-        excluded: excludedRel(state.task, r),
-        resolutions: resolutionsRel(state.task, r),
-      },
-      planContext(state),
-    );
+    const plan = planUnitFor(state, u, {
+      match: r.match,
+      seasonOverride: r.seasonOverride,
+      episodeOffset: r.episodeOffset,
+      fill: state.fills.get(u.key),
+      episodeTitles: state.episodeTitles.get(u.key),
+      selected: r.selected,
+      excluded: excludedRel(state.task, r),
+      resolutions: resolutionsRel(state.task, r),
+    });
     planned.push({ row: r, plan });
     plans.push(plan);
   }
@@ -810,6 +908,9 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
     const unitPatches = new Map<string, OrganizeUnitPatch>();
     for (const { key, ...patch } of input.units ?? []) {
       if (!state.units.has(key) || !rows.has(key)) throw new HttpError(404, "单元不存在");
+      if (state.local && (patch.match !== undefined || patch.seasonOverride !== undefined || patch.episodeOffset !== undefined || patch.refresh || patch.remember)) {
+        throw new HttpError(400, "按本地 strm 结构整理的清单没有识别结果，不能换匹配、改季集、刷新或记住", { code: "NOT_TMDB_RUN" });
+      }
       unitPatches.set(key, { ...unitPatches.get(key), ...patch });
     }
     // 换了匹配 / 季 / 集偏移的单元：文件的目标跟着变，原来给冲突选的办法对着的是旧目标（「覆盖」删的会是另一份），
@@ -920,20 +1021,16 @@ export async function patchPlan(runId: string, input: PlanPatch): Promise<{ chan
       const unit = state.units.get(row.key);
       if (!unit || sameUnitRow(row, next) || !next.selected || !next.match) continue;
       drafts.push(
-        planUnit(
-          {
-            unit,
-            match: next.match,
-            seasonOverride: next.seasonOverride,
-            episodeOffset: next.episodeOffset,
-            fill: picked.has(row.key) && !picked.get(row.key)?.keep ? null : state.fills.get(row.key),
-            episodeTitles: picked.get(row.key)?.episodeTitles ?? state.episodeTitles.get(row.key),
-            selected: true,
-            excluded: excludedRel(state.task, next),
-            resolutions: resolutionsRel(state.task, next),
-          },
-          planContext(state),
-        ),
+        planUnitFor(state, unit, {
+          match: next.match,
+          seasonOverride: next.seasonOverride,
+          episodeOffset: next.episodeOffset,
+          fill: picked.has(row.key) && !picked.get(row.key)?.keep ? null : state.fills.get(row.key),
+          episodeTitles: picked.get(row.key)?.episodeTitles ?? state.episodeTitles.get(row.key),
+          selected: true,
+          excluded: excludedRel(state.task, next),
+          resolutions: resolutionsRel(state.task, next),
+        }),
       );
     }
     const extra = await listDraftTargets(runId, state, drafts);
@@ -977,7 +1074,7 @@ export async function patchUnits(runId: string, keys: string[], patch: { selecte
   const { state } = editableRun(runId);
   const wanted = new Set(keys);
   const units = listUnits(runId)
-    .filter((r) => wanted.has(r.key) && r.match && state.units.has(r.key))
+    .filter((r) => wanted.has(r.key) && (r.match || state.local) && state.units.has(r.key))
     .map((r) => ({ key: r.key, ...(patch.selected !== undefined ? { selected: patch.selected } : {}), ...(patch.remember !== undefined ? { remember: patch.remember } : {}) }));
   const { changed } = await patchPlan(runId, { units });
   return { changed: changed.length };

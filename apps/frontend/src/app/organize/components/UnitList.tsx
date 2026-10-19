@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, RefreshCw, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
-import type { OrganizeConflictChoice, OrganizeItem, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
+import type { OrganizeConflictChoice, OrganizeItem, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -33,12 +33,15 @@ interface Row {
   noop: boolean;
 }
 
-/** 单元在列表里算哪一类：要处理（没识别 / 待执行时把握不大 / 冲突 / 失败 / 跳过里有问题）、要动的、已规范（只有不变的项） */
-function rowOf(unit: OrganizeUnit, counts: OrganizeUnitCounts, ready: boolean): Row {
+/**
+ * 单元在列表里算哪一类：要处理（没识别 / 待执行时把握不大 / 冲突 / 失败 / 跳过里有问题）、要动的、已规范（只有不变的项）。
+ * local：按本地 strm 结构的清单，单元没有识别这一步，「没识别」不算要处理
+ */
+function rowOf(unit: OrganizeUnit, counts: OrganizeUnitCounts, ready: boolean, local: boolean): Row {
   const m = unit.match;
-  const attention = !m || (ready && m.confidence !== "high") || counts.conflicts > 0 || counts.failed > 0 || counts.skipped > 0;
+  const attention = (!m && !local) || (ready && !!m && m.confidence !== "high") || counts.conflicts > 0 || counts.failed > 0 || counts.skipped > 0;
   const changing = counts.changing > 0;
-  const noop = !!m && unit.selected && !changing && counts.conflicts === 0 && counts.failed === 0 && counts.skipped === 0 && counts.excluded === 0;
+  const noop = (!!m || local) && unit.selected && !changing && counts.conflicts === 0 && counts.failed === 0 && counts.skipped === 0 && counts.excluded === 0;
   return { unit, counts, attention, changing, noop };
 }
 
@@ -58,6 +61,7 @@ export function UnitList({
   version,
   ready,
   editable,
+  naming,
   patching,
   busy,
   onPatch,
@@ -79,6 +83,8 @@ export function UnitList({
   /** 待执行：把握不大的也算要处理 */
   ready: boolean;
   editable: boolean;
+  /** 命名来源：local 的单元没有 TMDB 匹配，照样能勾选 / 执行 */
+  naming: OrganizeNaming;
   /** 修改还在保存的单元 */
   patching: ReadonlySet<string>;
   /** 有修改在保存：批量按钮先禁用 */
@@ -98,7 +104,8 @@ export function UnitList({
   const [query, setQuery] = useState("");
   const [byPath, setByPath] = useState(false);
   const [showNoop, setShowNoop] = useState(false);
-  const rows = useMemo(() => units.map((u) => rowOf(u, counts[u.key] ?? NO_COUNTS, ready)), [units, counts, ready]);
+  const local = naming === "local";
+  const rows = useMemo(() => units.map((u) => rowOf(u, counts[u.key] ?? NO_COUNTS, ready, local)), [units, counts, ready, local]);
   const tally: Record<UnitFilter, number> = {
     all: rows.length,
     attention: rows.filter((r) => r.attention).length,
@@ -114,7 +121,7 @@ export function UnitList({
   const folded = collapse ? ordered.filter((r) => r.noop) : [];
   const shown = collapse ? ordered.filter((r) => !r.noop) : ordered;
   // 批量勾选只对列出的、识别出来的单元（没识别的不能勾）
-  const matched = listed.filter((r) => r.unit.match);
+  const matched = listed.filter((r) => r.unit.match || local);
 
   return (
     <div className="space-y-3">
@@ -168,6 +175,7 @@ export function UnitList({
           stage={stage}
           version={version}
           editable={editable}
+          local={local}
           pending={patching.has(r.unit.key)}
           onToggle={(selected) => onPatch(r.unit, { selected })}
           onRemember={(remember) => onPatch(r.unit, { remember })}
@@ -207,6 +215,7 @@ function UnitCard({
   stage,
   version,
   editable,
+  local,
   pending,
   onToggle,
   onRemember,
@@ -222,6 +231,8 @@ function UnitCard({
   stage: OrganizeRunStage;
   version: number;
   editable: boolean;
+  /** 按本地 strm 结构的清单：没有识别，换匹配 / 季集 / 刷新 / 记住都不给 */
+  local: boolean;
   /** 这个单元的修改还在保存 */
   pending: boolean;
   onToggle: (selected: boolean) => void;
@@ -257,12 +268,18 @@ function UnitCard({
               (pending ? (
                 <Loader2 className="size-4 animate-spin text-muted-foreground" aria-label="保存中" />
               ) : (
-                <Checkbox checked={unit.selected} onCheckedChange={(v) => onToggle(v === true)} disabled={!m} title={m ? "勾上才会执行" : "没识别出来的不能执行"} />
+                <Checkbox checked={unit.selected} onCheckedChange={(v) => onToggle(v === true)} disabled={!m && !local} title={m || local ? "勾上才会执行" : "没识别出来的不能执行"} />
               ))}
-            <span className="break-all text-sm font-medium">{m ? `${m.title}${m.year ? ` (${m.year})` : ""}` : unit.parsedTitle || unit.rawName}</span>
-            <StatusBadge tone={conf.tone} title={conf.hint}>
-              {conf.label}
-            </StatusBadge>
+            <span className="break-all text-sm font-medium">{m ? `${m.title}${m.year ? ` (${m.year})` : ""}` : local ? unit.rawName : unit.parsedTitle || unit.rawName}</span>
+            {local ? (
+              <StatusBadge tone="info" title="名字和位置照本地 strm 的目录结构来，不经过 TMDB 识别">
+                按本地结构
+              </StatusBadge>
+            ) : (
+              <StatusBadge tone={conf.tone} title={conf.hint}>
+                {conf.label}
+              </StatusBadge>
+            )}
             {m && (
               <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                 {m.mediaType === "tv" ? <Tv className="size-3" /> : <Film className="size-3" />}
@@ -276,7 +293,7 @@ function UnitCard({
           </div>
           <div className="break-all text-xs text-muted-foreground">
             原：{unit.rootPath || "（任务根目录）"}
-            {unit.rootPath && unit.rawName !== baseName(unit.rootPath) ? ` · ${unit.rawName}` : ""}
+            {!local && unit.rootPath && unit.rawName !== baseName(unit.rootPath) ? ` · ${unit.rawName}` : ""}
           </div>
           {unit.dstRoot && <div className="break-all text-xs text-muted-foreground">→ {unit.dstRoot}</div>}
           {m && <div className="text-xs text-muted-foreground">{m.reason}</div>}
@@ -303,23 +320,25 @@ function UnitCard({
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
         {editable && (
           <>
-            <Button variant="outline" size="sm" className="h-8" onClick={onMatch} disabled={pending}>
-              <Search className="size-4" />
-              换匹配
-            </Button>
-            {m?.mediaType === "tv" && (
+            {!local && (
+              <Button variant="outline" size="sm" className="h-8" onClick={onMatch} disabled={pending}>
+                <Search className="size-4" />
+                换匹配
+              </Button>
+            )}
+            {!local && m?.mediaType === "tv" && (
               <Button variant="outline" size="sm" className="h-8" onClick={onAdjust} disabled={pending}>
                 <SlidersHorizontal className="size-4" />
                 季 / 集偏移
               </Button>
             )}
-            {m && (
+            {m && !local && (
               <Button variant="outline" size="sm" className="h-8" onClick={onRefresh} disabled={pending} title="不换作品：跳过缓存重新拉这部的详情和季集，按新信息重新规划">
                 <RefreshCw className="size-4" />
                 刷新 TMDB
               </Button>
             )}
-            {m && (
+            {m && !local && (
               <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
                 <Checkbox checked={unit.remember} onCheckedChange={(v) => onRemember(v === true)} disabled={pending} />
                 记住这个识别
@@ -327,7 +346,7 @@ function UnitCard({
             )}
           </>
         )}
-        {searchKeyword && (
+        {!local && searchKeyword && (
           <Button asChild variant="ghost" size="sm" className="h-8 text-muted-foreground">
             <Link href={searchHref(searchKeyword)} title={`到资源搜索页搜「${searchKeyword}」：缺集、想换个画质时用`}>
               <Telescope className="size-4" />

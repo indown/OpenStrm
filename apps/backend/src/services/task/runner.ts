@@ -11,6 +11,7 @@ import path from "node:path";
 import { catchError, defer, EMPTY, finalize, from, merge, mergeMap, retry, Subject, Subscription, takeUntil, tap, throwError, timer } from "rxjs";
 import type { FailedFileBrief, FileFailureKind, TaskDefinition, TaskStopInfo } from "@openstrm/shared";
 import { listAccounts } from "../../db/repositories/accounts.js";
+import { listRunsByStatus } from "../../db/repositories/organize.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { resolveInDataDir } from "../../paths.js";
@@ -143,6 +144,9 @@ export interface StartTaskOptions {
 export async function startTask(taskId: string, opts: StartTaskOptions = {}): Promise<StartTaskResult> {
   const task = getTask(taskId);
   if (!task) return fail(404, "Task not found");
+  // 这个任务上有整理在预览 / 执行 / 撤销：这一轮同步跳过。两边改的是同一棵树——同步会把整理改过名的 strm 当多余删掉、再按旧位置生成一份
+  const organizing = listRunsByStatus(["planning", "applying", "reverting"]).find((r) => r.taskId === taskId);
+  if (organizing) return fail(409, "任务有整理在进行中，这次同步跳过", `等整理 ${organizing.id} 结束再同步`);
   // 第一个 await 之前就占住：拉远端目录树可能要几分钟，只查 running 表挡不住这期间的第二次启动
   if (!reserveTaskStart(taskId)) return fail(409, "Task is already running");
   let outcome: StartOutcome = { status: 500, message: "启动失败" };

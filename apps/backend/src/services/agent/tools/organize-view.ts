@@ -9,6 +9,7 @@
  * 「覆盖」带出来的那个删除项（删的是目标位置原来那份）不编号：它不是这个单元的文件，改它什么也改变不了，要撤回就改冲突那一项的办法
  */
 import { createHash } from "node:crypto";
+import { isLocalUnitKey } from "../../organize/local-naming.js";
 import type {
   OrganizeConflictResolution,
   OrganizeFailureGroup,
@@ -167,6 +168,7 @@ export function runBrief(run: OrganizeRun, task: TaskDefinition | undefined, ext
     ...(run.stage === "revert" ? { stage: "revert" } : {}),
     ...extra,
     trigger: TRIGGER_TEXT[run.trigger],
+    ...(run.naming === "local" ? { naming: "local" } : {}),
     scope: scopeText(run),
     createdAt: fmtTime(run.createdAt * 1000),
     line: runLine(run),
@@ -181,17 +183,18 @@ export function runBrief(run: OrganizeRun, task: TaskDefinition | undefined, ext
  */
 export function confirmTextOf(run: OrganizeRun, units: OrganizeUnit[], task: TaskDefinition | undefined, outdated?: { kind: "changed" | "old"; at: number }): string {
   const s = run.stats;
-  const picked = units.filter((u) => u.selected && u.match);
+  const local = run.naming === "local";
+  const picked = units.filter((u) => u.selected && (u.match || local));
   const conf = { high: 0, medium: 0, low: 0 };
   let manual = 0;
   for (const u of picked) {
-    const c = u.match!.confidence;
+    const c = u.match?.confidence;
     if (c === "high" || c === "medium" || c === "low") conf[c]++;
-    if (u.match!.reason === "手动指定") manual++;
+    if (u.match?.reason === "手动指定") manual++;
   }
-  const unmatched = units.filter((u) => !u.match).length;
-  const skippedByChoice = units.filter((u) => u.match && !u.selected).length;
-  const referenced = units.filter((u) => u.selected && u.match).reduce((n, u) => n + u.referencedBy, 0);
+  const unmatched = local ? 0 : units.filter((u) => !u.match).length;
+  const skippedByChoice = units.filter((u) => (u.match || local) && !u.selected).length;
+  const referenced = picked.reduce((n, u) => n + u.referencedBy, 0);
   const parts: string[] = [];
   const head = [`改名 / 移动 ${movingFiles(run)} 个文件`, s.plannedMkdir ? `新建 ${s.plannedMkdir} 个目录` : "", s.plannedRmdir ? `删掉 ${s.plannedRmdir} 个腾空的目录` : ""]
     .filter(Boolean)
@@ -199,7 +202,9 @@ export function confirmTextOf(run: OrganizeRun, units: OrganizeUnit[], task: Tas
   parts.push(`在「${taskText(task)}」上执行整理（${scopeSummary(run)}）：${picked.length} 部作品，${head}。`);
   const confText = [conf.high ? `把握大 ${conf.high}` : "", conf.medium ? `一般 ${conf.medium}` : "", conf.low ? `把握小 ${conf.low}` : ""].filter(Boolean).join("、");
   parts.push(
-    `识别：${confText}${manual ? `（其中手动指定 ${manual}）` : ""}${unmatched ? `；${unmatched} 部认不出来，这次不动` : ""}${skippedByChoice ? `；${skippedByChoice} 部没勾，这次不动` : ""}。`,
+    local
+      ? `名字和位置照本地 strm 的目录结构来，不经过 TMDB 识别${skippedByChoice ? `；${skippedByChoice} 部没勾，这次不动` : ""}。`
+      : `识别：${confText}${manual ? `（其中手动指定 ${manual}）` : ""}${unmatched ? `；${unmatched} 部认不出来，这次不动` : ""}${skippedByChoice ? `；${skippedByChoice} 部没勾，这次不动` : ""}。`,
   );
   if (s.conflicts) parts.push(`还有 ${s.conflicts} 个冲突没处理，这些文件留在原处。`);
   if (s.plannedDelete) parts.push(`会删掉 ${s.plannedDelete} 个文件（进网盘回收站，撤销退不回来）。`);
@@ -221,7 +226,7 @@ const WHY_ORDER: UnitWhy[] = ["unmatched", "failed", "conflict", "delete", "low"
  */
 export function whyOf(u: OrganizeUnit, c: OrganizeUnitCounts | undefined, ready: boolean, unitItems: OrganizeItem[]): UnitWhy[] {
   const why: UnitWhy[] = [];
-  if (!u.match) why.push("unmatched");
+  if (!u.match && !isLocalUnitKey(u.key)) why.push("unmatched");
   if (c?.failed) why.push("failed");
   if (c?.conflicts) why.push("conflict");
   if (unitItems.some((it) => it.action === "delete")) why.push("delete");
@@ -326,6 +331,7 @@ export function unitView(
     match: u.match
       ? { type: u.match.mediaType, tmdbId: u.match.tmdbId, title: u.match.title, year: u.match.year, confidence: u.match.confidence, reason: u.match.reason }
       : null,
+    ...(isLocalUnitKey(u.key) ? { naming: "local", target: u.dstRoot || "（任务根）" } : {}),
     ...(candidates.length ? { candidates: candidates.map((x) => ({ type: x.mediaType, tmdbId: x.tmdbId, title: x.title, year: x.year })) } : {}),
     selected: u.selected,
     ...(u.seasonOverride !== null ? { season: u.seasonOverride } : {}),

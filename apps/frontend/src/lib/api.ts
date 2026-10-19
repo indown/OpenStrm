@@ -6,7 +6,7 @@
  */
 import axiosInstance from "./axios";
 import { streamSse } from "./sse";
-import type {
+import type { OrganizeNaming,
   AccountInfo,
   AgentCall,
   AgentInfo,
@@ -740,7 +740,7 @@ export const api = {
   },
   organize: {
     /** refreshTmdb：这次预览每部作品的详情和季集都跳过缓存重新拉 */
-    createRun: (input: { taskId: string; subPath?: string; paths?: string[]; refreshTmdb?: boolean }) =>
+    createRun: (input: { taskId: string; subPath?: string; paths?: string[]; refreshTmdb?: boolean; naming?: OrganizeNaming }) =>
       data(axiosInstance.post<OrganizeRun>("/api/organize/runs", input)),
     listRuns: (taskId?: string, limit = 30, offset = 0) =>
       data(axiosInstance.get<{ runs: OrganizeRun[] }>("/api/organize/runs", { params: { taskId: taskId || undefined, limit, offset: offset || undefined } })),

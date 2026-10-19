@@ -8,7 +8,7 @@ import { HttpError } from "../../lib/http-error.js";
 import { providerForTask } from "../drive/registry.js";
 import type { DriveProvider } from "../drive/types.js";
 import { retryableItem, revertWorkItem } from "./failures.js";
-import { ORGANIZE_LIMITS, handPicked, jobs, computeStats, planStates, WORK_ACTIONS, activeItemFilter, planFingerprint, releaseHeldCopies, applicability, revertability, failureGroups } from "./run-state.js";
+import { unitActive, ORGANIZE_LIMITS, handPicked, jobs, computeStats, planStates, WORK_ACTIONS, activeItemFilter, planFingerprint, releaseHeldCopies, applicability, revertability, failureGroups } from "./run-state.js";
 import { afterApply } from "./apply.js";
 import { afterRevert } from "./revert.js";
 
@@ -49,7 +49,7 @@ export function getRunSummary(runId: string): OrganizeRunSummary {
  * 要处理 = 没放弃的 failed，或者 done / reverted 但带着类别（本地没跟上 / 撤销在网盘那步失败）；跳过里用户自己的选择（单元没勾选）不算
  */
 function unitCounts(units: OrganizeUnit[], items: OrganizeItem[]): Record<string, OrganizeUnitCounts> {
-  const selected = new Map(units.map((u) => [u.key, u.selected && !!u.match]));
+  const selected = new Map(units.map((u) => [u.key, unitActive(u)]));
   const excluded = new Map(units.map((u) => [u.key, new Set(u.excluded)]));
   const out: Record<string, OrganizeUnitCounts> = {};
   for (const u of units) out[u.key] = { total: 0, changing: 0, conflicts: 0, skipped: 0, keep: 0, failed: 0, done: 0, reverted: 0, excluded: 0 };

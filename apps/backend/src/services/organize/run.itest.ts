@@ -34,6 +34,8 @@ import { listTasks, replaceTasks } from "../../db/repositories/tasks.js";
 import { HttpError } from "../../lib/http-error.js";
 import { DATA_DIR } from "../../paths.js";
 import { setDriveProviderFactory } from "../drive/registry.js";
+import { releaseTaskStart, reserveTaskStart } from "../task/registry.js";
+import { startTask } from "../task/runner.js";
 import { clearCopies, listCopies, saveCopies } from "../copy/queue.js";
 import { FakeDrive, withoutWalk } from "../../test/fake-drive.js";
 import type { TmdbDetails, TmdbEpisode, TmdbSearchResult } from "../tmdb.js";
@@ -144,7 +146,8 @@ async function untilStatus(id: string, statuses: OrganizeRun["status"][], tries 
     if (statuses.includes(r.status)) return r;
     await new Promise((res) => setTimeout(res, 20));
   }
-  throw new Error(`run ${id} 没有到 ${statuses.join("/")}：${getRunDetail(id).run.status}`);
+  const last = getRunDetail(id).run;
+  throw new Error(`run ${id} 没有到 ${statuses.join("/")}：${last.status}${last.error ? `（${last.error}）` : ""}\n${last.log.slice(-5).join("\n")}`);
 }
 
 before(() => {
@@ -2377,4 +2380,97 @@ test("刷新 TMDB 信息：按新译名重算、把握理由备选勾选照旧�
   const plain = await repreviewRun(again.id);
   assert.ok(!(await untilStatus(plain.id, ["ready"])).log.some((l) => l.includes("刷新 TMDB 信息")));
   assert.ok(!StubTmdb.freshCalls.includes(true), "不带标记的照旧走缓存");
+});
+
+test("按本地 strm 结构整理：本地改了名的 strm 决定网盘的名字和位置，字幕跟着；本地 strm 只改内容；撤销连本地一起退回；TMDB 的改法被拒；同步中互相让路", async () => {
+  // 模拟别的工具在本地整理过：strm 和字幕改名挪进作品目录，strm 内容仍指着网盘原路径
+  const local = (rel: string) => path.join(LOCAL, ...rel.split("/"));
+  fs.mkdirSync(local("怒呛人生 (2023)/Season 01"), { recursive: true });
+  fs.renameSync(local("inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.strm"), local("怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.strm"));
+  fs.renameSync(local("inbox/BEEF.S01.1080p/BEEF.S01E02.1080p.WEB-DL.strm"), local("怒呛人生 (2023)/Season 01/怒呛人生 - S01E02.strm"));
+  fs.renameSync(local("inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.chs.srt"), local("怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.chs.srt"));
+  // 两个 strm 指着同一个文件：跳过
+  writeLocalStrm("Movies/沙丘：第二部 (2024)/沙丘：第二部 (2024).strm", "tv/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv");
+  writeLocalStrm("Movies/沙丘 2/沙丘 2.strm", "tv/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv");
+  // 别的前缀的（别的任务 / 手改的）：不猜
+  fs.mkdirSync(local("别的"), { recursive: true });
+  fs.writeFileSync(local("别的/x.strm"), "/elsewhere/tv/inbox/x.mkv");
+
+  // 不需要 TMDB
+  setOrganizeDeps({ tmdb: () => null, notify: async () => true, retryDelayMs: 5 });
+  let run: OrganizeRun;
+  try {
+    run = await createRun({ taskId: "t1", subPath: "inbox", naming: "local" });
+  } finally {
+    setOrganizeDeps({ tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true), notify: async () => true, retryDelayMs: 5 });
+  }
+  assert.equal(run.naming, "local");
+  const ready = await untilStatus(run.id, ["ready"]);
+  // 两集 + 指着电影的两份 + 别的前缀的一份
+  assert.ok(ready.log.some((l) => l.includes("本地 5 个 strm：对上范围里 3 个文件，2 个要改名 / 挪动") && l.includes("1 个文件被多个 strm 指着") && l.includes("1 个 strm 的内容对不上")), ready.log.join("\n"));
+
+  const units = listUnits(run.id);
+  const beef = units.find((u) => u.key === "local:怒呛人生 (2023)")!;
+  assert.ok(beef, JSON.stringify(units.map((u) => u.key)));
+  assert.equal(beef.match, null);
+  assert.equal(beef.selected, true);
+  assert.equal(beef.dstRoot, "怒呛人生 (2023)");
+  assert.equal(beef.rootPath, "inbox/BEEF.S01.1080p");
+  const items = listItems(run.id);
+  const e01 = items.find((i) => i.srcPath === "/tv/inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv")!;
+  assert.equal(e01.action, "move");
+  assert.equal(e01.dstPath, "/tv/怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.mkv");
+  const sub = items.find((i) => i.srcPath.endsWith("BEEF.S01E01.1080p.WEB-DL.chs.srt"))!;
+  assert.equal(sub.dstPath, "/tv/怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.chs.srt");
+  const dune = items.find((i) => i.srcPath.endsWith("Dune.Part.Two.2024.2160p.WEB-DL.mkv"))!;
+  assert.equal(dune.action, "skip");
+  assert.match(dune.reason, /多个 strm/);
+  assert.ok(items.some((i) => i.action === "mkdir" && i.srcPath === "/tv/怒呛人生 (2023)/Season 01"));
+  assert.ok(!items.some((i) => i.srcPath.endsWith("tvshow.nfo")), "没有同名前缀的视频，tvshow.nfo 不动也不进清单");
+  assert.equal(getRunDetail(run.id).counts["local:inbox"]?.skipped, 1, "被两个 strm 指着的那项要算进单元的「跳过」，页面才会把它列进要处理");
+  assert.equal(ready.stats.planned, 5, "两集 + 字幕 + 两层目录");
+
+  // TMDB 那套改法没有对象；勾选 / 取消勾选照常
+  await assert.rejects(patchUnit(run.id, beef.key, { match: { mediaType: "tv", tmdbId: 999 } }), (err: unknown) => err instanceof HttpError && err.extra.code === "NOT_TMDB_RUN");
+  await assert.rejects(patchUnit(run.id, beef.key, { refresh: true }), (err: unknown) => err instanceof HttpError && err.extra.code === "NOT_TMDB_RUN");
+  const off = await patchUnit(run.id, beef.key, { selected: false });
+  assert.equal(off.selected, false);
+  assert.ok(listItems(run.id).filter((i) => i.unitKey === beef.key).every((i) => i.action === "skip"));
+  assert.equal((await patchUnits(run.id, [beef.key], { selected: true })).changed, 1, "批量勾选也认本地结构的单元");
+
+  // 执行：网盘按本地结构改名挪动，本地 strm 内容换成新路径（名字位置不变），本地字幕不动
+  await applyRun(run.id);
+  const done = await untilStatus(run.id, ["done"]);
+  assert.equal(done.stats.failed, 0, done.log.join("\n"));
+  assert.ok(drive.tree.get("/tv/怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.mkv"));
+  assert.ok(drive.tree.get("/tv/怒呛人生 (2023)/Season 01/怒呛人生 - S01E02.mkv"));
+  assert.ok(drive.tree.get("/tv/怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.chs.srt"));
+  assert.ok(drive.tree.get("/tv/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv"), "被两个 strm 指着的没动");
+  assert.ok(drive.tree.get("/tv/inbox/BEEF.S01.1080p/tvshow.nfo"), "没人跟的 nfo 留在原处");
+  assert.equal(localRead("怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.strm"), "/mnt/tv/怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.mkv");
+  assert.ok(localExists("怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.chs.srt"));
+  assert.ok(!localExists("inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.strm"));
+
+  // 撤销：网盘退回，本地 strm 也挪回同步时的位置和名字
+  await revertRun(run.id);
+  const reverted = await untilStatus(run.id, ["reverted"]);
+  assert.equal(reverted.stats.notReverted, 0, reverted.log.join("\n"));
+  assert.ok(drive.tree.get("/tv/inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv"));
+  assert.ok(drive.tree.get("/tv/inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.chs.srt"));
+  assert.equal(localRead("inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.strm"), "/mnt/tv/inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv");
+  assert.ok(!localExists("怒呛人生 (2023)/Season 01/怒呛人生 - S01E01.strm"));
+
+  // 同步正在跑：按本地结构的预览 / 执行都等它；反过来整理在跑时同步跳过这一轮
+  assert.ok(reserveTaskStart("t1"));
+  try {
+    await assert.rejects(createRun({ taskId: "t1", subPath: "inbox", naming: "local" }), (err: unknown) => err instanceof HttpError && err.extra.code === "TASK_SYNCING");
+  } finally {
+    releaseTaskStart("t1");
+  }
+  const planning = await createRun({ taskId: "t1", subPath: "inbox", naming: "local" });
+  const sync = await startTask("t1");
+  assert.equal(sync.status, 409);
+  assert.match(String(sync.body.message), /整理在进行/);
+  await untilStatus(planning.id, ["ready"]);
+  await assert.rejects(createRun({ taskId: "t1", subPath: "inbox", naming: "local", mode: "auto" }), (err: unknown) => err instanceof HttpError && err.extra.code === "LOCAL_MANUAL_ONLY");
 });

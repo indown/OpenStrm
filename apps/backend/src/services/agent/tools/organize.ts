@@ -16,8 +16,9 @@
  * 会动网盘的几个（执行、撤销、放弃、停下）必须点名 run，不按任务去猜最近一条。
  */
 import { setTimeout as sleep } from "node:timers/promises";
+import { isLocalUnitKey } from "../../organize/local-naming.js";
 import { z } from "zod";
-import type { OrganizeItem, OrganizeRun, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeNaming, OrganizeItem, OrganizeRun, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
 import { getRun, listItems, listRunsByStatus, listUnits } from "../../../db/repositories/organize.js";
 import { readAppSettings } from "../../../db/repositories/settings.js";
 import { getTask } from "../../../db/repositories/tasks.js";
@@ -461,7 +462,7 @@ const PREVIEW_PATHS_MAX = 50;
 export const organizePreviewTool = defineTool({
   name: "organize_preview",
   title: "整理预览",
-  description: `对一个同步任务的网盘目录做一次整理预览：列目录、按 TMDB 识别、算出改名 / 挪动的清单，不改网盘。范围：不给就是整个任务；subPath 给一个子目录；paths 给多个（都相对任务的网盘目录）。again 填一次旧整理的 runId，就按它原来的范围重新预览。这个范围里已经有待确认的清单时不会重做（那可能是用户在界面上改了一半的），直接把它们列出来；确实要按现在的网盘重新预览传 fresh: true，会作废它们：要「改网盘」档，**先征得用户同意**。${INLINE_WAIT_MS / 1000} 秒内做完就直接带上清单的前几个单元，做不完给 runId，用 organize_status 等。任务上已有整理在进行时返回那一次的状态。`,
+  description: `对一个同步任务的网盘目录做一次整理预览：列目录、按 TMDB 识别、算出改名 / 挪动的清单，不改网盘。范围：不给就是整个任务；subPath 给一个子目录；paths 给多个（都相对任务的网盘目录）。again 填一次旧整理的 runId，就按它原来的范围重新预览。naming: local 是「按本地 strm 的目录结构」：用户用别的工具在本地改好了 strm 的名字和目录，让网盘跟着改成同样的结构，不识别、不套模板、不删网盘文件。这个范围里已经有待确认的清单时不会重做（那可能是用户在界面上改了一半的），直接把它们列出来；确实要按现在的网盘重新预览传 fresh: true，会作废它们：要「改网盘」档，**先征得用户同意**。${INLINE_WAIT_MS / 1000} 秒内做完就直接带上清单的前几个单元，做不完给 runId，用 organize_status 等。任务上已有整理在进行时返回那一次的状态。`,
   scope: "run",
   toolset: "organize",
   annotations: { readOnly: false, destructive: false, idempotent: true, openWorld: true },
@@ -472,12 +473,17 @@ export const organizePreviewTool = defineTool({
     again: runArg.optional().describe("按这次旧整理原来的范围重新预览（填它的 runId）"),
     fresh: z.boolean().optional().describe("范围里已有待确认的清单时也重新预览（会作废它们），默认 false"),
     refreshTmdb: z.boolean().optional().describe("刷新 TMDB 信息：这次预览每部作品的详情和季集都跳过缓存重新拉（TMDB 上改了译名时用），作品多会慢；默认 false"),
+    naming: z
+      .enum(["tmdb", "local"])
+      .optional()
+      .describe("命名来源：tmdb（默认）按 TMDB 识别 + 命名模板；local 按本地 strm 的目录结构——用户已经用别的工具在本地改好了 strm 的名字和目录，让网盘跟着改成同样的相对结构，不识别、不套模板、永远不删网盘文件。任务正在同步时会拒绝，执行前别让同步跑"),
   }),
   async run(args, ctx) {
     let task: TaskDefinition;
     let subPath: string | undefined;
     let paths: string[] | undefined;
     let trigger: OrganizeRun["trigger"] = "agent";
+    let naming: OrganizeNaming | undefined = args.naming;
     if (args.again?.trim()) {
       const old = getRun(args.again.trim());
       if (!old) throw new ToolError("RUN_NOT_FOUND", `找不到整理记录 ${args.again}`, "用 organize_list 看有哪些整理。");
@@ -486,8 +492,9 @@ export const organizePreviewTool = defineTool({
       task = t;
       subPath = old.scopePath || undefined;
       paths = old.scopePaths.length > 0 ? old.scopePaths : undefined;
-      // 来源照旧：自动触发的新增路径保留新增路径的语义（和整理页的「重新预览」一样）
+      // 来源照旧：自动触发的新增路径保留新增路径的语义（和整理页的「重新预览」一样）；命名来源没明说就照旧
       trigger = old.trigger;
+      naming ??= old.naming;
     } else {
       if (!args.task?.trim()) throw new ToolError("VALIDATION", "task 和 again 至少给一个", "用 tasks_list 看有哪些任务。");
       if (args.subPath?.trim() && args.paths?.length) throw new ToolError("VALIDATION", "subPath 和 paths 只给一个");
@@ -517,8 +524,8 @@ export const organizePreviewTool = defineTool({
       confirmFirst(ctx, `在「${taskText(task)}」上重新预览，会作废 ${existing.length} 份待确认的整理清单；在界面上对它们做过的修改也一起丢掉。`);
     }
 
-    requireTmdb();
-    const run = await createRun({ taskId: task.id, subPath, paths, mode: "manual", trigger, refreshTmdb: args.refreshTmdb === true });
+    if ((naming ?? "tmdb") === "tmdb") requireTmdb();
+    const run = await createRun({ taskId: task.id, subPath, paths, mode: "manual", trigger, refreshTmdb: args.refreshTmdb === true, naming });
     await waitRun(run.id, INLINE_WAIT_MS, ctx);
     const now = getRun(run.id)!;
     if (now.status === "planning") {
@@ -582,6 +589,14 @@ export const organizeAdjustTool = defineTool({
         "这份清单是服务上次启动时做的，单元结构没保存下来，改不了",
         `不改可以直接执行；要改就用 organize_preview(again: "${run.id}", fresh: true) 重新预览。`,
       );
+    }
+    if (run.naming === "local") {
+      // 按本地 strm 结构的清单没有识别这一步：换匹配 / 季集 / 记住 / 刷新都没有对象，「只选把握大的」也没有把握之分
+      if (args.select === "confident") throw new ToolError("VALIDATION", "按本地 strm 结构整理的清单没有把握之分，select 只能 all / none");
+      const bad = (args.changes ?? []).findIndex((c) => c.tmdbId !== undefined || c.mediaType !== undefined || c.season !== undefined || c.episodeOffset !== undefined || c.remember !== undefined || c.refresh !== undefined);
+      if (bad !== -1) {
+        throw new ToolError("VALIDATION", `changes[${bad}]：按本地 strm 结构整理的清单没有识别结果，不能换匹配、改季集、记住或刷新 TMDB 信息`, "这种清单只能勾选 / 取消勾选单元和文件、给冲突选办法。");
+      }
     }
     const unitsBefore = listUnits(run.id);
     const itemsBefore = listItems(run.id);
@@ -660,7 +675,7 @@ function toPlanPatch(args: AdjustArgs, refs: RunRefs, rows: Map<string, Organize
       if (c.mediaType && !c.tmdbId) throw new ToolError("VALIDATION", `${at}：mediaType 要和 tmdbId 一起给`);
       const mediaType = c.mediaType ?? row.match?.mediaType;
       if (c.tmdbId && !mediaType) throw new ToolError("VALIDATION", `${at}：这个单元还没识别出来，换匹配要同时给 mediaType`);
-      if (c.selected === true && !row.match && !c.tmdbId) {
+      if (c.selected === true && !row.match && !c.tmdbId && !isLocalUnitKey(unitKey)) {
         throw new ToolError("VALIDATION", `${at}：没识别出来的单元不能勾`, "先用 tmdb_search 找到它，再在同一条里给 tmdbId 和 mediaType。");
       }
       if (c.refresh === true && !row.match && !c.tmdbId) {

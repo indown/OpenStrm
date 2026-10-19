@@ -24,6 +24,12 @@ export type OrganizeRunStatus =
 export type OrganizeRunMode = "manual" | "review" | "auto";
 
 /**
+ * 命名来源：tmdb 按 TMDB 识别 + 模板；local 按本地 strm 的目录结构——用别的工具在本地改好了 strm 的名字和目录，
+ * 让网盘跟着改成同样的相对结构，不识别、不套模板（只有手动模式，永远不删网盘文件）
+ */
+export type OrganizeNaming = "tmdb" | "local";
+
+/**
  * 谁发起的：手动、智能体、转存、追更、云下载、网盘监控、复制到 OpenList。
  * manual 和 agent 是人（或替人办事的 agent）挑的目录，范围照手动的规则来；其余是自动触发给的新增路径
  */
@@ -232,6 +238,7 @@ export interface OrganizeRun {
   scopePaths: string[];
   mode: OrganizeRunMode;
   trigger: OrganizeTrigger;
+  naming: OrganizeNaming;
   status: OrganizeRunStatus;
   stage: OrganizeRunStage;
   stats: OrganizeRunStats;

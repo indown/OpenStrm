@@ -8,6 +8,7 @@ import { getTask } from "../../db/repositories/tasks.js";
 import { isAbortError } from "../../lib/errors.js";
 import { HttpError } from "../../lib/http-error.js";
 import { providerForTask } from "../drive/registry.js";
+import { isTaskRunning } from "../task/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
 import { learnFollowOrganized, rewriteFollowSubPaths } from "../follow/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
@@ -493,6 +494,8 @@ export async function applyRun(runId: string, ids?: string[]): Promise<OrganizeR
   if (!can.ok) throw new HttpError(409, can.reason ?? "不能执行");
   const busy = listRunsByStatus(["applying", "reverting", "planning"]).find((r) => r.taskId === run.taskId);
   if (busy) throw new HttpError(409, `任务已有一次整理在进行中（${busy.id}）`, { runId: busy.id });
+  // 按本地结构的清单是照本地 strm 算的：同步正跑着会把改过名的 strm 当多余删掉，等它结束
+  if (run.naming === "local" && isTaskRunning(run.taskId)) throw new HttpError(409, "任务正在同步，等它结束再执行按本地结构的整理", { code: "TASK_SYNCING" });
   updateRun(runId, { status: "applying", error: "", startedAt: run.startedAt ?? Math.floor(Date.now() / 1000), finishedAt: null });
   startJob(
     runId,

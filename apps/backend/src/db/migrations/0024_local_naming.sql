@@ -1,0 +1,1 @@
+ALTER TABLE `organize_runs` ADD `naming` text DEFAULT 'tmdb' NOT NULL;

@@ -367,3 +367,21 @@ test("刷新 TMDB 信息：单元按新译名重算，没变就什么都不动�
   assert.ok(!StubTmdb.freshCalls.includes(true), "不带标记的照旧走缓存");
   assert.ok(!plainReady.run.log.some((l) => l.includes("刷新 TMDB 信息")));
 });
+
+test("命名来源：naming=local 建的 run 记着来源、不要 TMDB；没有本地 strm 就是 0 个单元；别的值 400", async () => {
+  const run = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh", naming: "local" }, 201);
+  assert.equal(run.naming, "local");
+  const ready = await untilStatus(run.id, ["ready"]);
+  assert.equal(ready.run.naming, "local");
+  assert.equal(ready.units.length, 0);
+  // 前面的测试执行过一次整理，本地留着一个指着别处的 strm：对上范围里 0 个文件
+  assert.ok(ready.run.log.some((l) => l.includes("个 strm：对上范围里 0 个文件")), ready.run.log.join("\n"));
+  const again = await json<OrganizeRun>("POST", `/api/organize/runs/${run.id}/repreview`, {}, 201);
+  assert.equal(again.naming, "local", "重新预览沿用命名来源");
+  await untilStatus(again.id, ["ready"]);
+  const bad = await app.inject({ method: "POST", url: "/api/organize/runs", headers: auth, payload: { taskId: "t1", subPath: "refresh", naming: "bogus" } });
+  assert.equal(bad.statusCode, 400);
+  const plain = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh" }, 201);
+  assert.equal(plain.naming, "tmdb");
+  await untilStatus(plain.id, ["ready"]);
+});

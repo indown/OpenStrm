@@ -4,9 +4,9 @@ import * as React from "react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Bookmark, FolderOpen, FolderTree, History, ListChecks, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { AlertTriangle, Bookmark, FolderOpen, FolderTree, History, ListChecks, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { toast } from "sonner";
-import type { OrganizeRun } from "@openstrm/shared";
+import type { OrganizeNaming, OrganizeRun } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { InputGroup, InputGroupButton, InputGroupInput } from "@/components/ui/input-group";
@@ -87,6 +87,8 @@ function OrganizeContent() {
   const [creating, setCreating] = useState(false);
   /** 这次预览跳过 TMDB 缓存（TMDB 上改了译名时用）；发起之后复位，不记忆 */
   const [refreshTmdb, setRefreshTmdb] = useState(false);
+  /** 命名来源：按 TMDB 识别 + 模板，或按本地 strm 的目录结构 */
+  const [naming, setNaming] = useState<OrganizeNaming>("tmdb");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
 
@@ -199,10 +201,11 @@ function OrganizeContent() {
     setCreating(true);
     try {
       const scope = list.length > 1 ? { taskId, paths: list } : { taskId, subPath: list[0] ?? "" };
-      const run = await api.organize.createRun(refreshTmdb ? { ...scope, refreshTmdb: true } : scope);
+      const local = naming === "local";
+      const run = await api.organize.createRun({ ...scope, ...(local ? { naming: "local" as const } : refreshTmdb ? { refreshTmdb: true } : {}) });
       setRefreshTmdb(false);
       openRun(run.id);
-      toast.success(refreshTmdb ? "开始识别（刷新 TMDB 信息），请稍候" : "开始识别，请稍候");
+      toast.success(local ? "开始按本地 strm 的结构算清单，请稍候" : refreshTmdb ? "开始识别（刷新 TMDB 信息），请稍候" : "开始识别，请稍候");
       notifyOrganizeChanged();
     } catch (err) {
       toastRunError(err, "预览失败", openRun);
@@ -288,7 +291,7 @@ function OrganizeContent() {
           <div className="flex flex-col items-end justify-between gap-1.5">
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap">
-                <Checkbox checked={refreshTmdb} onCheckedChange={(v) => setRefreshTmdb(v === true)} disabled={!task || creating} />
+                <Checkbox checked={refreshTmdb} onCheckedChange={(v) => setRefreshTmdb(v === true)} disabled={!task || creating || naming === "local"} />
                 刷新 TMDB 信息
               </label>
               <FieldHint>跳过缓存，重新拉每部作品的详情和季集：TMDB 上改了译名、海报时用；作品多会慢一些。</FieldHint>
@@ -333,6 +336,36 @@ function OrganizeContent() {
             </div>
           )}
         </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
+          <span className="font-medium">命名来源</span>
+          <Select value={naming} onValueChange={(v) => setNaming(v as OrganizeNaming)} disabled={!task || creating}>
+            <SelectTrigger className="h-8 w-60 text-xs" aria-label="命名来源">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="tmdb">按 TMDB 识别 + 命名模板</SelectItem>
+              <SelectItem value="local">按本地 strm 的目录结构</SelectItem>
+            </SelectContent>
+          </Select>
+          {naming === "local" && (
+            <span className="flex items-center gap-1.5">
+              本地已经用别的工具改好 strm 的名字和目录：网盘跟着改成同样的结构，不识别、不套模板、不删网盘文件
+              <FieldHint>
+                按 strm 的内容找到网盘上的源文件，目标就是这个 strm 在本地的相对路径（保留源文件的扩展名）；同目录同名前缀的字幕 / nfo / 图片跟着视频走。
+                一个文件被多个 strm 指着、或本地没有对应 strm 的，都不动。撤销时本地 strm 会一并挪回同步时的位置。
+              </FieldHint>
+            </span>
+          )}
+        </div>
+        {naming === "local" && task && (task.removeExtraFiles || task.cronExpression) && (
+          <div className="flex items-start gap-1 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+            <span>
+              {task.removeExtraFiles ? "这个任务开着「删除本地多余文件」：执行前别跑同步，不然改过名的 strm 会被当多余删掉。" : ""}
+              {task.cronExpression ? "任务有定时同步：整理进行中那一轮会跳过，但建议先把这次整理执行完。" : ""}
+            </span>
+          </div>
+        )}
         <p className="text-xs text-muted-foreground">预览只读网盘和 TMDB，不改任何东西；确认清单后点「执行」才会在网盘上改名 / 移动，本地 strm 会跟着走。</p>
       </section>
 

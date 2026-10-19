@@ -601,6 +601,13 @@
         },
         "refreshTmdb": {
           "type": "boolean"
+        },
+        "naming": {
+          "type": "string",
+          "enum": [
+            "tmdb",
+            "local"
+          ]
         }
       },
       "additionalProperties": false

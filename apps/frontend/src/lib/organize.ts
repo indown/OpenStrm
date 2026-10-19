@@ -1,7 +1,7 @@
 /**
  * 整理页的展示映射：run 状态、置信度、动作的文案与配色。
  */
-import type {
+import type { OrganizeNaming,
   OrganizeAction,
   OrganizeAttentionReason,
   OrganizeConfidence,
@@ -105,6 +105,12 @@ export const TRIGGER_LABEL: Record<OrganizeTrigger, string> = {
   offline: "云下载",
   monitor: "监控",
   copy: "复制到 OpenList",
+};
+
+/** 命名来源 */
+export const NAMING_LABEL: Record<OrganizeNaming, string> = {
+  tmdb: "按 TMDB 识别",
+  local: "按本地 strm 结构",
 };
 
 export const baseName = (p: string): string => p.slice(p.lastIndexOf("/") + 1);

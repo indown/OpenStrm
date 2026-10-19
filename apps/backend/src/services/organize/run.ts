@@ -58,6 +58,7 @@ export async function repreviewRun(runId: string, opts: { refreshTmdb?: boolean 
     hints: getRunHints(runId),
     mode: "manual",
     trigger: run.trigger,
+    naming: run.naming,
     refreshTmdb: opts.refreshTmdb === true,
   });
 }
