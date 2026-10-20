@@ -1,6 +1,6 @@
 # 媒体探测：读网盘视频的编码 / 分辨率 / HDR / 音轨（mediainfo.js）
 
-> 状态：2026-10-19 核心（9cd07b1）和 Emby 回填（327dfec）都已实施，随 **v2.18.0-rc.3**（35535ad）发出：Release 四作业 + CI@v2 全绿，rc 镜像 11f89afcc6d3（amd64 / arm64），GitHub Release 是预发布；latest 仍是 v2.17.0，main 未动在 43a627c。
+> 状态：2026-10-19 核心（9cd07b1）和 Emby 回填（327dfec）都已实施，随 **v2.18.0-rc.3**（35535ad，rc 镜像 11f89afcc6d3）发出；夜里真机补验后的修补（123cfdd：直链临时故障重试 + 预算 96 MB、Emby 回填 pending 列表）随 **v2.18.0-rc.4**（41ec8f3）发出：Release 四作业 + CI@v2 全绿，rc 镜像 0f6a4d462bd1（amd64 / arm64），GitHub Release 是预发布；latest 仍是 v2.17.0（3267a1383fbf），main 未动在 43a627c。没有新迁移。
 > 来源：分析「我们的整理哪里做得不好」时发现技术标签只从文件名解析；用户问 tmm 能不能识别编码、我们能不能内置 MediaInfo、mediainfo.js 是不是最优解，最后说「按你的推荐开始，但网盘的清晰度不准确」——所以不用网盘接口那一层，以探测为准，Emby 回填做第二步。
 
 ## 决定
@@ -74,7 +74,7 @@
 - **OpenList**：本机 openlist 容器（Local 存储，PUID/PGID=0）挂 ffmpeg 造的三个小文件（H.264 1080p AAC 2.0 / HEVC 720p 10bit AAC 5.1 / mp4 H.264 AC3 5.1），实验账号 + 任务 `src/tv`：预览 → 按单元探测 3 个 2.1 秒全读到，标签 / 语言 / 声道都对；OpenList 的 `/d/` 直链回 206。
 - **整库自动探测的耗时（夸克）**：设置开 `probe: missing`、剧集模板加 `[ - {resolution}]`，预览 `黑白清道夫 (2026)` 整部剧（10 集，每集 4 GB 4K HEVC + DDP + 字幕轨）：**9 分钟**，读到 6 个、4 个「读取量超过上限（48 次 / 64 MB）」。追踪：夸克直链只有约 1 MB/s（2 MB 一块要 1.5–2 秒），MediaInfoLib 从头顺序读到每条轨（含字幕轨）的首个包才停，这些文件要 42–66 MB，所以每个 45–70 秒。还碰到两次直链半路断开 / 20 秒超时（夸克对连续读会抖）。
 - **能不能更早停**：自己驱动 `Open_Buffer_Continue` 看状态位——115 的 remux 上 `Filled` 位和最终完成一样都在 32 MB 处才亮（读到每条轨的首包之前它不认为「填好了」），所以没有「读完轨道表就停」的捷径；WASM 版没有 ParseSpeed。
-- **改法**：预算放到 96 MB / 64 次 / 240 秒；每块请求超时 20 → 60 秒；一次读遇到超时 / 服务端断开（ECONNABORTED / ECONNRESET / aborted / socket hang up）换连接重试一次。真实成本写进文档：夸克上一个 4K 文件一两分钟，1080p 的 mp4 几秒；自动探测默认关，开了整库第一次预览很慢。
+- **改法**（123cfdd，随 rc.4 发出）：预算放到 96 MB / 64 次 / 240 秒；每块请求超时 20 → 60 秒；一次读遇到超时 / 服务端断开（ECONNABORTED / ECONNRESET / aborted / socket hang up）换连接重试一次。真实成本写进文档：夸克上一个 4K 文件一两分钟，1080p 的 mp4 几秒；自动探测默认关，开了整库第一次预览很慢。
 - **Emby 回填**：本机 Emby 容器（emby-lab.sh）+ strm 指向容器里挂的同一批小文件。Emby 入库时 `MediaStreams` 是空的（size 0），`Items/{id}/Refresh` 也不分析；对 strm 条目要等首次播放（`PlaybackInfo`）才 ffprobe 并持久化。所以回填加了 pending：入库时没流的条目记下 id（最多 200 条、30 天），之后每轮按 id 再问，有了流再回填；条目没了也拿掉。
 
 ## 还没做的
