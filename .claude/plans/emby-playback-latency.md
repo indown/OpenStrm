@@ -114,3 +114,36 @@ strm 指向容器里一个 ffmpeg 生成的 5 秒 mp4（像 Emby 主机挂着网
 - `direct-link.ts` 成功分支带 `timings { pathMs, linkMs }`；`redirect.ts` 的 302 日志带 `lookupMs / pathMs / linkMs / totalMs`，响应头 `Server-Timing: lookup;dur=…, path;dur=…, link;dur=…, total;dur=…`，缓存命中是 `cache;desc=hit, total;dur=…`；`playback-info.ts` 记 `embyMs` 和流数（0 = Emby 刚才探测失败），响应头 `Server-Timing: emby;dur=…, streams;desc=N`。
 - `POST /api/emby/playback-diagnose`（`services/emby/diagnose.ts`，deps 可注入）：没指定 id 就在最近入库 50 条里挑还没探测过的 strm，服务端问一次 PlaybackInfo（`requestPlaybackInfo`，只带 API Key）、再调 `resolveEmbyPath` 换直链，把两段用时、流数前后、失败原因回给前端；设置页 Emby 一节的「起播诊断」块（`PlaybackDiagnoseButton`）把结论写成人话。shared 多了 `PlaybackDiagnosis` / `DirectLinkFailure`（后端 `ResolveFailure` 改成它的别名）。
 - 真 Emby 验过：自动挑到唯一没探过的那条（132 ms、流 0 → 2、probed），探过的 14 ms；不存在的 id 回 404。
+
+### 第 1 步实施记录：入库后预热（2026-10-21，e90a1d2）
+
+- 只做「预热」不做「写回」（实验记录里 UpdateItem 不落）。`library-new.ts` 每轮在 pending（入库时没流的条目）里挑还没预热过的，服务端 `requestPlaybackInfo`（只带 API Key）一次一条、隔 3 秒、一轮最多 5 条；先预热再按 id 看一眼，这轮探好的同一轮就回填探测缓存。探测不到的（Emby 读不到 strm 指向的位置）记 `warmedAt`，隔 24 小时再试，不每轮都试。
+- 让路：`listRunningTaskIds().length > 0 || organize jobs.size > 0` 时整轮不预热。设置 `emby.prewarm`（默认开），设置页 Emby 一节「入库后预热媒体流」开关。
+- deps 多了 `playbackInfo / busy / wait` 三个可注入项；library-new.itest 新增两条用例（一轮 5 条、问过不重问、同轮回填；探不到只问一次 / 开关关 / 让路）。
+- 真 Emby 验过：新建 3 条冷 strm，临时后端第一轮日志「预热了 5 个新入库条目的媒体流，3 个 Emby 已探测落库，2 个 Emby 探测不到」，三条新条目随后都是 2 条流。
+
+### 第 2 步实施记录：PlaybackInfo 后预解析（5887ddb）
+
+- `rewritePlaybackInfo` 改回改写过的媒体源列表；`handlePlaybackInfo` 回完响应对每个改写过的源调 `redirect.ts` 的 `prewarmLink`（后台跑）：先用响应里的 `MediaSources[].Path` 填 `lookupCache`（302 不再问 Emby），再 `resolveLink` 填 `linkCache`。key 算法抽成 `cacheKeys()`，MediaSourceId 从改写后的 DirectStreamUrl 里取，和客户端随后发来的流请求一致。
+- 302 主路径现在也先看 `lookupCache`；流请求比预解析先到就 `await` 它（`inflight` map），响应 `Server-Timing: cache;desc=prewarm`。Infuse 这类第二跳换 UA 的客户端只预热找路径（`warmPanPath`），不换链。
+- `direct-link.ts`：115 调用抽成可注入（`setResolverDeps`），路径 → pickcode 内存缓存 1 小时（`findPickcode`，不分 UA），`clearLinkCache` 顺带清它；`locate()` 把「归哪个账号、盘内路径」拆出来给 `resolveEmbyPath` / `warmPanPath` 共用。
+- proxy.itest 新增三条（预解析后 stream 不问 Emby 不解析；stream 先到等预解析；Infuse 只预热路径），`reset()` 改成先等预解析跑完；老用例复原桩统一用 `defaultResolver`（之前三处复原的桩不记 UA，把新用例带偏过）。
+
+### 第 3 步实施记录：路径缓存短路（9ef610d）
+
+- `findPickcode` 三条路：内存 → `findPathCacheFile(account, path)`（path_cache 里账号 + 绝对路径、只认文件行，有索引）→ `getPickcodeToId(file_id)`（一个请求，客户端还有半小时缓存）→ 退回 `getIdToPath` 逐级列目录。库里的 file_id 失效（接口报错）就当没命中。`getPickcodeToId` 的 id 放宽成 `number | string`：file_id 超过 2^53，转 number 会失真。
+- `ResolveTimings.pathVia: memo | db | list`，进 302 日志、预解析日志和诊断结果（前端写成「内存里记着 / 库里的路径缓存直接给了文件 id / 逐级列目录找到的」）。
+
+### 真机（只读）验证：用户的 115 账号拷贝 + 实验 Emby（2026-10-21）
+
+临时 API（4101）+ 代理（8092）跑在 config 库的 scratch 拷贝上（Telegram / 生活事件 / 智能体关掉，Emby 指到实验容器），strm 指向 `/root/webdav/115/tv/怪物：丽兹·波顿的故事 (2026) {tmdb-299939}/Season 1/….mkv`（Emby 容器里读不到它，所以 Emby 自己探不出流，和「没给 Emby 挂网盘」的部署一样）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 诊断接口（指定 id，冷） | Emby 63 ms（流 0 → 0，没探到）；直链 ok，找路径 1366 ms（list）+ 取链 2211 ms |
+| PlaybackInfo(VLC) → 紧接着要流 | PlaybackInfo `emby;dur=51`；流请求 302，`cache;desc=prewarm, total 4828`（等预解析：找路径 2783 list + 取链 2067）；再来一次 `cache;desc=hit, total 0` |
+| 换 UA 要流 | `lookup;desc=cache, path;dur=0（memo）, link;dur=603` |
+| 写进 path_cache、重启代理 | `lookup 36, path;dur=1454（db，一个请求）, link 1572` |
+| Infuse：PlaybackInfo 只预热路径 → 第一跳回自己 → 第二跳 | 第二跳 `lookup;desc=cache, path;dur=0（memo）, link;dur=522` |
+
+读数里 115 每个请求 0.5～1.5 秒（限流 1 req/s + 网络），所以省请求数就是省秒数：路径走内存 / 库之后冷解析只剩取链那一个请求。取链本身 0.5～2 秒是 115 接口的，我们动不了。
