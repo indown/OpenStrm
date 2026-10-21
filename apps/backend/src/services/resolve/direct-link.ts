@@ -10,6 +10,7 @@
  * 直链和请求时用的 UA 是绑定的，所以 UA 必须由调用方传进来——
  * 302 场景要用客户端自己的 UA，否则客户端拿着这条链接去下会被 115 拒掉。
  */
+import { LRUCache } from "lru-cache";
 import type { AccountInfo, AppSettings, DirectLinkFailure, ProxyPathMapping, TaskDefinition } from "@openstrm/shared";
 import { listAccounts } from "../../db/repositories/accounts.js";
 import { listTasks } from "../../db/repositories/tasks.js";
@@ -177,30 +178,70 @@ function splitByAccountName(
   return null;
 }
 
+/** 115 那一段抽成可替换的：单测不碰接口就能验缓存和短路 */
+interface Pan115 {
+  idToPath: typeof getIdToPath;
+  downloadUrl: typeof getDownloadUrlWeb;
+}
+const realPan: Pan115 = { idToPath: getIdToPath, downloadUrl: getDownloadUrlWeb };
+let pan: Pan115 = { ...realPan };
+
+/** 仅供测试：换掉会碰 115 的部分；传 null 恢复 */
+export function setPan115(partial: Partial<Pan115> | null): void {
+  pan = partial ? { ...realPan, ...partial } : { ...realPan };
+}
+
+/**
+ * 路径 → pickcode 的缓存。找路径要逐级列目录（冷的 1～3 个 115 请求），而 pickcode 对一个文件是固定的，
+ * 记一个小时：同一条目换 UA 重取（Infuse 第二跳）、直链 15 分钟过期后重取，都只剩取链那一个请求。
+ * 文件被整理挪走了：旧路径的 pickcode 仍指向同一个文件，照样能播；删了的话取链失败回源，和没缓存一样。
+ */
+const pickcodeByPath = new LRUCache<string, string>({ max: 20_000, ttl: 60 * 60 * 1000 });
+
+/** 换了 115 账号或改了挂载配置之后，按路径记的 pickcode 也不该再用 */
+export function clearPathCache(): void {
+  pickcodeByPath.clear();
+}
+
+/**
+ * 盘内路径 → pickcode；找不到回 null。
+ * getIdToPath 找不到文件 / 目录时抛 PermanentError（网盘明确说没有），这里翻译成 null；
+ * 网络 / 接口错误是别的类型，继续往上抛。按类型认、不按文案猜：接口报错的文案里也可能带着路径
+ */
+export async function findPickcode(account: Account115, panPath: string, userAgent: string | undefined): Promise<string | null> {
+  const key = `${account.name}:${panPath}`;
+  const cached = pickcodeByPath.get(key);
+  if (cached) return cached;
+  let pickcode: Awaited<ReturnType<typeof getIdToPath>>;
+  try {
+    pickcode = await pan.idToPath({ path: panPath, userAgent, accountInfo: account });
+  } catch (err) {
+    if (err instanceof PermanentError) return null;
+    throw err;
+  }
+  if (!pickcode) return null;
+  pickcodeByPath.set(key, String(pickcode));
+  return String(pickcode);
+}
+
 async function toDirectUrl(
   account: Account115,
   panPath: string,
   userAgent: string | undefined,
 ): Promise<ResolveResult> {
-  // getIdToPath 找不到文件 / 目录时抛 PermanentError（网盘明确说没有），这里翻译成 not-found；
-  // 网络 / 接口错误是别的类型，继续往上抛。按类型认、不按文案猜：接口报错的文案里也可能带着路径
   const t0 = performance.now();
-  let pickcode: Awaited<ReturnType<typeof getIdToPath>>;
-  try {
-    pickcode = await getIdToPath({ path: panPath, userAgent, accountInfo: account });
-  } catch (err) {
-    if (err instanceof PermanentError) return { ok: false, reason: "not-found" };
-    throw err;
-  }
+  const pickcode = await findPickcode(account, panPath, userAgent);
   if (!pickcode) return { ok: false, reason: "not-found" };
   const t1 = performance.now();
 
-  const url = await getDownloadUrlWeb(pickcode, { userAgent, accountInfo: account });
+  const url = await pan.downloadUrl(pickcode, { userAgent, accountInfo: account });
   if (!url) return { ok: false, reason: "no-url" };
   const t2 = performance.now();
 
   return { ok: true, url, accountName: account.name, panPath, timings: { pathMs: Math.round(t1 - t0), linkMs: Math.round(t2 - t1) } };
 }
+
+type Located = { ok: true; account: Account115; panPath: string } | { ok: false; reason: ResolveFailure };
 
 /**
  * Emby 看到的路径 → 115 直链。
@@ -212,6 +253,24 @@ export async function resolveEmbyPath(
   embyPath: string,
   userAgent?: string,
 ): Promise<ResolveResult> {
+  const located = locate(embyPath);
+  if (!located.ok) return located;
+  return toDirectUrl(located.account, located.panPath, userAgent);
+}
+
+/**
+ * 只把找路径这一段做掉（pickcode 进缓存），不取链。
+ * 给 PlaybackInfo 之后的预热用：Infuse 这类第二跳换 UA 取流的客户端，按它问 PlaybackInfo 的 UA 换直链是白换的，
+ * 但 pickcode 不分 UA，先找好路径，真来取流时就只剩取链那一个请求。
+ */
+export async function warmPanPath(embyPath: string): Promise<void> {
+  const located = locate(embyPath);
+  if (!located.ok) return;
+  await findPickcode(located.account, located.panPath, undefined);
+}
+
+/** 路径归哪个账号、盘内路径是什么：路径映射 → 任务反查 → Alist 式账号名 → 第一个账号 */
+function locate(embyPath: string): Located {
   const settings = readSettingsSafe();
   const decoded = safeDecode(embyPath);
 
@@ -223,7 +282,7 @@ export async function resolveEmbyPath(
   if (mapped) {
     const account = accounts115().find((a) => a.name === mapped.mapping.account);
     if (!account) return { ok: false, reason: "no-account" };
-    return toDirectUrl(account, joinPanPath(mapped.mapping.to, mapped.rest), userAgent);
+    return { ok: true, account, panPath: joinPanPath(mapped.mapping.to, mapped.rest) };
   }
 
   /**
@@ -248,11 +307,11 @@ export async function resolveEmbyPath(
      * 那样会 302 到另一部同名影片，而且一声不吭。
      */
     if (!taskAccount) return { ok: false, reason: "no-account" };
-    return toDirectUrl(taskAccount, stripped.rest, userAgent);
+    return { ok: true, account: taskAccount, panPath: stripped.rest };
   }
 
   // 任务表反查不到，退回 Alist 那套：路径里找账号名，再不行用第一个账号
   const matched = splitByAccountName(stripped.rest, list);
-  return toDirectUrl(matched?.account ?? list[0], matched?.panPath ?? stripped.rest, userAgent);
+  return { ok: true, account: matched?.account ?? list[0], panPath: matched?.panPath ?? stripped.rest };
 }
 

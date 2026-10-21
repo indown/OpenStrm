@@ -8,7 +8,8 @@
 import assert from "node:assert/strict";
 import { test as t } from "node:test";
 import type { AppSettings, ProxyPathMapping, TaskDefinition } from "@openstrm/shared";
-import { accountNameByTask, effectiveMountPaths, joinPanPath, matchPathMapping, normalizeMediaPath, safeDecode, stripMountPath } from "./direct-link.js";
+import { PermanentError } from "../../lib/errors.js";
+import { accountNameByTask, clearPathCache, effectiveMountPaths, findPickcode, joinPanPath, matchPathMapping, normalizeMediaPath, safeDecode, setPan115, stripMountPath } from "./direct-link.js";
 // ---- stripMountPath ----
 t("剥掉挂载前缀，剩下的就是盘内路径", () => {
   const r = stripMountPath("/mnt/pan/tv/Show/ep1.mkv", ["/mnt/pan"]);
@@ -184,4 +185,40 @@ t("joinPanPath：目标目录拼上相对路径，不填就是根目录", () => 
 t("映射的前缀算进挂载集合，PlaybackInfo 才会把这些源标成可直连", () => {
   const settings = { emby: { pathMappings: [{ from: "/mnt/other/", account: "主号" }, { from: "", account: "主号" }] } } as unknown as AppSettings;
   assert.deepEqual(effectiveMountPaths(settings, []), ["/mnt/other"]);
+});
+
+// ---- findPickcode ----
+t("路径 → pickcode 记一小时：同一路径第二次（哪怕换了 UA）不再找路径；找不到的不记；清掉后重找", async () => {
+  const calls: string[] = [];
+  setPan115({
+    idToPath: (async ({ path }: { path: string }) => {
+      calls.push(path);
+      if (path.endsWith("missing.mkv")) throw new PermanentError("File not found");
+      return "pc-a";
+    }) as never,
+  });
+  const account = { name: "主号", accountType: "115", cookie: "c" } as unknown as Parameters<typeof findPickcode>[0];
+  try {
+    clearPathCache();
+    assert.equal(await findPickcode(account, "/tv/a.mkv", "UA-1"), "pc-a");
+    assert.equal(await findPickcode(account, "/tv/a.mkv", "UA-2"), "pc-a");
+    assert.deepEqual(calls, ["/tv/a.mkv"], "pickcode 不分 UA，第二次直接用缓存");
+    assert.equal(await findPickcode(account, "/tv/missing.mkv", undefined), null);
+    assert.equal(await findPickcode(account, "/tv/missing.mkv", undefined), null);
+    assert.equal(calls.length, 3, "找不到的不记，下次还会再找");
+    clearPathCache();
+    await findPickcode(account, "/tv/a.mkv", undefined);
+    assert.equal(calls.length, 4, "清掉后重新找");
+    await assert.rejects(
+      (async () => {
+        setPan115({ idToPath: (async () => { throw new Error("ECONNRESET"); }) as never });
+        await findPickcode(account, "/tv/b.mkv", undefined);
+      })(),
+      /ECONNRESET/,
+      "网络错误照样往上抛，交给调用方回源",
+    );
+  } finally {
+    setPan115(null);
+    clearPathCache();
+  }
 });

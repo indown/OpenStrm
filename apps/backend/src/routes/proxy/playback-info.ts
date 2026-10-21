@@ -11,6 +11,7 @@ import { clientApiKey, countMediaStreams } from "../../services/emby/api.js";
 import { currentMountPaths, safeDecode, stripMountPath } from "../../services/resolve/direct-link.js";
 import { clientContext, decideRoute } from "../../services/resolve/route-rules.js";
 import { readSettingsSafe } from "../../services/settings-safe.js";
+import { prewarmLink } from "./redirect.js";
 import { fetchUpstream, relayResponse, toEmby } from "./upstream.js";
 
 /**
@@ -75,11 +76,12 @@ export function rewritePlaybackInfo(
   requestHeaders: Record<string, string | string[] | undefined> = {},
   /** 路由规则说这个路径要交给 Emby：那一个媒体源原样不动，客户端按 Emby 的意思中转或转码 */
   relay: (path: string) => boolean = () => false,
-): boolean {
+): EmbyMediaSource[] {
   const sources = body.MediaSources;
-  if (!Array.isArray(sources)) return false;
+  if (!Array.isArray(sources)) return [];
 
-  let touched = false;
+  /** 改写过的媒体源：客户端接下来会按它们的 DirectStreamUrl 来要流 */
+  const touched: EmbyMediaSource[] = [];
   for (const source of sources as EmbyMediaSource[]) {
     if (!isOurs(source, mountPaths)) continue;
     if (source.IsInfiniteStream) continue; // 直播流不做直连改写
@@ -100,9 +102,15 @@ export function rewritePlaybackInfo(
     delete source.TranscodingUrl;
 
     rewriteDirectStreamUrl(source, itemId, requestQuery, requestHeaders);
-    touched = true;
+    touched.push(source);
   }
   return touched;
+}
+
+/** 改写后的 DirectStreamUrl 里带的 MediaSourceId：302 那边按它算缓存 key，预解析要用同一个 */
+function mediaSourceIdOf(source: EmbyMediaSource): string | undefined {
+  if (typeof source.DirectStreamUrl !== "string") return undefined;
+  return new URL(source.DirectStreamUrl, "http://openstrm.local").searchParams.get("MediaSourceId") ?? undefined;
 }
 
 async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) {
@@ -134,7 +142,7 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
     const query = (request.query ?? {}) as Record<string, unknown>;
     const rules = readSettingsSafe().emby?.routeRules ?? [];
     const ctx = { ...clientContext(query, request.headers), userAgent: request.headers["user-agent"], ip: request.ip };
-    const touched = rewritePlaybackInfo(
+    const rewritten = rewritePlaybackInfo(
       body,
       itemId,
       currentMountPaths(),
@@ -142,10 +150,22 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
       request.headers,
       (path) => rules.length > 0 && decideRoute(rules, { ...ctx, path }) === "relay",
     );
+    const touched = rewritten.length > 0;
     // 0 条流 = Emby 刚才探测失败了（成功的探完就落库，这次会带着流回来）
     const streams = countMediaStreams(body.MediaSources);
     if (touched) request.log.info({ itemId, embyMs, streams }, "PlaybackInfo 已改写为直连");
     else request.log.debug({ itemId, embyMs, streams }, "PlaybackInfo 透传");
+
+    // 客户端紧接着就会按 DirectStreamUrl 来要流：趁这几百毫秒把条目路径记下、直链先解析好（后台跑，不拖慢这个响应）
+    for (const source of rewritten) {
+      prewarmLink({
+        itemId,
+        mediaSourceId: mediaSourceIdOf(source),
+        item: { path: source.Path ?? "", itemName: "", mediaSource: source },
+        userAgent: ctx.userAgent,
+        log: request.log,
+      });
+    }
 
     return relayResponse(reply, upstream.res, JSON.stringify(body), {
       "content-type": "application/json;charset=utf-8",

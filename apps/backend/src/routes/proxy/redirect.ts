@@ -4,13 +4,13 @@
  * 命中的请求不再由 Node 转发媒体字节，而是回一个 115 直链让客户端自己去取。
  * 任何一步出问题都回源 Emby：宁可走中转，也不能让播放直接失败。
  */
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { LRUCache } from "lru-cache";
 import type { EmbyItemLookup } from "../../services/emby/api.js";
 import { clientApiKey, getItemMediaSource, getSyncJobItemPath } from "../../services/emby/api.js";
 import { readSettingsSafe } from "../../services/settings-safe.js";
 import { configRevision } from "../../services/config-revision.js";
-import { resolveEmbyPath } from "../../services/resolve/direct-link.js";
+import { clearPathCache, resolveEmbyPath, warmPanPath } from "../../services/resolve/direct-link.js";
 import { clientContext, decideRoute, rulesNeedPath, type RouteContext } from "../../services/resolve/route-rules.js";
 import { toEmby } from "./upstream.js";
 
@@ -32,6 +32,7 @@ const lookupCache = new LRUCache<string, EmbyItemLookup>({ max: 2000, ttl: 15 * 
 export function clearLinkCache(): void {
   linkCache.clear();
   lookupCache.clear();
+  clearPathCache();
 }
 
 /**
@@ -41,6 +42,20 @@ export function clearLinkCache(): void {
 let resolveLink = resolveEmbyPath;
 export function setLinkResolver(fn: typeof resolveEmbyPath): void {
   resolveLink = fn;
+}
+
+/** 只预热找路径那一段的实现，同样可替换 */
+let warmPath = warmPanPath;
+export function setPathWarmer(fn: typeof warmPanPath): void {
+  warmPath = fn;
+}
+
+/** PlaybackInfo 之后正在预解析的直链（key 和 linkCache 一样）：302 来得比解析快时等它，别再解析一遍 */
+const inflight = new Map<string, Promise<void>>();
+
+/** 仅供测试：等正在跑的预解析全部结束 */
+export async function __test_prewarmSettled(): Promise<void> {
+  await Promise.allSettled([...inflight.values()]);
 }
 
 /** 只有这些动作才 302；live / master / hls 之类交给 Emby 自己处理 */
@@ -98,6 +113,51 @@ function serverTiming(parts: Record<string, number | string | undefined>): strin
 }
 
 const ms = (from: number): number => Math.round(performance.now() - from);
+
+/** linkCache / lookupCache 的 key；两处（302 和预解析）必须一个算法，不然预热的白热 */
+function cacheKeys(kind: "item" | "sync", itemId: string, mediaSourceId: string | undefined, userAgent: string | undefined) {
+  const idKey = `${configRevision()}:${kind}:${itemId}:${mediaSourceId ?? ""}`;
+  // 115 的直链和 UA 绑定，所以 UA 必须进 key
+  return { idKey, cacheKey: `${idKey}:${userAgent ?? ""}` };
+}
+
+/**
+ * PlaybackInfo 之后顺手把直链解析掉：客户端紧接着（几百毫秒内）就会按 DirectStreamUrl 来要流，
+ * 等它来时缓存已经热了，冷解析那 2～4 秒不再算在首播头上。
+ * 条目路径直接用 PlaybackInfo 响应里的，302 时不用再问一次 Emby；
+ * 同一个 key 并发只跑一次；失败只记 debug——真正的 302 会自己再试一遍。
+ */
+export function prewarmLink(opts: {
+  itemId: string;
+  mediaSourceId?: string;
+  item: EmbyItemLookup;
+  userAgent?: string;
+  log: FastifyBaseLogger;
+}): void {
+  const { idKey, cacheKey } = cacheKeys("item", opts.itemId, opts.mediaSourceId, opts.userAgent);
+  lookupCache.set(idKey, opts.item);
+  // Infuse 们第二跳换 UA 取流：按这个 UA 换的链是白换的，只做找路径那一段（pickcode 不分 UA）
+  if (needsSecondHop(opts.userAgent)) {
+    void warmPath(opts.item.path).catch((err) => opts.log.debug({ err, itemId: opts.itemId }, "预热路径失败"));
+    return;
+  }
+  if (linkCache.has(cacheKey) || inflight.has(cacheKey)) return;
+  const job = (async () => {
+    const resolved = await resolveLink(opts.item.path, opts.userAgent);
+    if (!resolved.ok) {
+      opts.log.debug({ itemId: opts.itemId, path: opts.item.path, reason: resolved.reason }, "预解析没换到直链，交给 302 自己再试");
+      return;
+    }
+    linkCache.set(cacheKey, safeLocation(resolved.url));
+    opts.log.info(
+      { itemId: opts.itemId, account: resolved.accountName, ua: opts.userAgent, pathMs: resolved.timings.pathMs, linkMs: resolved.timings.linkMs },
+      "PlaybackInfo 后已预解析直链",
+    );
+  })()
+    .catch((err) => opts.log.debug({ err, itemId: opts.itemId }, "预解析失败，交给 302 自己再试"))
+    .finally(() => inflight.delete(cacheKey));
+  inflight.set(cacheKey, job);
+}
 
 /**
  * 需要"两跳"的客户端。
@@ -175,7 +235,7 @@ async function redirectWithLookup(
    * key 里带配置版本：改了账号、挂载点或规则之后旧条目自然失效。
    * 代理是独立进程，收不到 API 进程的失效通知，只能这样跨进程对齐。
    */
-  const idKey = `${configRevision()}:${kind}:${itemId}:${mediaSourceId ?? ""}`;
+  const { idKey, cacheKey } = cacheKeys(kind, itemId, mediaSourceId, userAgent);
 
   /**
    * 路由规则在换链之前裁决：命中「交给 Emby」的请求连 Infuse 的第二跳都不该走。
@@ -212,9 +272,6 @@ async function redirectWithLookup(
     return reply.redirect(secondHopLocation(request, apiKey), 302);
   }
 
-  // 115 的直链和 UA 绑定，所以 UA 必须进 key
-  const cacheKey = `${idKey}:${userAgent ?? ""}`;
-
   const cached = linkCache.get(cacheKey);
   if (cached) {
     // 每次拖进度条都命中一次，info 太吵；首次解析那条仍是 info
@@ -223,15 +280,36 @@ async function redirectWithLookup(
     return reply.redirect(cached, 302);
   }
 
+  // PlaybackInfo 之后的预解析可能还在跑（客户端紧接着就来要流）：等它，别再解析一遍
+  const warming = inflight.get(cacheKey);
+  if (warming) {
+    await warming;
+    const warmed = linkCache.get(cacheKey);
+    if (warmed) {
+      request.log.debug({ itemId, ua: userAgent, totalMs: ms(started) }, "302 等到了预解析的直链");
+      reply.header("server-timing", serverTiming({ cache: "prewarm", total: ms(started) }));
+      return reply.redirect(warmed, 302);
+    }
+  }
+
   // 解析和响应分开：redirect 一旦写了 location 头再抛错，
   // catch 里的回源会带着这个坏头去发流，兜底也跟着崩。
   let target: string;
-  let timing: Record<string, number> = {};
+  let timing: Record<string, number | string> = {};
   try {
-    // 为了裁决路由已经查过的就不再查
+    // 为了裁决路由已经查过的就不再查；PlaybackInfo 之后预热进缓存的也不用再问 Emby
     const lookupStart = performance.now();
-    if (item === undefined) item = await lookup(itemId, { mediaSourceId, apiKey });
-    timing.lookup = ms(lookupStart);
+    if (item === undefined) {
+      item = lookupCache.get(idKey);
+      if (item) timing.lookup = "cache";
+      else {
+        item = await lookup(itemId, { mediaSourceId, apiKey });
+        if (item) lookupCache.set(idKey, item);
+        timing.lookup = ms(lookupStart);
+      }
+    } else {
+      timing.lookup = ms(lookupStart);
+    }
     if (!item?.path) {
       request.log.info({ itemId }, "Emby 未返回路径，回源");
       return toEmby(request, reply);
@@ -259,7 +337,10 @@ async function redirectWithLookup(
     timing = { ...timing, path: resolved.timings.pathMs, link: resolved.timings.linkMs, total: ms(started) };
     // 带上 UA：直链和它绑定，排查"能起播不能拖动"之类的问题时要看两跳的 UA 是否一致；
     // 分段耗时（查 Emby / 找路径 / 取链 / 总计，毫秒）：起播慢时先看这一行
-    request.log.info({ itemId, account: resolved.accountName, ua: userAgent, lookupMs: timing.lookup, pathMs: timing.path, linkMs: timing.link, totalMs: timing.total }, "302 到 115 直链");
+    request.log.info(
+      { itemId, account: resolved.accountName, ua: userAgent, lookupMs: typeof timing.lookup === "number" ? timing.lookup : 0, lookupCached: timing.lookup === "cache", pathMs: timing.path, linkMs: timing.link, totalMs: timing.total },
+      "302 到 115 直链",
+    );
   } catch (err) {
     request.log.error({ err, itemId }, "302 解析失败，回源");
     return toEmby(request, reply);
