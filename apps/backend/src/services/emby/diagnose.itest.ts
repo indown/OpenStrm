@@ -11,8 +11,8 @@ import { diagnosePlayback, pickColdStrm, setDiagnoseDeps, type DiagnoseItem } fr
 
 const baseline = readAppSettings();
 
-function setEmby(apiKey: string) {
-  replaceAppSettings({ ...baseline, emby: { url: "http://127.0.0.1:1", apiKey } });
+function setEmby(apiKey: string, url = "http://127.0.0.1:1") {
+  replaceAppSettings({ ...baseline, emby: { url, apiKey } });
   resetSettingsMemo();
 }
 
@@ -45,7 +45,7 @@ test("挑条目：strm 里优先没探测过的，本地文件不算", () => {
   assert.equal(pickColdStrm([local]), null);
 });
 
-test("自动挑的冷条目：PlaybackInfo 带回流算 probed，直链两段用时原样透传", async () => {
+test("自动挑的冷条目：PlaybackInfo 带回流算 probed，直链两段用时原样透传；量之前先忘掉内存里的记录", async () => {
   const calls: string[] = [];
   setDiagnoseDeps({
     listRecent: async () => [local, probed, cold],
@@ -53,13 +53,16 @@ test("自动挑的冷条目：PlaybackInfo 带回流算 probed，直链两段用
       calls.push(`pbi:${id}`);
       return [{ Path: "/mnt/pan/a/S01E02.mkv", MediaStreams: [{}, {}, {}] }];
     },
+    forget: (path) => {
+      calls.push(`forget:${path}`);
+    },
     resolve: async (path, ua) => {
       calls.push(`resolve:${path}:${ua}`);
       return { ok: true, url: "https://cdn/x", accountName: "主号", panPath: "/a/S01E02.mkv", timings: { pathMs: 1200, linkMs: 300, pathVia: "db" } };
     },
   });
   const d = await diagnosePlayback({ userAgent: "Infuse" });
-  assert.deepEqual(calls, ["pbi:2", "resolve:/mnt/pan/a/S01E02.mkv:Infuse"]);
+  assert.deepEqual(calls, ["pbi:2", "forget:/mnt/pan/a/S01E02.mkv", "resolve:/mnt/pan/a/S01E02.mkv:Infuse"]);
   assert.equal(d.item.id, "2");
   assert.equal(d.item.picked, true);
   assert.equal(d.item.path, "/mnt/pan/a/S01E02.mkv", "直链按媒体源的 Path（strm 的内容）解析，不是 strm 文件自己的路径");
@@ -109,13 +112,29 @@ test("Emby 没回答和解析抛异常都不让诊断失败，记成 error", asy
   assert.equal(d.link.error, "115 风控");
 });
 
-test("最近入库没有 strm 条目回 404；Emby 没配回 400", async () => {
+test("最近入库没有 strm 条目回 404；Emby 没配（key 或地址）回 400", async () => {
   setDiagnoseDeps({ listRecent: async () => [local] });
   await assert.rejects(diagnosePlayback(), (err: { status?: number }) => err.status === 404);
   setEmby("");
   try {
     await assert.rejects(diagnosePlayback({ itemId: "1" }), (err: { status?: number }) => err.status === 400);
+    setEmby("k", "");
+    await assert.rejects(diagnosePlayback({ itemId: "1" }), (err: { status?: number }) => err.status === 400, "没填地址也是 400，不能对着默认网关地址去问");
   } finally {
     setEmby("k");
   }
+});
+
+test("挑条目 / 取条目时 Emby 连不上：按上游错误回（500 + 原话），不是未处理异常", async () => {
+  setDiagnoseDeps({
+    getItem: async () => {
+      throw new TypeError("fetch failed");
+    },
+  });
+  await assert.rejects(diagnosePlayback({ itemId: "1" }), (err: { status?: number; message?: string }) => err.status === 500 && /Emby 没回答：fetch failed/.test(err.message ?? ""));
+});
+
+test("同步 / 整理在跑时不量：回 409 让用户等它们跑完", async () => {
+  setDiagnoseDeps({ getItem: async () => cold, busy: () => true });
+  await assert.rejects(diagnosePlayback({ itemId: "2" }), (err: { status?: number }) => err.status === 409);
 });

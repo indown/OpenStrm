@@ -349,6 +349,26 @@ test("加急：窗口内重复调只算一次；没起循环时是空操作", as
   await loop.stop();
 });
 
+test("加急到点时正有一轮在跑：这一轮一结束紧接着来一轮，不丢", async () => {
+  const starts: number[] = [];
+  const loop = createPollingLoop({
+    name: "测试循环",
+    log,
+    intervalMs: 10_000,
+    tick: async () => {
+      starts.push(Date.now());
+      await wait(80);
+    },
+  });
+  loop.start();
+  await wait(20); // 第一轮在跑
+  loop.nudge(10); // 到点时第一轮还没跑完
+  await wait(200);
+  assert.equal(starts.length, 2, `加急该在第一轮结束后马上插一轮，实际跑了 ${starts.length} 轮`);
+  assert.ok(starts[1] - starts[0] < 10_000 && starts[1] - starts[0] >= 80, "紧接着上一轮，不是等满间隔");
+  await loop.stop();
+});
+
 test("加急能打断退避：不能被一个十分钟的退避吞掉", async () => {
   let n = 0;
   const loop = createPollingLoop({

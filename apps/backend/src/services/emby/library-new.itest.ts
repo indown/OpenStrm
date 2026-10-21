@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import type { AppSettings } from "@openstrm/shared";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
+import { readKv } from "../../db/repositories/life.js";
+import { KEY } from "../../db/keys.js";
 import { listTasks, replaceTasks } from "../../db/repositories/tasks.js";
 import { __test_resetMediaProbes, countMediaProbes, getMediaProbes, putMediaProbe } from "../../db/repositories/media-probes.js";
 import { cachedProbeTags, probeTags } from "../media/probe.js";
@@ -33,7 +35,7 @@ let fetchCalls = 0;
 let notified: NotifyEvent[] = [];
 /** 桩的预热：记下问过哪些 id；回什么流由测试定；问完可以改 byId 模拟 Emby 落库 */
 let pbiCalls: string[] = [];
-let pbiResult: (id: string) => Array<{ MediaStreams?: unknown[] }> = () => [];
+let pbiResult: (id: string, signal?: AbortSignal) => Array<{ MediaStreams?: unknown[] }> = () => [];
 let busy = false;
 
 const T0 = 1_800_000_000_000;
@@ -54,9 +56,10 @@ before(() => {
   baseline = readAppSettings();
   baselineTasks = listTasks();
   setEmbyNewDeps({
-    fetch: async () => {
+    // 按 Emby 的样子翻页：从第 start 条起给 limit 条
+    fetch: async (limit, start) => {
       fetchCalls += 1;
-      return page ? [...page] : null;
+      return page ? page.slice(start, start + limit) : null;
     },
     fetchByIds: async (ids) => {
       byIdCalls.push(ids);
@@ -65,9 +68,9 @@ before(() => {
     notify: async (ev) => {
       notified.push(ev);
     },
-    playbackInfo: async (id) => {
+    playbackInfo: async (id, signal) => {
       pbiCalls.push(id);
-      return pbiResult(id);
+      return pbiResult(id, signal);
     },
     busy: () => busy,
     wait: async () => {},
@@ -265,6 +268,84 @@ test("入库后预热：pending 里的条目服务端问一次 PlaybackInfo，�
   const before = pbiCalls.length;
   await tickEmbyNew();
   assert.equal(pbiCalls.length, before, "都探好、pending 空了就不再问");
+});
+
+test("pending 里探过了但只有音频流的条目：没东西可回填，拿掉，不再每轮按 id 问", async () => {
+  __test_resetMediaProbes();
+  const audio = ep({ id: "a-1", episode: 1, sources: [{ path: "/mnt/tv/A/A.S01E01.mkv", size: 1, streams: [] }] });
+  page = [audio];
+  byId = { "a-1": { ...audio, sources: [{ path: "/mnt/tv/A/A.S01E01.mkv", size: 1, streams: [{ Type: "Audio", Codec: "aac" }] }] } };
+  pbiResult = () => [{ MediaStreams: [{ Type: "Audio" }] }];
+  await tickEmbyNew();
+  assert.deepEqual(byIdCalls.at(-1), ["a-1"], "入库时没流：进了 pending、同一轮按 id 问了");
+  const calls = byIdCalls.length;
+  await tickEmbyNew();
+  assert.equal(byIdCalls.length, calls, "只有音频流也算探过了，pending 空了就不再问");
+});
+
+test("预热排在通知后面：Emby 探测要等几十秒，入库通知不等它", async () => {
+  page = [ep({ episode: 1, at: T0 })];
+  await tickEmbyNew();
+  const fresh = ep({ id: "n-2", episode: 2, at: T0 + 1000, sources: [{ path: "/mnt/tv/N/N.S01E02.mkv", size: 1, streams: [] }] });
+  page = [fresh, ...page];
+  byId = { "n-2": fresh };
+  let notifiedWhenProbing = -1;
+  pbiResult = () => {
+    notifiedWhenProbing = notified.length;
+    return [{ MediaStreams: [{}] }];
+  };
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["n-2"]);
+  assert.equal(notifiedWhenProbing, 1, "问 PlaybackInfo 的时候通知已经发出去了");
+});
+
+test("预热：Emby 没回答（抛错）不按探测失败记一天，记另一个时间十分钟后再试；停机掐断的那条什么都不记", async () => {
+  __test_resetMediaProbes();
+  const cold = ep({ id: "f-1", episode: 1, sources: [{ path: "/mnt/tv/F/F.S01E01.mkv", size: 1, streams: [] }] });
+  page = [cold];
+  byId = { "f-1": cold };
+  pbiResult = () => {
+    throw new Error("fetch failed");
+  };
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["f-1"]);
+  let pending = readKv<Array<{ id: string; warmedAt?: number; failedAt?: number }>>(KEY.embyProbePending) ?? [];
+  assert.equal(pending[0]?.warmedAt, undefined, "没问成不算探测过");
+  assert.ok(pending[0]?.failedAt, "记下没问成的时间");
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["f-1"], "十分钟内不再问");
+
+  // 停机：信号一掐就停，这条既不算探过也不算没问成，下次启动再问
+  await __test_resetEmbyNew();
+  pbiCalls = [];
+  const ac = new AbortController();
+  pbiResult = (_id, signal) => {
+    ac.abort();
+    signal?.throwIfAborted();
+    return [];
+  };
+  await tickEmbyNew(ac.signal);
+  assert.deepEqual(pbiCalls, ["f-1"]);
+  pending = readKv<Array<{ id: string; warmedAt?: number; failedAt?: number }>>(KEY.embyProbePending) ?? [];
+  assert.equal(pending[0]?.warmedAt, undefined);
+  assert.equal(pending[0]?.failedAt, undefined);
+  pbiResult = () => [{ MediaStreams: [{}] }];
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["f-1", "f-1"], "下一轮接着问");
+});
+
+test("一轮新增超过一页（整季八十集一次入库）：往后翻页，全部进 pending、通知按总数报", async () => {
+  __test_resetMediaProbes();
+  page = [ep({ episode: 0, at: T0 - 100_000 })];
+  await tickEmbyNew();
+  const season = Array.from({ length: 80 }, (_, i) => ep({ id: `s-${i + 1}`, episode: i + 1, at: T0 + 1000 + i, sources: [{ path: `/mnt/tv/S/S.S01E${i + 1}.mkv`, size: 1, streams: [] }] }));
+  page = [...season].reverse().concat(page);
+  byId = Object.fromEntries(season.map((i) => [i.id, i]));
+  fetchCalls = 0;
+  await tickEmbyNew();
+  assert.equal(fetchCalls, 2, "一页 50 条装不下就翻第二页");
+  assert.equal((notified[0] as Extract<NotifyEvent, { type: "emby-new" }>).total, 80);
+  assert.equal(byIdCalls.at(-1)?.length, 80, "八十集都进了 pending");
 });
 
 test("预热：Emby 探不到的只问一次不反复问；关掉开关不问；同步 / 整理在跑时让路、空下来再问", async () => {

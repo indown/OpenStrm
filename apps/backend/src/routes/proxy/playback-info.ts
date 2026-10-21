@@ -7,12 +7,15 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { EmbyMediaSource } from "../../services/emby/api.js";
-import { clientApiKey, countMediaStreams } from "../../services/emby/api.js";
+import { clientApiKey, countMediaStreams, PLAYBACK_INFO_TIMEOUT_MS } from "../../services/emby/api.js";
 import { currentMountPaths, safeDecode, stripMountPath } from "../../services/resolve/direct-link.js";
 import { clientContext, decideRoute } from "../../services/resolve/route-rules.js";
 import { readSettingsSafe } from "../../services/settings-safe.js";
-import { prewarmLink } from "./redirect.js";
+import { prewarmLink, trustToken } from "./redirect.js";
 import { fetchUpstream, relayResponse, toEmby } from "./upstream.js";
+
+/** 多版本的条目只预解析前几个版本：客户端多半要的是第一个，十个版本全解析是白排十几个请求 */
+const PREWARM_SOURCES_MAX = 3;
 
 /**
  * 这个媒体源是不是我们生成的 strm——落在某个挂载前缀下面。
@@ -119,15 +122,19 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
 
   let upstream: Awaited<ReturnType<typeof fetchUpstream>> | undefined;
   const started = performance.now();
+  const query = (request.query ?? {}) as Record<string, unknown>;
   try {
-    upstream = await fetchUpstream(request);
-    // Emby 对 strm 条目首次 PlaybackInfo 才探测流，这一段可能要几秒到几十秒：记下来，起播慢时先看它
+    // Emby 对 strm 条目首次 PlaybackInfo 才探测流，这一段可能要几秒到几十秒：超时按它给，
+    // 默认的 15 秒一到就回源、客户端拿到没改写的回答去转码，恰恰是最慢的那些条目
+    upstream = await fetchUpstream(request, { timeoutMs: PLAYBACK_INFO_TIMEOUT_MS });
     const embyMs = Math.round(performance.now() - started);
 
     if (!upstream.res.ok) {
       request.log.warn({ itemId, status: upstream.res.status }, "PlaybackInfo 回源异常，透传");
       return relayResponse(reply, upstream.res, await upstream.res.arrayBuffer());
     }
+    // Emby 用客户端的令牌回答了：接下来按 DirectStreamUrl 来要流时它可以直接用缓存
+    trustToken(clientApiKey(query, request.headers));
 
     const raw = await upstream.res.text();
     let body: Record<string, unknown>;
@@ -139,7 +146,6 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
     }
 
     // 每个请求算一次，别在每个媒体源上都去读一遍库
-    const query = (request.query ?? {}) as Record<string, unknown>;
     const rules = readSettingsSafe().emby?.routeRules ?? [];
     const ctx = { ...clientContext(query, request.headers), userAgent: request.headers["user-agent"], ip: request.ip };
     const rewritten = rewritePlaybackInfo(
@@ -156,14 +162,17 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
     if (touched) request.log.info({ itemId, embyMs, streams }, "PlaybackInfo 已改写为直连");
     else request.log.debug({ itemId, embyMs, streams }, "PlaybackInfo 透传");
 
-    // 客户端紧接着就会按 DirectStreamUrl 来要流：趁这几百毫秒把条目路径记下、直链先解析好（后台跑，不拖慢这个响应）
-    for (const source of rewritten) {
-      prewarmLink({
+    // 客户端紧接着就会按 DirectStreamUrl 来要流：趁这几百毫秒把条目路径记下、直链先解析好（后台跑，不拖慢这个响应）。
+    // 几个版本挨个来：同一目录的目录 id / 目录列表缓存能接着用，第一个版本（客户端多半要的）也不用和别的抢
+    let after: Promise<unknown> = Promise.resolve();
+    for (const source of rewritten.slice(0, PREWARM_SOURCES_MAX)) {
+      after = prewarmLink({
         itemId,
         mediaSourceId: mediaSourceIdOf(source),
         item: { path: source.Path ?? "", itemName: "", mediaSource: source },
         userAgent: ctx.userAgent,
         log: request.log,
+        after,
       });
     }
 
@@ -173,7 +182,8 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
     });
   } catch (err) {
     request.log.error({ err, itemId }, "PlaybackInfo 改写失败，回源");
-    return toEmby(request, reply);
+    // body 要原样带回去：这条路由自己装的解析器把它收成了 Buffer，reply-from 不给 contentType 会把 Buffer 序列化成 JSON
+    return toEmby(request, reply, { body: request.body });
   } finally {
     upstream?.done();
   }

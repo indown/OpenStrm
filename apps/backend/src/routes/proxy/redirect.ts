@@ -10,8 +10,9 @@ import type { EmbyItemLookup } from "../../services/emby/api.js";
 import { clientApiKey, getItemMediaSource, getSyncJobItemPath } from "../../services/emby/api.js";
 import { readSettingsSafe } from "../../services/settings-safe.js";
 import { configRevision } from "../../services/config-revision.js";
-import { clearPathCache, resolveEmbyPath, warmPanPath } from "../../services/resolve/direct-link.js";
+import { clearPathCache, resolveEmbyPath, warmPanPath, type ResolveOptions } from "../../services/resolve/direct-link.js";
 import { clientContext, decideRoute, rulesNeedPath, type RouteContext } from "../../services/resolve/route-rules.js";
+import { PRIORITY_BACKGROUND } from "../../services/throttle.js";
 import { toEmby } from "./upstream.js";
 
 /**
@@ -28,10 +29,26 @@ const linkCache = new LRUCache<string, string>({ max: 2000, ttl: 15 * 60 * 1000 
  */
 const lookupCache = new LRUCache<string, EmbyItemLookup>({ max: 2000, ttl: 15 * 60 * 1000 });
 
+/**
+ * 最近被 Emby 认过的客户端令牌。
+ *
+ * 两份缓存都是按条目记的、不分令牌：谁拿着条目 id 来都能用。令牌的裁决本来由每次查条目顺带做
+ * （带客户端的令牌问 Emby，不认就 401 回源），PlaybackInfo 之后预热把条目路径先放进缓存，这一步就被跳过了——
+ * 任何能访问代理端口的人报个条目 id、随便编个令牌就能拿到 115 直链。所以令牌没被 Emby 认过之前不用任何缓存。
+ * 认过的记 15 分钟，和缓存一样长
+ */
+const trustedTokens = new LRUCache<string, true>({ max: 2000, ttl: 15 * 60 * 1000 });
+
+/** Emby 刚用这个令牌成功回答了请求（PlaybackInfo 透传成功）：之后 15 分钟它可以用缓存 */
+export function trustToken(token: string): void {
+  if (token) trustedTokens.set(token, true);
+}
+
 /** 换了 115 账号或改了挂载配置之后，旧直链就不该再用了 */
 export function clearLinkCache(): void {
   linkCache.clear();
   lookupCache.clear();
+  trustedTokens.clear();
   clearPathCache();
 }
 
@@ -121,11 +138,15 @@ function cacheKeys(kind: "item" | "sync", itemId: string, mediaSourceId: string 
   return { idKey, cacheKey: `${idKey}:${userAgent ?? ""}` };
 }
 
+/** 预解析的网盘请求排在普通请求后面：它是投机的，别的条目真正的 302 解析不该等它 */
+const PREWARM_OPTS: ResolveOptions = { priority: PRIORITY_BACKGROUND };
+
 /**
  * PlaybackInfo 之后顺手把直链解析掉：客户端紧接着（几百毫秒内）就会按 DirectStreamUrl 来要流，
  * 等它来时缓存已经热了，冷解析那 2～4 秒不再算在首播头上。
  * 条目路径直接用 PlaybackInfo 响应里的，302 时不用再问一次 Emby；
  * 同一个 key 并发只跑一次；失败只记 debug——真正的 302 会自己再试一遍。
+ * 返回这一次的 Promise（不会 reject）：多版本条目的下一个版本挂在它后面挨个来。
  */
 export function prewarmLink(opts: {
   itemId: string;
@@ -133,17 +154,22 @@ export function prewarmLink(opts: {
   item: EmbyItemLookup;
   userAgent?: string;
   log: FastifyBaseLogger;
-}): void {
+  /** 等它结束再开始：同一条目的几个版本挨个解析，目录 id / 目录列表的缓存能接着用，客户端多半要的第一个版本也不用和别的抢 */
+  after?: Promise<unknown>;
+}): Promise<void> {
   const { idKey, cacheKey } = cacheKeys("item", opts.itemId, opts.mediaSourceId, opts.userAgent);
   lookupCache.set(idKey, opts.item);
+  const after = (opts.after ?? Promise.resolve()).then(() => {}, () => {});
   // Infuse 们第二跳换 UA 取流：按这个 UA 换的链是白换的，只做找路径那一段（pickcode 不分 UA）
   if (needsSecondHop(opts.userAgent)) {
-    void warmPath(opts.item.path).catch((err) => opts.log.debug({ err, itemId: opts.itemId }, "预热路径失败"));
-    return;
+    return after.then(() => warmPath(opts.item.path, PREWARM_OPTS)).catch((err) => opts.log.debug({ err, itemId: opts.itemId }, "预热路径失败"));
   }
-  if (linkCache.has(cacheKey) || inflight.has(cacheKey)) return;
+  if (linkCache.has(cacheKey)) return after;
+  const running = inflight.get(cacheKey);
+  if (running) return running;
   const job = (async () => {
-    const resolved = await resolveLink(opts.item.path, opts.userAgent);
+    await after;
+    const resolved = await resolveLink(opts.item.path, opts.userAgent, PREWARM_OPTS);
     if (!resolved.ok) {
       opts.log.debug({ itemId: opts.itemId, path: opts.item.path, reason: resolved.reason }, "预解析没换到直链，交给 302 自己再试");
       return;
@@ -157,6 +183,7 @@ export function prewarmLink(opts: {
     .catch((err) => opts.log.debug({ err, itemId: opts.itemId }, "预解析失败，交给 302 自己再试"))
     .finally(() => inflight.delete(cacheKey));
   inflight.set(cacheKey, job);
+  return job;
 }
 
 /**
@@ -238,11 +265,29 @@ async function redirectWithLookup(
   const { idKey, cacheKey } = cacheKeys(kind, itemId, mediaSourceId, userAgent);
 
   /**
+   * 令牌先过 Emby 的眼：没被认过的令牌先带着它查一次条目，Emby 不认就 401 回源，认了才轮到下面的缓存。
+   * 不带令牌而配置允许匿名 302 的，是管理员放行的，照旧
+   */
+  let item: EmbyItemLookup | null | undefined;
+  let timing: Record<string, number | string> = {};
+  if (apiKey && !trustedTokens.has(apiKey)) {
+    const lookupStart = performance.now();
+    try {
+      item = await lookup(itemId, { mediaSourceId, apiKey });
+    } catch (err) {
+      request.log.warn({ err, itemId }, "带着客户端令牌查询条目失败（Emby 不认这个令牌，或查询出错），回源");
+      return toEmby(request, reply);
+    }
+    trustedTokens.set(apiKey, true);
+    if (item) lookupCache.set(idKey, item);
+    timing.lookup = ms(lookupStart);
+  }
+
+  /**
    * 路由规则在换链之前裁决：命中「交给 Emby」的请求连 Infuse 的第二跳都不该走。
    * 只看客户端 / 来源的规则现在就能定；看路径的要先查条目（结果缓存，别让 Infuse 每个分片都问一次 Emby）。
    */
   const rules = settings.emby?.routeRules ?? [];
-  let item: EmbyItemLookup | null | undefined;
   if (rules.length > 0) {
     const ctx: RouteContext = {
       ...clientContext(request.query as Record<string, unknown>, request.headers),
@@ -250,12 +295,20 @@ async function redirectWithLookup(
       ip: request.ip,
     };
     if (rulesNeedPath(rules)) {
-      try {
-        item = lookupCache.get(idKey) ?? (await lookup(itemId, { mediaSourceId, apiKey }));
-        if (item) lookupCache.set(idKey, item);
-      } catch (err) {
-        request.log.error({ err, itemId }, "查询条目失败，回源");
-        return toEmby(request, reply);
+      if (item === undefined) {
+        const lookupStart = performance.now();
+        try {
+          item = lookupCache.get(idKey);
+          if (item) timing.lookup = "cache";
+          else {
+            item = await lookup(itemId, { mediaSourceId, apiKey });
+            if (item) lookupCache.set(idKey, item);
+            timing.lookup = ms(lookupStart);
+          }
+        } catch (err) {
+          request.log.error({ err, itemId }, "查询条目失败，回源");
+          return toEmby(request, reply);
+        }
       }
       ctx.path = item?.path;
     }
@@ -295,11 +348,10 @@ async function redirectWithLookup(
   // 解析和响应分开：redirect 一旦写了 location 头再抛错，
   // catch 里的回源会带着这个坏头去发流，兜底也跟着崩。
   let target: string;
-  let timing: Record<string, number | string> = {};
   try {
-    // 为了裁决路由已经查过的就不再查；PlaybackInfo 之后预热进缓存的也不用再问 Emby
-    const lookupStart = performance.now();
+    // 认令牌 / 裁决路由时已经查过的就不再查；PlaybackInfo 之后预热进缓存的也不用再问 Emby
     if (item === undefined) {
+      const lookupStart = performance.now();
       item = lookupCache.get(idKey);
       if (item) timing.lookup = "cache";
       else {
@@ -307,8 +359,6 @@ async function redirectWithLookup(
         if (item) lookupCache.set(idKey, item);
         timing.lookup = ms(lookupStart);
       }
-    } else {
-      timing.lookup = ms(lookupStart);
     }
     if (!item?.path) {
       request.log.info({ itemId }, "Emby 未返回路径，回源");

@@ -66,13 +66,20 @@ export function PlaybackDiagnoseButton({ configured }: { configured: boolean }) 
           <p className="text-sm font-medium">起播诊断</p>
           <p className="text-xs text-muted-foreground">
             服务端替播放器走一遍首播的两段路：让 Emby 回答一次 PlaybackInfo（没探测过的条目会真的探测一次），再向网盘要一次直链。
-            留空条目 id 就挑最近入库、还没探测过的 strm 条目。
+            留空条目 id 就挑最近入库、还没探测过的 strm 条目。换直链量的是冷路径（不用内存里记着的），相当于播放代理冷启动时的用时；
+            同步 / 整理在跑时先等它们跑完。
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Input
             value={itemId}
             onChange={(e) => setItemId(e.target.value)}
+            // 这个输入框在整页设置的 <form> 里：回车默认会提交整页设置，这里截下来当「开始诊断」
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              if (!working && configured) void run();
+            }}
             placeholder="条目 id（可留空）"
             className="h-8 w-40 text-xs"
             disabled={working}

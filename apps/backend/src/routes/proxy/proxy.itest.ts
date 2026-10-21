@@ -12,8 +12,10 @@ import http from "node:http";
 import Fastify from "fastify";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
 import { deleteTask, insertTask } from "../../db/repositories/tasks.js";
+import replyFrom from "@fastify/reply-from";
 import proxyPlugin from "./index.js";
 import { __test_prewarmSettled, clearLinkCache, setLinkResolver, setPathWarmer } from "./redirect.js";
+import { toEmby } from "./upstream.js";
 import { swapPorts, swapUrlPort } from "./system-info.js";
 import { resetConfigRevisionMemo } from "../../services/config-revision.js";
 import { resetSettingsMemo } from "../../services/settings-safe.js";
@@ -56,9 +58,25 @@ const emby = http.createServer((req, res) => {
     res.end(JSON.stringify({ Items: [{ Id: "job-1", ItemName: "Show", OutputPath: PAN_FILE }] }));
     return;
   }
+  if (url.includes("/lab/echo")) {
+    // 把收到的 body 和 content-type 原样报回来：验回源时 body 有没有被改
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ contentType: req.headers["content-type"] ?? null, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    return;
+  }
   if (url.includes("/Items?Ids=")) {
     const id = new URL(url, "http://x").searchParams.get("Ids");
     itemLookups++;
+    // 真 Emby 对不认识的令牌回 401：令牌的裁决就靠这一步
+    if (new URL(url, "http://x").searchParams.get("api_key") === "bad") {
+      res.writeHead(401, { "content-type": "text/plain" });
+      res.end("Access token is invalid or expired.");
+      return;
+    }
     // item-local 指向本地文件，item-http 是 strm 里写 OpenList 地址的条目，item-4k 在挂载点的另一个目录，其余都指向挂载点里的 strm
     const path = id === "item-local" ? LOCAL_FILE : id === "item-http" ? HTTP_FILE : id === "item-4k" ? FOUR_K_FILE : PAN_FILE;
     res.writeHead(200, { "content-type": "application/json" });
@@ -119,11 +137,20 @@ let resolveCalls = 0;
 let lastResolvedUa: string | undefined;
 /** 桩每次解析拖这么久（毫秒）：验「stream 比预解析先到」要让预解析还在跑 */
 let resolveDelayMs = 0;
+/** 同时在跑的解析数 / 峰值：多版本的预解析该挨个来 */
+let activeResolves = 0;
+let maxActiveResolves = 0;
 /** 默认的 115 桩：记次数和 UA；换过桩的用例复原时也用它，不然后面的用例看不到 UA */
 const defaultResolver: Parameters<typeof setLinkResolver>[0] = async (embyPath, userAgent) => {
   resolveCalls++;
   lastResolvedUa = userAgent;
-  if (resolveDelayMs > 0) await new Promise((r) => setTimeout(r, resolveDelayMs));
+  activeResolves++;
+  maxActiveResolves = Math.max(maxActiveResolves, activeResolves);
+  try {
+    if (resolveDelayMs > 0) await new Promise((r) => setTimeout(r, resolveDelayMs));
+  } finally {
+    activeResolves--;
+  }
   return embyPath.startsWith(MOUNT) || embyPath.startsWith(HTTP_MOUNT)
     ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath, timings: { pathMs: 0, linkMs: 0, pathVia: "list" } }
     : { ok: false, reason: "not-mounted" };
@@ -134,6 +161,7 @@ setLinkResolver(defaultResolver);
 async function reset() {
   await __test_prewarmSettled();
   resolveCalls = 0;
+  maxActiveResolves = 0;
   clearLinkCache();
 }
 
@@ -396,7 +424,8 @@ test("PlaybackInfo 响应带 Server-Timing：Emby 用时和流数", async () => 
 test("PlaybackInfo 之后直链已预解析：紧接着的 stream 不再问 Emby、不再解析", async () => {
     await reset();
     itemLookups = 0;
-    const info = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {}, headers: { "user-agent": "VLC/3.0" } });
+    // 客户端问 PlaybackInfo 时带着令牌（真实客户端都带，放 query 或请求头）：Emby 认了它，接下来要流时才能直接用缓存
+    const info = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo?api_key=k", payload: {}, headers: { "user-agent": "VLC/3.0" } });
     assert.equal(info.statusCode, 200);
     await __test_prewarmSettled();
     // 改写过的两个源（挂载点里的 ms-pan 和 ms-4k）各预解析一次
@@ -442,6 +471,65 @@ test("Infuse 问的 PlaybackInfo 不预解析直链（第二跳换 UA，链是�
       assert.deepEqual(warmed.sort(), [FOUR_K_FILE, PAN_FILE].sort());
     } finally {
       setPathWarmer(async () => {});
+    }
+  });
+
+test("多版本条目的预解析挨个来，不同时发：第一个版本不用和别的抢，目录缓存也能接着用", async () => {
+    await reset();
+    resolveDelayMs = 30;
+    try {
+      const info = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {}, headers: { "user-agent": "VLC/3.0" } });
+      assert.equal(info.statusCode, 200);
+      await __test_prewarmSettled();
+      assert.equal(resolveCalls, 2, "ms-pan 和 ms-4k 各一次");
+      assert.equal(maxActiveResolves, 1, "两个版本不能同时解析");
+    } finally {
+      resolveDelayMs = 0;
+    }
+  });
+
+test("没被 Emby 认过的令牌不能用缓存：PlaybackInfo 预热之后，拿着假令牌来要流的照样被 Emby 挡回去", async () => {
+    await reset();
+    // 正常客户端：PlaybackInfo 让 Emby 认了令牌 k，直链也预解析好了
+    await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo?api_key=k", payload: {}, headers: { "user-agent": "VLC/3.0" } });
+    await __test_prewarmSettled();
+    assert.equal(resolveCalls, 2);
+    itemLookups = 0;
+
+    // 编个令牌、换个 UA 来要同一个条目：条目路径在缓存里，但令牌没被认过，得先带着它问 Emby → 401 → 回源，不解析、不 302
+    const forged = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=bad&MediaSourceId=ms-pan", headers: { "user-agent": "Other/1.0" } });
+    assert.notEqual(forged.statusCode, 302, "假令牌不该拿到直链");
+    assert.equal(itemLookups, 1, "得带着这个令牌去问一次 Emby");
+    assert.equal(resolveCalls, 2, "没解析");
+    // 同一个 UA（直链缓存命中的那条路）也一样
+    const forgedSameUa = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=bad&MediaSourceId=ms-pan", headers: { "user-agent": "VLC/3.0" } });
+    assert.notEqual(forgedSameUa.statusCode, 302);
+    assert.equal(itemLookups, 2);
+
+    // 被认过的令牌换个 UA：条目路径走缓存（不问 Emby），直链按新 UA 解析一次
+    const trusted = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k&MediaSourceId=ms-pan", headers: { "user-agent": "Other/1.0" } });
+    assert.equal(trusted.statusCode, 302);
+    assert.equal(itemLookups, 2, "认过的令牌用条目缓存，不再问 Emby");
+    assert.equal(resolveCalls, 3);
+  });
+
+test("PlaybackInfo 改写失败回源时 body 原样带回：Buffer 不能被序列化成 JSON", async () => {
+    // 单独起一个小应用：和 PlaybackInfo 路由一样装「原样收下」的解析器，handler 直接走 toEmby 带 body
+    const lab = Fastify({ logger: false });
+    await lab.register(replyFrom);
+    const keepRaw = (_req: unknown, body: Buffer, done: (e: Error | null, b: Buffer) => void) => done(null, body);
+    lab.addContentTypeParser("application/json", { parseAs: "buffer" }, keepRaw as never);
+    lab.post("/lab/echo", (request, reply) => toEmby(request, reply, { body: request.body }));
+    await lab.ready();
+    try {
+      const payload = '{"DeviceProfile":{"Name":"x"}}';
+      const res = await lab.inject({ method: "POST", url: "/lab/echo", payload, headers: { "content-type": "application/json" } });
+      assert.equal(res.statusCode, 200);
+      const echoed = res.json() as { contentType: string | null; body: string };
+      assert.equal(echoed.body, payload, "Emby 收到的就是客户端发的那段 JSON");
+      assert.equal(echoed.contentType, "application/json");
+    } finally {
+      await lab.close();
     }
   });
 

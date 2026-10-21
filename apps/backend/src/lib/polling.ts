@@ -91,6 +91,8 @@ export function createPollingLoop(opts: PollingLoopOptions): PollingLoop {
   let controller: AbortController | null = null;
   /** 这次 start 的退出收尾：自己退和被 stop 只走一次 */
   let exitOnce: (() => void) | null = null;
+  /** 加急到点时正有一轮在跑：记下来，这一轮一结束就插一轮，不丢 */
+  let urgentPending = false;
 
   const runOnce = async (): Promise<void> => {
     roundError = null;
@@ -123,8 +125,14 @@ export function createPollingLoop(opts: PollingLoopOptions): PollingLoop {
   const backoffMs = (): number => Math.min(maxBackoffMs, backoffBaseMs * 2 ** (failStreak - 1));
   const waitMs = (): number => (failStreak === 0 ? intervalMs : backoffMs());
 
-  /** 等一会儿；加急到点能把这次等待打断 */
-  const waiting$ = (ms: number) => (ms > 0 ? race(unrefTimer(ms), urgent$).pipe(take(1)) : unrefTimer(0));
+  /** 等一会儿；加急到点能把这次等待打断；上一轮跑的时候就到点了的加急不等了，马上来 */
+  const waiting$ = (ms: number) => {
+    if (urgentPending) {
+      urgentPending = false;
+      return unrefTimer(0);
+    }
+    return ms > 0 ? race(unrefTimer(ms), urgent$).pipe(take(1)) : unrefTimer(0);
+  };
 
   return {
     get running() {
@@ -157,13 +165,18 @@ export function createPollingLoop(opts: PollingLoopOptions): PollingLoop {
       exitOnce = exit;
 
       // 加急：第一条起一个延时，这段窗口里再来的丢掉（exhaustMap）；到点了投给 urgent$。
-      // 那一刻要是正好有一轮在跑，urgent$ 没人听，这一下就丢了——和以前 `if (ticking) return` 一个意思
+      // 那一刻要是正好有一轮在跑，urgent$ 没人听：记下来，这一轮一结束就紧接着来一轮
+      // （以前是直接丢掉；Emby 入库那条循环的一轮能跑上一分钟，刷新之后的加急丢了就要再等两分钟）
+      urgentPending = false;
       nudgeSub = nudge$
         .pipe(
           exhaustMap((ms) => unrefTimer(ms)),
           takeUntil(merge(stop$, retire$)),
         )
-        .subscribe(() => urgent$.next());
+        .subscribe(() => {
+          if (ticking) urgentPending = true;
+          else urgent$.next();
+        });
 
       const round$ = defer(runOnce).pipe(
         map(() => {
@@ -214,6 +227,7 @@ export function createPollingLoop(opts: PollingLoopOptions): PollingLoop {
     },
     async stop() {
       running = false;
+      urgentPending = false;
       stop$.next();
       sub?.unsubscribe();
       sub = null;

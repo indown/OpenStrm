@@ -16,7 +16,8 @@ import { listAccounts } from "../../db/repositories/accounts.js";
 import { listTasks } from "../../db/repositories/tasks.js";
 import { readSettingsSafe } from "../settings-safe.js";
 import { findPathCacheFile } from "../../db/repositories/life.js";
-import { getIdToPath, getDownloadUrlWeb, getFileInfoById, type FileInfo115 } from "../cloud-115/client.js";
+import { Cloud115ApiError, fsDirGetId, getIdToPath, getDownloadUrlWeb, getFileInfoById, type FileInfo115 } from "../cloud-115/client.js";
+import { classifyAccountIssue } from "../drive/errors.js";
 import { PermanentError } from "../../lib/errors.js";
 
 type Account115 = Extract<AccountInfo, { accountType: "115" }>;
@@ -168,7 +169,10 @@ export function accountNameByTask(
   return best?.account ?? null;
 }
 
-/** Alist 约定：路径里带账号名，形如 `/{账号名}/{115 路径}` */
+/**
+ * Alist 约定：路径里带账号名，形如 `/{账号名}/{115 路径}`。
+ * 盘内路径带前导斜杠，和任务反查、路径映射给出的形态一致：库里的路径缓存按 `/tv/…` 存，不带的话这条路永远查不到
+ */
 function splitByAccountName(
   path: string,
   list: Account115[],
@@ -177,7 +181,7 @@ function splitByAccountName(
     const pattern = `/${account.name}/`;
     const idx = path.indexOf(pattern);
     if (idx !== -1) {
-      return { account, panPath: path.slice(idx + pattern.length) };
+      return { account, panPath: `/${path.slice(idx + pattern.length)}` };
     }
   }
   return null;
@@ -186,11 +190,12 @@ function splitByAccountName(
 /** 会碰 115 和库的几步抽成可替换的：单测不碰接口就能验缓存和短路 */
 interface ResolverDeps {
   idToPath: typeof getIdToPath;
+  dirIdByPath: typeof fsDirGetId;
   fileInfoById: typeof getFileInfoById;
   downloadUrl: typeof getDownloadUrlWeb;
   pathCacheFile: typeof findPathCacheFile;
 }
-const realDeps: ResolverDeps = { idToPath: getIdToPath, fileInfoById: getFileInfoById, downloadUrl: getDownloadUrlWeb, pathCacheFile: findPathCacheFile };
+const realDeps: ResolverDeps = { idToPath: getIdToPath, dirIdByPath: fsDirGetId, fileInfoById: getFileInfoById, downloadUrl: getDownloadUrlWeb, pathCacheFile: findPathCacheFile };
 let pan: ResolverDeps = { ...realDeps };
 
 /** 仅供测试：换掉会碰 115 / 库的部分；传 null 恢复 */
@@ -198,12 +203,30 @@ export function setResolverDeps(partial: Partial<ResolverDeps> | null): void {
   pan = partial ? { ...realDeps, ...partial } : { ...realDeps };
 }
 
+/** 解析时可带的选项：priority 是网盘请求的排队先后（throttle.ts 的 PRIORITY_*，预解析这种投机请求往后排） */
+export interface ResolveOptions {
+  priority?: number;
+}
+
+/** 碰 115 时带的上下文：UA、账号、排队先后 */
+type PanCtx = { userAgent: string | undefined; accountInfo: Account115; priority?: number };
+
 /**
- * 路径 → pickcode 的缓存。找路径要逐级列目录（冷的 1～3 个 115 请求），而 pickcode 对一个文件是固定的，
- * 记一个小时：同一条目换 UA 重取（Infuse 第二跳）、直链 15 分钟过期后重取，都只剩取链那一个请求。
- * 文件被整理挪走了：旧路径的 pickcode 仍指向同一个文件，照样能播；删了的话取链失败回源，和没缓存一样。
+ * 路径 → pickcode 的内存缓存。找路径要逐级列目录（冷的 1～3 个 115 请求）或按库里的 file_id 核对（1～2 个），
+ * 而 pickcode 对一个文件是固定的，记 15 分钟（和直链缓存一样长）：同一条目换 UA 重取（Infuse 第二跳）、
+ * 直链过期后重取，都只剩取链那一个请求。
+ * 顺带记下文件 id 和记的时刻：库里的路径缓存这一行之后被人改过（整理换了文件、转存覆盖、监控看到改名），就不再信它，重新核对。
+ * 不记更久：监控没开时外部换了同路径的文件，这段时间里会一直播旧的，窗口和以前直链缓存的差不多就够了
  */
-const pickcodeByPath = new LRUCache<string, string>({ max: 20_000, ttl: 60 * 60 * 1000 });
+interface PickcodeMemo {
+  pickcode: string;
+  /** 库路线核对过的文件 id；列目录来的没有 */
+  fileId: string | null;
+  /** 记下的时刻（毫秒） */
+  at: number;
+}
+const MEMO_TTL_MS = 15 * 60 * 1000;
+const pickcodeByPath = new LRUCache<string, PickcodeMemo>({ max: 20_000, ttl: MEMO_TTL_MS });
 
 /** 换了 115 账号或改了挂载配置之后，按路径记的 pickcode 也不该再用 */
 export function clearPathCache(): void {
@@ -212,26 +235,74 @@ export function clearPathCache(): void {
 
 const memoKey = (account: Account115, panPath: string): string => `${account.name}:${panPath}`;
 
+/** 只忘掉一条路径的内存记录：起播诊断要量的是冷路径 */
+export function forgetPanPath(embyPath: string): void {
+  const located = locate(embyPath);
+  if (located.ok) pickcodeByPath.delete(memoKey(located.account, located.panPath));
+}
+
+/** 同一路径正在找的那一次：Infuse 的第二跳常常紧跟着预热到，等它，别把同样的请求再发一遍 */
+const finding = new Map<string, Promise<FoundPickcode | null>>();
+
+export interface FoundPickcode {
+  pickcode: string;
+  via: PathVia;
+  /** 核对过的文件 id；列目录找到的没有 */
+  fileId: string | null;
+}
+
 /**
- * 库里的这一行还对得上网盘现状吗：文件名一样、父目录一样、还在正常区。
- * 对不上就是文件被挪走 / 改名 / 进了回收站，而这一行没人更新（生活事件监控没开时外部改动不会写进来），
- * 照它取链会无声播错文件。parent_id 是 0 的老行只核对文件名
+ * 库里的这一行还对得上网盘档案吗：文件名一样、还在正常区。
+ * 父目录另外核对（inPlace）：行里记的 parent_id 多数是空的（Provider 列目录、整理挪文件时都不填），
+ * 就算记了，上一级目录改过名它也照样对得上，所以不看它，按路径现问目录 id 再和档案里的父目录比
  */
-export function pathCacheRowMatches(info: FileInfo115, row: { parentId: string; name: string; path: string }): boolean {
+export function pathCacheRowMatches(info: FileInfo115, row: { name: string; path: string }): boolean {
   if (info.area !== 1) return false;
   const name = row.name || row.path.split("/").pop() || "";
-  if (name && info.name !== name) return false;
-  if (row.parentId && row.parentId !== "0" && info.parentId !== row.parentId) return false;
-  return true;
+  return !name || info.name === name;
+}
+
+/**
+ * 档案里的父目录就是「这条路径的目录」现在的 id 吗。目录 id 按路径问 115（进程内 10 分钟缓存；
+ * 列目录那条路第一步也是它，核对失败退回列目录时不会白问）。根目录下的文件父目录是 0
+ */
+async function inPlace(info: FileInfo115, panPath: string, ctx: PanCtx): Promise<boolean> {
+  const segs = panPath.split("/").filter(Boolean);
+  if (segs.length <= 1) return info.parentId === "0";
+  const dir = await pan.dirIdByPath(segs.slice(0, -1).join("/"), ctx);
+  const id = dir?.id == null ? "" : String(dir.id);
+  return !!id && id !== "0" && id === info.parentId;
+}
+
+/**
+ * 115 回答了「不行」、而且不是登录失效 / 风控那类账号问题：多半是这条记录过期了（文件换了 / 没了），值得现找一次。
+ * 网络不通、超时、登录失效、风控都不算：重找一遍只会再撞一次，还把真正的错误盖掉
+ */
+function isStaleAnswer(err: unknown): boolean {
+  return err instanceof Cloud115ApiError && classifyAccountIssue(err.message) === null;
+}
+
+/** 库里这一行比内存记录新：有人（整理 / 转存 / 监控）改过它，内存里的不再可信。updated_at 是秒 */
+function rowNewerThan(row: { updatedAt: number } | undefined, memo: PickcodeMemo): boolean {
+  return !!row && row.updatedAt > Math.floor(memo.at / 1000);
+}
+
+function readRow(account: Account115, panPath: string): ReturnType<typeof findPathCacheFile> {
+  try {
+    return pan.pathCacheFile(account.name, panPath);
+  } catch {
+    return undefined; // 库读不了（代理进程库还没建好）就当没有这一行
+  }
 }
 
 /**
  * 盘内路径 → pickcode；找不到回 null。三条路按代价排：
- * 1. 内存里记过（一小时内解析过同一路径）：0 个请求；
- * 2. 库里的路径缓存（转存 / 整理解析路径时写的，账号 + 路径 → file_id）：1 个请求（按 file_id 取档案，
- *    顺便核对文件名和父目录，对不上就当没命中——别让一条陈旧记录播错文件或把播放卡死）；
+ * 1. 内存里记过（15 分钟内解析过同一路径、库里这一行此后没被改过）：0 个请求；
+ * 2. 库里的路径缓存（转存 / 整理解析路径时写的，账号 + 路径 → file_id）：按 file_id 取档案核对文件名，
+ *    再按路径问目录 id 核对父目录（目录 id 有 10 分钟缓存），1～2 个请求；对不上就当没命中——别让一条陈旧记录播错文件；
  * 3. 逐级列目录：冷的 1～3 个请求。
- * fresh = true 跳过前两条（取链失败后重找用）。
+ * fresh = true 跳过前两条，列目录也不用进程内的缓存（取链失败后重找用：目录列表、按 id 取 pickcode 的缓存都可能是旧的）。
+ * 同一路径同时来两次只找一次。
  * getIdToPath 找不到文件 / 目录时抛 PermanentError（网盘明确说没有），这里翻译成 null；
  * 网络 / 接口错误是别的类型，继续往上抛。按类型认、不按文案猜：接口报错的文案里也可能带着路径
  */
@@ -239,56 +310,67 @@ export async function findPickcode(
   account: Account115,
   panPath: string,
   userAgent: string | undefined,
-  opts: { fresh?: boolean } = {},
-): Promise<{ pickcode: string; via: PathVia } | null> {
+  opts: { fresh?: boolean; priority?: number } = {},
+): Promise<FoundPickcode | null> {
+  const ctx: PanCtx = { userAgent, accountInfo: account, priority: opts.priority };
+  if (opts.fresh) return findByListing(account, panPath, ctx, true);
   const key = memoKey(account, panPath);
-  if (!opts.fresh) {
-    const cached = pickcodeByPath.get(key);
-    if (cached) return { pickcode: cached, via: "memo" };
+  const running = finding.get(key);
+  if (running) return running;
+  const job = findCached(account, panPath, ctx).finally(() => finding.delete(key));
+  finding.set(key, job);
+  return job;
+}
 
-    let row: ReturnType<typeof findPathCacheFile>;
+async function findCached(account: Account115, panPath: string, ctx: PanCtx): Promise<FoundPickcode | null> {
+  const key = memoKey(account, panPath);
+  const row = readRow(account, panPath);
+  const memo = pickcodeByPath.get(key);
+  if (memo) {
+    if (!rowNewerThan(row, memo)) return { pickcode: memo.pickcode, via: "memo", fileId: memo.fileId };
+    pickcodeByPath.delete(key); // 库里这一行改过了：重新核对
+  }
+  if (row) {
     try {
-      row = pan.pathCacheFile(account.name, panPath);
-    } catch {
-      row = undefined; // 库读不了（代理进程库还没建好）就走列目录
-    }
-    if (row) {
-      try {
-        const info = await pan.fileInfoById(row.fileId, { userAgent, accountInfo: account });
-        if (info?.pickcode && pathCacheRowMatches(info, row)) {
-          pickcodeByPath.set(key, info.pickcode);
-          return { pickcode: info.pickcode, via: "db" };
-        }
-        /* 文件没了或不在原处：这一行是旧的，退回逐级列目录，那一步自己会判断路径上现在是谁 */
-      } catch {
-        /* 接口报错：退回逐级列目录 */
+      const info = await pan.fileInfoById(row.fileId, ctx);
+      if (info?.pickcode && pathCacheRowMatches(info, row) && (await inPlace(info, panPath, ctx))) {
+        pickcodeByPath.set(key, { pickcode: info.pickcode, fileId: info.fileId, at: Date.now() });
+        return { pickcode: info.pickcode, via: "db", fileId: info.fileId };
       }
+      /* 文件没了或不在原处：这一行是旧的，退回逐级列目录，那一步自己会判断路径上现在是谁 */
+    } catch (err) {
+      // 115 说「不行」才退回列目录；网络不通、登录失效这些列目录也一样过不去，直接往上抛
+      if (!isStaleAnswer(err)) throw err;
     }
   }
+  return findByListing(account, panPath, ctx, false);
+}
 
+async function findByListing(account: Account115, panPath: string, ctx: PanCtx, fresh: boolean): Promise<FoundPickcode | null> {
   let pickcode: Awaited<ReturnType<typeof getIdToPath>>;
   try {
-    pickcode = await pan.idToPath({ path: panPath, userAgent, accountInfo: account });
+    pickcode = await pan.idToPath({ path: panPath, userAgent: ctx.userAgent, accountInfo: account, fresh, priority: ctx.priority });
   } catch (err) {
     if (err instanceof PermanentError) return null;
     throw err;
   }
   if (!pickcode) return null;
-  pickcodeByPath.set(key, String(pickcode));
-  return { pickcode: String(pickcode), via: "list" };
+  pickcodeByPath.set(memoKey(account, panPath), { pickcode: String(pickcode), fileId: null, at: Date.now() });
+  return { pickcode: String(pickcode), via: "list", fileId: null };
 }
 
 /**
- * 按 pickcode 取链。缓存来的 pickcode 取不到链可能只是它过期了（文件换了），回 null 交给调用方重找；
- * 现找的 pickcode 取不到链就是真失败，照常往上抛
+ * 按 pickcode 取链。内存里记的 pickcode 取不到链（115 回「不行」或回空）可能只是它过期了（同路径换了文件），
+ * 回 null 交给调用方重找；库里的刚核对过档案、现找的本来就是新的，取不到就是真失败，照常往上抛。
+ * 网络不通、登录失效、风控这些不是记录过期，也照常抛：重找一遍只会再撞一次，还把真正的错误盖掉
  */
-async function tryLink(found: { pickcode: string; via: PathVia }, account: Account115, userAgent: string | undefined): Promise<string | null> {
+async function tryLink(found: FoundPickcode, ctx: PanCtx): Promise<string | null> {
   try {
-    const url = await pan.downloadUrl(found.pickcode, { userAgent, accountInfo: account });
+    const url = await pan.downloadUrl(found.pickcode, ctx);
     return url || null;
   } catch (err) {
-    if (found.via === "list") throw err;
-    return null;
+    if (found.via === "memo" && isStaleAnswer(err)) return null;
+    throw err;
   }
 }
 
@@ -296,26 +378,28 @@ async function toDirectUrl(
   account: Account115,
   panPath: string,
   userAgent: string | undefined,
+  opts: ResolveOptions,
 ): Promise<ResolveResult> {
+  const ctx: PanCtx = { userAgent, accountInfo: account, priority: opts.priority };
   let pathMs = 0;
   let linkMs = 0;
   let t = performance.now();
-  let found = await findPickcode(account, panPath, userAgent);
+  let found = await findPickcode(account, panPath, userAgent, { priority: opts.priority });
   pathMs += performance.now() - t;
   if (!found) return { ok: false, reason: "not-found" };
 
   t = performance.now();
-  let url = await tryLink(found, account, userAgent);
+  let url = await tryLink(found, ctx);
   linkMs += performance.now() - t;
-  if (url === null && found.via !== "list") {
-    // 内存 / 库里记的 pickcode 可能已经失效（同路径换了文件）：清掉，现找一次再取，别让它卡一小时
+  if (url === null && found.via === "memo") {
+    // 内存里记的 pickcode 可能已经失效（同路径换了文件）：清掉，现找一次再取，别让它卡到过期
     pickcodeByPath.delete(memoKey(account, panPath));
     t = performance.now();
-    found = await findPickcode(account, panPath, userAgent, { fresh: true });
+    found = await findPickcode(account, panPath, userAgent, { fresh: true, priority: opts.priority });
     pathMs += performance.now() - t;
     if (!found) return { ok: false, reason: "not-found" };
     t = performance.now();
-    url = await tryLink(found, account, userAgent);
+    url = await tryLink(found, ctx);
     linkMs += performance.now() - t;
   }
   if (!url) return { ok: false, reason: "no-url" };
@@ -340,10 +424,11 @@ type Located = { ok: true; account: Account115; panPath: string } | { ok: false;
 export async function resolveEmbyPath(
   embyPath: string,
   userAgent?: string,
+  opts: ResolveOptions = {},
 ): Promise<ResolveResult> {
   const located = locate(embyPath);
   if (!located.ok) return located;
-  return toDirectUrl(located.account, located.panPath, userAgent);
+  return toDirectUrl(located.account, located.panPath, userAgent, opts);
 }
 
 /**
@@ -351,10 +436,10 @@ export async function resolveEmbyPath(
  * 给 PlaybackInfo 之后的预热用：Infuse 这类第二跳换 UA 取流的客户端，按它问 PlaybackInfo 的 UA 换直链是白换的，
  * 但 pickcode 不分 UA，先找好路径，真来取流时就只剩取链那一个请求。
  */
-export async function warmPanPath(embyPath: string): Promise<void> {
+export async function warmPanPath(embyPath: string, opts: ResolveOptions = {}): Promise<void> {
   const located = locate(embyPath);
   if (!located.ok) return;
-  await findPickcode(located.account, located.panPath, undefined);
+  await findPickcode(located.account, located.panPath, undefined, { priority: opts.priority });
 }
 
 /** 路径归哪个账号、盘内路径是什么：路径映射 → 任务反查 → Alist 式账号名 → 第一个账号 */

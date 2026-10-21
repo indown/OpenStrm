@@ -22,6 +22,12 @@ const log = moduleLogger("throttle");
 
 export type ThrottleChannel = "normal" | "life" | "offline" | "download";
 
+/**
+ * 排队的先后：Bottleneck 的优先级 0～9，数字小的先发，默认 5；链在节奏上的通道会把它一起带给节奏。
+ * 投机的后台请求（PlaybackInfo 之后的预解析）排在普通请求后面：真正的 302 解析、同步、界面上的操作都不该等它
+ */
+export const PRIORITY_BACKGROUND = 7;
+
 /** 补齐、夹过上下限之后实际用的三个值 */
 export type ThrottleValues = Required<ThrottleSettings>;
 
@@ -162,14 +168,17 @@ export function accountBusy(account: string): boolean {
 /**
  * 单次请求排进账号的限流通道（取直链、网盘接口）。Bottleneck 本来就是 Promise 接口：
  * 槽位随 Promise 落定归还，没有订阅 / 退订那一层。signal 已中止的任务轮到时直接拒绝，不再发请求。
+ * priority 不给就是默认的 5；给了就夹到 0～9 里
  */
 export function scheduleForAccount<T>(
   account: string,
   channel: ThrottleChannel,
   fn: () => Promise<T>,
   signal?: AbortSignal,
+  priority?: number,
 ): Promise<T> {
-  return channelLimiter(account, channel).schedule(async () => {
+  const options = priority === undefined ? {} : { priority: Math.min(9, Math.max(0, Math.round(priority))) };
+  return channelLimiter(account, channel).schedule(options, async () => {
     signal?.throwIfAborted();
     return fn();
   });

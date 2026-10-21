@@ -21,7 +21,8 @@ export interface AccountInfo {
   token?: string;
 }
 
-type RequestCtx = { userAgent?: string; accountInfo: AccountInfo; signal?: AbortSignal };
+/** priority：排队先后（throttle.ts 的 PRIORITY_*），不给就是默认 */
+type RequestCtx = { userAgent?: string; accountInfo: AccountInfo; signal?: AbortSignal; priority?: number };
 
 /**
  * 115 接口回了非 2xx。
@@ -128,6 +129,8 @@ const dirIdCache = new LRUCache<string, { id: number }>({ max: 5000, ttl: 10 * 6
 export type DriveEntry = { n: string; fid: number; cid: number; fc: number; sha?: string | null };
 const filesListCache = new LRUCache<string, { data: DriveEntry[]; count?: number }>({ max: 2000, ttl: 5 * 60 * 1000 });
 const pickcodeCache = new LRUCache<string, string>({ max: 20_000, ttl: 30 * 60 * 1000 });
+/** 按 id 取 pickcode 的缓存键：files/file 和 files/get_info 两条路喂的是同一份缓存，键必须一个算法 */
+const pickcodeKey = (id: number | string, accountInfo: AccountInfo): string => `pickcode:${id}:${accountInfo.cookie.substring(0, 20)}`;
 
 export async function exportDirParse(options: ExportDirParseOptions) {
   const {
@@ -213,16 +216,22 @@ export async function getIdToPath(options: {
   userAgent?: string;
   accountInfo?: AccountInfo;
   signal?: AbortSignal;
+  /** 跳过进程内的目录 id / 目录列表 / pickcode 三份缓存（按缓存取的 pickcode 换不到直链、要现找一次时用） */
+  fresh?: boolean;
+  priority?: number;
 }) {
   const {
     path,
     userAgent = defaultUA(),
     accountInfo,
     signal,
+    fresh = false,
+    priority,
   } = options || {};
 
   if (!accountInfo?.cookie) throw new Error('accountInfo.cookie is required');
   if (!path) throw new Error('path is required');
+  const ctx = { userAgent, accountInfo, signal, priority };
 
   log.debug(`[getIdToPath] Looking for file: ${path}`);
 
@@ -236,7 +245,7 @@ export async function getIdToPath(options: {
   // 如果是单层路径，直接查找
   if (pathParts.length === 1) {
     log.debug(`[getIdToPath] Searching in root directory for: ${pathParts[0]}`);
-    const files = await listDirEntries(0, { userAgent, accountInfo, signal });
+    const files = await listDirEntries(0, ctx, undefined, { fresh });
     
     for (const file of files) {
       if (file.n === pathParts[0]) {
@@ -255,7 +264,7 @@ export async function getIdToPath(options: {
   
   // 使用 fsDirGetId 获取目录 ID
   try {
-    const dirResp = await fsDirGetId(dirPath, { userAgent, accountInfo, signal });
+    const dirResp = await fsDirGetId(dirPath, { ...ctx, fresh });
     const dirId = dirResp.id;
     
     if (!dirId) {
@@ -265,14 +274,14 @@ export async function getIdToPath(options: {
     log.debug(`[getIdToPath] Directory ID for ${dirPath}: ${dirId}`);
 
     // 列出目录中的文件
-    const files = await listDirEntries(dirId, { userAgent, accountInfo, signal });
+    const files = await listDirEntries(dirId, ctx, undefined, { fresh });
     log.debug(`[getIdToPath] Found ${files.length} files in directory ${dirPath}`);
     
     // 查找目标文件
     for (const file of files) {
       if (file.n === fileName) {
         log.debug(`[getIdToPath] Found target file: ${fileName}, fid: ${file.fid}`);
-        const pickcode = await getPickcodeToId(file.fid, { userAgent, accountInfo, signal });
+        const pickcode = await getPickcodeToId(file.fid, { ...ctx, fresh });
         log.debug(`[getIdToPath] Successfully got pickcode for ${path}: ${pickcode}`);
         return pickcode;
       }
@@ -292,14 +301,14 @@ export async function getIdToPath(options: {
 }
 
 // 通过路径获取目录 ID
-export async function fsDirGetId(path: string, { userAgent, accountInfo, signal }: { userAgent?: string; app?: string; accountInfo?: AccountInfo; signal?: AbortSignal }) {
+export async function fsDirGetId(path: string, { userAgent, accountInfo, signal, fresh = false, priority }: { userAgent?: string; app?: string; accountInfo?: AccountInfo; signal?: AbortSignal; fresh?: boolean; priority?: number }) {
   if (!accountInfo?.cookie) throw new Error('accountInfo.cookie is required');
   
   // 生成缓存键
   const cacheKey = `dir_id:${path}:${accountInfo.cookie.substring(0, 20)}`; // 使用路径和cookie前20位作为键
   
   // 尝试从缓存获取
-  const cached = dirIdCache.get(cacheKey);
+  const cached = fresh ? undefined : dirIdCache.get(cacheKey);
   if (cached) {
     log.debug(`[CACHE HIT] Directory ID for path: ${path}`);
     return cached;
@@ -315,6 +324,7 @@ export async function fsDirGetId(path: string, { userAgent, accountInfo, signal 
     useCommonHeaders: true,
     accountInfo,
     signal,
+    priority,
   });
   
   // 缓存结果
@@ -323,7 +333,7 @@ export async function fsDirGetId(path: string, { userAgent, accountInfo, signal 
 }
 
 // 获取目录中的文件列表
-export async function fsFiles(cid: number | string, { userAgent, limit = 1000, offset = 0, accountInfo, signal, fresh = false }: {
+export async function fsFiles(cid: number | string, { userAgent, limit = 1000, offset = 0, accountInfo, signal, fresh = false, priority }: {
   userAgent?: string; 
   app?: string; 
   limit?: number; 
@@ -332,6 +342,7 @@ export async function fsFiles(cid: number | string, { userAgent, limit = 1000, o
   signal?: AbortSignal;
   /** 跳过进程内 5 分钟的目录缓存（整理动手前看一眼目标目录用）；结果照常写进缓存 */
   fresh?: boolean;
+  priority?: number;
 }) {
   if (!accountInfo?.cookie) throw new Error('accountInfo.cookie is required');
   
@@ -359,6 +370,7 @@ export async function fsFiles(cid: number | string, { userAgent, limit = 1000, o
     useCommonHeaders: true,
     accountInfo,
     signal,
+    priority,
   });
   
   // 缓存结果
@@ -479,6 +491,8 @@ export async function request115<T = unknown>(
     limiterChannel?: ThrottleChannel;
     /** 中止：进行中的请求掐断，排在限流器里的不再发 */
     signal?: AbortSignal;
+    /** 排队先后（throttle.ts 的 PRIORITY_*）；不给就是默认 */
+    priority?: number;
   }
 ) {
   const {
@@ -494,6 +508,7 @@ export async function request115<T = unknown>(
     rawText = false,
     limiterChannel = "normal",
     signal,
+    priority,
   } = options || {};
   // 从 accountInfo 中获取 cookie
   const cookie = accountInfo?.cookie || null;
@@ -526,6 +541,7 @@ export async function request115<T = unknown>(
       limiterChannel,
       async () => (await axios(config)).data as T,
       signal,
+      priority,
     );
     if (shouldEnsureOk) ensureOk(respData as unknown as Record<string, unknown>, url);
     return respData;
@@ -550,32 +566,35 @@ export async function request115<T = unknown>(
 }
 // POST https://proapi.115.com/android/2.0/ufile/download
 // Use the same getUrl function as the Node.js script
-export async function getDownloadUrlWeb(pickcode: string | number, { userAgent, accountInfo, signal }: RequestCtx) {
+export async function getDownloadUrlWeb(pickcode: string | number, { userAgent, accountInfo, signal, priority }: RequestCtx): Promise<string> {
   const data = `data=${encodeURIComponent(encrypt(`{"pick_code":"${pickcode}"}`))}`;
-    const response = await request115<{ data: string }>(
-      `https://proapi.115.com/android/2.0/ufile/download`,
-      {
-        method: 'POST',
-        headers: { "User-Agent": userAgent ?? defaultUA(), "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(Buffer.byteLength(data)) },
-        data,
-        userAgent,
-        useCommonHeaders: false,
-        accountInfo,
-        signal,
-      }
-    );
-    const decryptedData = JSON.parse(decrypt(response.data));
-    return decryptedData.url;
+  const url = `https://proapi.115.com/android/2.0/ufile/download`;
+  const response = await request115<{ state?: boolean; data?: unknown }>(url, {
+    method: 'POST',
+    headers: { "User-Agent": userAgent ?? defaultUA(), "Content-Type": "application/x-www-form-urlencoded", "Content-Length": String(Buffer.byteLength(data)) },
+    data,
+    userAgent,
+    useCommonHeaders: false,
+    accountInfo,
+    signal,
+    priority,
+  });
+  // 没登录 / 风控 / pickcode 不对时 115 回 state:false，data 不是密文。以前直接拿去解密，报出来的是一句看不懂的 TypeError，
+  // 调用方也分不清是账号的问题还是这条 pickcode 过期了；现在按 115 的文案抛 Cloud115ApiError，分类器认得出来
+  const ok = ensureOk(response, url);
+  if (typeof ok.data !== "string" || !ok.data) return "";
+  const decryptedData = JSON.parse(decrypt(ok.data)) as { url?: unknown };
+  return typeof decryptedData.url === "string" ? decryptedData.url : "";
 }
 
-export async function getPickcodeToId(id: number | string, { userAgent = defaultUA(), accountInfo, signal }: { userAgent?: string; accountInfo?: AccountInfo; signal?: AbortSignal }) {
+export async function getPickcodeToId(id: number | string, { userAgent = defaultUA(), accountInfo, signal, fresh = false, priority }: { userAgent?: string; accountInfo?: AccountInfo; signal?: AbortSignal; fresh?: boolean; priority?: number }) {
   if (!accountInfo?.cookie) throw new Error('accountInfo.cookie is required');
   
   // 生成缓存键
-  const cacheKey = `pickcode:${id}:${accountInfo.cookie.substring(0, 20)}`;
+  const cacheKey = pickcodeKey(id, accountInfo);
   
   // 尝试从缓存获取
-  const cached = pickcodeCache.get(cacheKey);
+  const cached = fresh ? undefined : pickcodeCache.get(cacheKey);
   if (cached) {
     log.debug(`[CACHE HIT] Pickcode for file ID: ${id}`);
     return cached;
@@ -591,6 +610,7 @@ export async function getPickcodeToId(id: number | string, { userAgent = default
       useCommonHeaders: false,
       accountInfo,
       signal,
+      priority,
     }
   );
   
@@ -621,16 +641,18 @@ export interface FileInfo115 {
  */
 export async function getFileInfoById(
   id: number | string,
-  { userAgent = defaultUA(), accountInfo, signal }: { userAgent?: string; accountInfo?: AccountInfo; signal?: AbortSignal },
+  { userAgent = defaultUA(), accountInfo, signal, priority }: { userAgent?: string; accountInfo?: AccountInfo; signal?: AbortSignal; priority?: number },
 ): Promise<FileInfo115 | null> {
   if (!accountInfo?.cookie) throw new Error('accountInfo.cookie is required');
+  const url = `https://webapi.115.com/files/get_info?file_id=${id}`;
   const response = await request115<{ state: boolean; code?: number; message?: string; data?: Array<Record<string, unknown>> }>(
-    `https://webapi.115.com/files/get_info?file_id=${id}`,
-    { method: 'GET', headers: { "User-Agent": userAgent }, userAgent, useCommonHeaders: false, accountInfo, signal },
+    url,
+    { method: 'GET', headers: { "User-Agent": userAgent }, userAgent, useCommonHeaders: false, accountInfo, signal, priority },
   );
   if (!response.state) {
     if (response.code === 20018) return null;
-    throw new Error(JSON.stringify(response));
+    // 别的失败按 115 的文案抛 Cloud115ApiError：登录失效 / 风控分类器认得出来，调用方不会把它当成「记录过期」
+    ensureOk(response, url);
   }
   const d = response.data?.[0];
   if (!d) return null;
@@ -643,7 +665,7 @@ export async function getFileInfoById(
     area: Number(d.aid ?? 1),
   };
   // 顺手喂给按 id 取 pickcode 的缓存，列目录那条路之后要同一个文件就不用再问
-  if (info.pickcode) pickcodeCache.set(`pickcode:${id}:${accountInfo.cookie.substring(0, 20)}`, info.pickcode);
+  if (info.pickcode) pickcodeCache.set(pickcodeKey(id, accountInfo), info.pickcode);
   return info;
 }
 

@@ -28,8 +28,8 @@ export type EmbyItemLookup = {
 };
 
 const LOOKUP_TIMEOUT_MS = 10_000;
-/** PlaybackInfo 可能触发 ffprobe 隔着网盘读文件头，慢的要几十秒 */
-const PLAYBACK_INFO_TIMEOUT_MS = 90_000;
+/** PlaybackInfo 可能触发 ffprobe 隔着网盘读文件头，慢的要几十秒。服务端自己问的和替客户端转发的都用这一个 */
+export const PLAYBACK_INFO_TIMEOUT_MS = 90_000;
 
 /** Emby 上游地址。默认值和 catch-all 保持一致（docker 网关上的 Emby） */
 export function embyUpstream(): string {
@@ -94,7 +94,7 @@ export function normalizeMediaSourceId(id: string | undefined): string | undefin
 export async function fetchJson(
   url: string,
   timeoutMs = LOOKUP_TIMEOUT_MS,
-  init: { method?: "GET" | "POST"; body?: string } = {},
+  init: { method?: "GET" | "POST"; body?: string; signal?: AbortSignal } = {},
 ): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -105,7 +105,8 @@ export async function fetchJson(
         ? { Accept: "application/json" }
         : { Accept: "application/json", "Content-Type": "application/json" },
       body: init.body,
-      signal: controller.signal,
+      // 调用方的 signal（停机）和超时哪个先到都掐断
+      signal: init.signal ? AbortSignal.any([controller.signal, init.signal]) : controller.signal,
     });
     if (!res.ok) throw new Error(`Emby ${res.status} ${res.statusText}`);
     return await res.json();
@@ -132,11 +133,11 @@ export function countMediaStreams(sources: unknown): number {
  */
 export async function requestPlaybackInfo(
   itemId: string,
-  opts: { apiKey?: string; timeoutMs?: number } = {},
+  opts: { apiKey?: string; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<EmbyMediaSource[]> {
   const apiKey = opts.apiKey || configuredApiKey();
   const url = `${embyUpstream()}/Items/${encodeURIComponent(itemId)}/PlaybackInfo?api_key=${encodeURIComponent(apiKey)}`;
-  const body = (await fetchJson(url, opts.timeoutMs ?? PLAYBACK_INFO_TIMEOUT_MS, { method: "POST", body: "{}" })) as
+  const body = (await fetchJson(url, opts.timeoutMs ?? PLAYBACK_INFO_TIMEOUT_MS, { method: "POST", body: "{}", signal: opts.signal })) as
     | { MediaSources?: EmbyMediaSource[] }
     | null;
   return Array.isArray(body?.MediaSources) ? body.MediaSources : [];

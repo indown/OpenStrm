@@ -89,9 +89,20 @@ export function replyFromOptions(request: FastifyRequest) {
   };
 }
 
-/** 原样回源。拦截逻辑任何一步失败都走这里，行为等同于没有拦截。 */
-export function toEmby(request: FastifyRequest, reply: FastifyReply) {
-  return reply.from(undefined, replyFromOptions(request));
+/**
+ * 原样回源。拦截逻辑任何一步失败都走这里，行为等同于没有拦截。
+ *
+ * 自己装了"原样收下"解析器的路由（PlaybackInfo）要把 body 传进来：reply-from 对非流的 body 会按
+ * content-type 决定要不要 JSON.stringify，application/json 下一个 Buffer 会被序列化成
+ * `{"type":"Buffer","data":[…]}` 发给 Emby，客户端的设备档案就丢了。给了 contentType 它就原样发
+ */
+export function toEmby(request: FastifyRequest, reply: FastifyReply, opts: { body?: unknown } = {}) {
+  const from = replyFromOptions(request);
+  if (Buffer.isBuffer(opts.body)) {
+    const contentType = firstForwarded(request.headers["content-type"]) ?? "application/octet-stream";
+    return reply.from(undefined, { ...from, body: opts.body, contentType });
+  }
+  return reply.from(undefined, from);
 }
 
 const UPSTREAM_TIMEOUT_MS = 15_000;
@@ -102,12 +113,14 @@ const UPSTREAM_TIMEOUT_MS = 15_000;
  * 超时必须一直盖到调用方读完 body：fetch 一收到响应头就 resolve，
  * 这时 body 还是个没读的流，提前 clearTimeout 的话上游读一半卡住就永远挂着。
  * 所以把 done() 交给调用方，在读完之后调。
+ * 默认 15 秒；Emby 要真干活的接口（PlaybackInfo 探测 strm）由调用方给更长的
  */
 export async function fetchUpstream(
   request: FastifyRequest,
+  opts: { timeoutMs?: number } = {},
 ): Promise<{ res: Response; done: () => void }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? UPSTREAM_TIMEOUT_MS);
   const done = () => clearTimeout(timer);
 
   try {

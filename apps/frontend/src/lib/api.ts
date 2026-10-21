@@ -969,8 +969,9 @@ export const api = {
 
   emby: {
     /** 起播诊断：会让 Emby 真探测一次、向网盘真要一次直链，PlaybackInfo 慢的要几十秒 */
+    // Emby 探测最多等 90 秒，网盘那一段冷的也可能要几十秒：等得比后端的最坏情况长，别让前端先放弃
     playbackDiagnose: (itemId?: string) =>
-      data(axiosInstance.post<PlaybackDiagnosis>("/api/emby/playback-diagnose", { itemId }, { timeout: 120_000 })),
+      data(axiosInstance.post<PlaybackDiagnosis>("/api/emby/playback-diagnose", { itemId }, { timeout: 240_000 })),
   },
   system: {
     clearDirectory: (targetPath: string) =>
