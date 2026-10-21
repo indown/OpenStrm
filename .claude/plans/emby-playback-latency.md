@@ -147,3 +147,16 @@ strm 指向容器里一个 ffmpeg 生成的 5 秒 mp4（像 Emby 主机挂着网
 | Infuse：PlaybackInfo 只预热路径 → 第一跳回自己 → 第二跳 | 第二跳 `lookup;desc=cache, path;dur=0（memo）, link;dur=522` |
 
 读数里 115 每个请求 0.5～1.5 秒（限流 1 req/s + 网络），所以省请求数就是省秒数：路径走内存 / 库之后冷解析只剩取链那一个请求。取链本身 0.5～2 秒是 115 接口的，我们动不了。
+
+### 路径缓存短路的风险与修补（2026-10-21，用户问「路径缓存短路有风险吗」）
+
+风险都是「缓存过期」一类：
+1. **无声播错文件**：path_cache 的行是「账号 + 路径 → file_id」。路径被另一个文件占了、原文件没删只是挪走、中间没人更新这一行（整理 / 归档 / 删除走 Provider 会同步改，转存 / 追更 / 整理解析路径时写入，生活事件监控处理 115 的改名 / 删除；**监控没开时外部改动不会写进来**，行能留 180 天），按旧 file_id 取 pickcode 就播成挪走的那个。
+2. **同路径换了文件会卡一小时**：内存记的 pickcode / 库里的 file_id 失效，库这条会退回列目录，但「取链失败」没有退回，内存记着旧 pickcode 一小时（以前直链缓存只有 15 分钟）。
+3. 同路径多行时 `.get()` 随便取一行。
+
+修补（同日提交）：
+- `files/file?file_id=` 只回 file_id / file_name / pick_code / sha1 / file_size，**没有父目录**；`files/get_info?file_id=` 回 `fid / cid（父目录）/ n / pc / s / aid / sha …`，不存在时 `state:false, code:20018`（真机验过）。新 `getFileInfoById` 用 get_info；`findPickcode` 的库路线拿档案和行核对：文件名一样、父目录一样（parent_id 是 0 的老行只看名字）、`aid === 1`，对不上就退回列目录。
+- `toDirectUrl`：pickcode 来自内存 / 库而取链失败（回空或抛错）→ 清内存、`findPickcode(..., { fresh: true })` 现找一次再取；现找的取链失败照旧 no-url / 抛错。
+- `findPathCacheFile` 按 `updated_at desc, rowid desc` 取最新行。
+- 真机只读：父目录错的行 → list 2075 ms；对的行 → db 524 ms（一个请求）；内存 0 ms；整条解析取链 1381 ms。
