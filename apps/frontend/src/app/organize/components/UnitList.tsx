@@ -549,8 +549,8 @@ function UnitFiles({
 const RE_SE = /S(\d{1,2})E(\d{1,4})/i;
 
 /**
- * 文件行上直接填第几季第几集（剧集的视频）：失焦 / 回车就按它钉上重新规划；两格都清空就撤掉钉的。
- * 没钉的按规划出来的名字预填，所以没改就不提交
+ * 文件行上直接填第几季第几集（剧集的视频）：失焦 / 回车就按它钉上重新规划；两格都清空也撤掉，钉了的旁边还有「撤」
+ * （从一格移到另一格就会失焦提交，键盘上很难「同时」清空两格）。没钉的按规划出来的名字预填，所以没改就不提交
  */
 function EpisodeCells({ item, pin, disabled, onPin }: { item: OrganizeItem; pin?: OrganizeEpisodePin; disabled: boolean; onPin: (pin: OrganizeEpisodePin | null) => void }) {
   const parsed = RE_SE.exec(baseName(item.dstPath));
@@ -590,7 +590,14 @@ function EpisodeCells({ item, pin, disabled, onPin }: { item: OrganizeItem; pin?
       <Input className="h-6 w-10 px-1 text-center text-[11px] tabular-nums" value={s} onChange={(ev) => setS(ev.target.value)} onBlur={commit} onKeyDown={blurOnEnter} disabled={disabled} inputMode="numeric" aria-label="季" />
       E
       <Input className="h-6 w-12 px-1 text-center text-[11px] tabular-nums" value={e} onChange={(ev) => setE(ev.target.value)} onBlur={commit} onKeyDown={blurOnEnter} disabled={disabled} inputMode="numeric" aria-label="集" />
-      {pin && <span className="text-brand">已钉</span>}
+      {pin && (
+        <>
+          <span className="text-brand">已钉</span>
+          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => onPin(null)} disabled={disabled} title="撤掉钉的季 / 集，回到按文件名算">
+            撤
+          </button>
+        </>
+      )}
     </span>
   );
 }
