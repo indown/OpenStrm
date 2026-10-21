@@ -106,6 +106,7 @@ import oauthTokenRoute from "./routes/oauth/token.js";
 // System routes
 import clearDirectoryRoute from "./routes/system/clear-directory.js";
 import healthRoute from "./routes/system/health.js";
+import embyDiagnoseRoute from "./routes/emby/diagnose.js";
 import updateRoute from "./routes/update/index.js";
 import backupRoute from "./routes/system/backup.js";
 
@@ -203,6 +204,7 @@ await app.register(oauthTokenRoute);
 // System routes
 await app.register(clearDirectoryRoute);
 await app.register(healthRoute);
+await app.register(embyDiagnoseRoute);
 await app.register(updateRoute);
 await app.register(backupRoute);
 

@@ -7,7 +7,7 @@
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { EmbyMediaSource } from "../../services/emby/api.js";
-import { clientApiKey } from "../../services/emby/api.js";
+import { clientApiKey, countMediaStreams } from "../../services/emby/api.js";
 import { currentMountPaths, safeDecode, stripMountPath } from "../../services/resolve/direct-link.js";
 import { clientContext, decideRoute } from "../../services/resolve/route-rules.js";
 import { readSettingsSafe } from "../../services/settings-safe.js";
@@ -110,8 +110,11 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
   const itemId = params.id;
 
   let upstream: Awaited<ReturnType<typeof fetchUpstream>> | undefined;
+  const started = performance.now();
   try {
     upstream = await fetchUpstream(request);
+    // Emby 对 strm 条目首次 PlaybackInfo 才探测流，这一段可能要几秒到几十秒：记下来，起播慢时先看它
+    const embyMs = Math.round(performance.now() - started);
 
     if (!upstream.res.ok) {
       request.log.warn({ itemId, status: upstream.res.status }, "PlaybackInfo 回源异常，透传");
@@ -139,10 +142,14 @@ async function handlePlaybackInfo(request: FastifyRequest, reply: FastifyReply) 
       request.headers,
       (path) => rules.length > 0 && decideRoute(rules, { ...ctx, path }) === "relay",
     );
-    if (touched) request.log.info({ itemId }, "PlaybackInfo 已改写为直连");
+    // 0 条流 = Emby 刚才探测失败了（成功的探完就落库，这次会带着流回来）
+    const streams = countMediaStreams(body.MediaSources);
+    if (touched) request.log.info({ itemId, embyMs, streams }, "PlaybackInfo 已改写为直连");
+    else request.log.debug({ itemId, embyMs, streams }, "PlaybackInfo 透传");
 
     return relayResponse(reply, upstream.res, JSON.stringify(body), {
       "content-type": "application/json;charset=utf-8",
+      "server-timing": `emby;dur=${embyMs}, streams;desc=${streams}`,
     });
   } catch (err) {
     request.log.error({ err, itemId }, "PlaybackInfo 改写失败，回源");

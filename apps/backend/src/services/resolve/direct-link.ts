@@ -10,7 +10,7 @@
  * 直链和请求时用的 UA 是绑定的，所以 UA 必须由调用方传进来——
  * 302 场景要用客户端自己的 UA，否则客户端拿着这条链接去下会被 115 拒掉。
  */
-import type { AccountInfo, AppSettings, ProxyPathMapping, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AppSettings, DirectLinkFailure, ProxyPathMapping, TaskDefinition } from "@openstrm/shared";
 import { listAccounts } from "../../db/repositories/accounts.js";
 import { listTasks } from "../../db/repositories/tasks.js";
 import { readSettingsSafe } from "../settings-safe.js";
@@ -19,19 +19,18 @@ import { PermanentError } from "../../lib/errors.js";
 
 type Account115 = Extract<AccountInfo, { accountType: "115" }>;
 
-export type ResolveFailure =
-  /** 没有能用的 115 账号：一个都没配，或者任务 / 路径映射指向的账号已删、改名、不是 115 */
-  | "no-account"
-  /** 路径不在任何 mediaMountPath 之下，不该由我们接管 */
-  | "not-mounted"
-  /** 盘里找不到这个文件 */
-  | "not-found"
-  /** 找到了文件但拿不到直链 */
-  | "no-url";
+/** 失败原因的定义在 shared 里（起播诊断要把它回给前端），这里只是别名 */
+export type ResolveFailure = DirectLinkFailure;
+
+/** 解析用了多久：找路径（getIdToPath）和取链各一段，毫秒，整数；起播诊断和 302 日志都靠它 */
+export interface ResolveTimings {
+  pathMs: number;
+  linkMs: number;
+}
 
 /** 判别联合：ok 为 true 时直链和归属账号一定都有，调用方不用再逐个判空 */
 export type ResolveResult =
-  | { ok: true; url: string; accountName: string; panPath: string }
+  | { ok: true; url: string; accountName: string; panPath: string; timings: ResolveTimings }
   | { ok: false; reason: ResolveFailure };
 
 /** strm 落盘时可能被 encodeURI 过（任务的 enablePathEncoding），解不开就按原样用 */
@@ -185,6 +184,7 @@ async function toDirectUrl(
 ): Promise<ResolveResult> {
   // getIdToPath 找不到文件 / 目录时抛 PermanentError（网盘明确说没有），这里翻译成 not-found；
   // 网络 / 接口错误是别的类型，继续往上抛。按类型认、不按文案猜：接口报错的文案里也可能带着路径
+  const t0 = performance.now();
   let pickcode: Awaited<ReturnType<typeof getIdToPath>>;
   try {
     pickcode = await getIdToPath({ path: panPath, userAgent, accountInfo: account });
@@ -193,11 +193,13 @@ async function toDirectUrl(
     throw err;
   }
   if (!pickcode) return { ok: false, reason: "not-found" };
+  const t1 = performance.now();
 
   const url = await getDownloadUrlWeb(pickcode, { userAgent, accountInfo: account });
   if (!url) return { ok: false, reason: "no-url" };
+  const t2 = performance.now();
 
-  return { ok: true, url, accountName: account.name, panPath };
+  return { ok: true, url, accountName: account.name, panPath, timings: { pathMs: Math.round(t1 - t0), linkMs: Math.round(t2 - t1) } };
 }
 
 /**

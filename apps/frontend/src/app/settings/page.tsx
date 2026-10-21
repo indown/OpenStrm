@@ -27,6 +27,7 @@ import { UpdateSection } from "./components/UpdateSection";
 import { TmdbCacheButton } from "./components/TmdbCacheButton";
 import { AgentSection } from "./components/AgentSection";
 import { PathMappingsEditor, RouteRulesEditor } from "./components/EmbyProxyRules";
+import { PlaybackDiagnoseButton } from "./components/PlaybackDiagnoseButton";
 import { SectionNav, type Section } from "./components/SectionNav";
 
 /** 右侧导航的顺序就是页面顺序；id 对应各 section 上的锚点 */
@@ -758,6 +759,7 @@ export default function SettingsPage() {
                   </FormItem>
                 )}
               />
+              <PlaybackDiagnoseButton configured={Boolean(saved?.emby?.url && saved?.emby?.apiKey)} />
             </section>
 
             <section id="tmdb" className="scroll-mt-20 space-y-4 rounded-xl border bg-card p-6">

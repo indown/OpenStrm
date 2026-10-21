@@ -116,6 +116,7 @@ export type {
   TaskOrganizeSettings,
 } from "./organize.js";
 export type { UpdateRelease, UpdateState, UpdateStatus } from "./update.js";
+export type { DirectLinkFailure, PlaybackDiagnosis } from "./emby.js";
 export type {
   AgentCall,
   AgentInfo,

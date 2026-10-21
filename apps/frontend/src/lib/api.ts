@@ -47,6 +47,7 @@ import type {
   OrganizeTemplatePreview,
   OrganizeUnit,
   OrganizeUnitPatch,
+  PlaybackDiagnosis,
   ResourceCheckResult,
   ResourceSearchResult,
   ResourceStatus,
@@ -966,6 +967,11 @@ export const api = {
     },
   },
 
+  emby: {
+    /** 起播诊断：会让 Emby 真探测一次、向网盘真要一次直链，PlaybackInfo 慢的要几十秒 */
+    playbackDiagnose: (itemId?: string) =>
+      data(axiosInstance.post<PlaybackDiagnosis>("/api/emby/playback-diagnose", { itemId }, { timeout: 120_000 })),
+  },
   system: {
     clearDirectory: (targetPath: string) =>
       data(axiosInstance.post<{ message: string; clearedPath: string }>("/api/clearDirectory", { targetPath })),

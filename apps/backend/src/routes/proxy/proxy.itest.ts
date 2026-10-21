@@ -121,7 +121,7 @@ setLinkResolver(async (embyPath, userAgent) => {
   resolveCalls++;
   lastResolvedUa = userAgent;
   return embyPath.startsWith(MOUNT) || embyPath.startsWith(HTTP_MOUNT)
-    ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath }
+    ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath, timings: { pathMs: 0, linkMs: 0 } }
     : { ok: false, reason: "not-mounted" };
 });
 
@@ -137,6 +137,16 @@ test("挂载点里的条目 302 到直链", async () => {
     const res = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
     assert.equal(res.statusCode, 302);
     assert.equal(res.headers.location, DIRECT_URL, "已转义的直链必须原样透传，不能二次编码");
+  });
+
+test("302 响应带 Server-Timing：冷解析四段用时，缓存命中标 hit", async () => {
+    reset();
+    const cold = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
+    assert.equal(cold.statusCode, 302);
+    assert.match(String(cold.headers["server-timing"]), /^lookup;dur=\d+, path;dur=\d+, link;dur=\d+, total;dur=\d+$/);
+    const hit = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
+    assert.equal(hit.statusCode, 302);
+    assert.match(String(hit.headers["server-timing"]), /^cache;desc=hit, total;dur=\d+$/);
   });
 
 test("小写路径同样命中（客户端大小写不统一）", async () => {
@@ -300,7 +310,7 @@ test("strm 里是 OpenList 地址的条目：换到直链就 302，换不到就�
       setLinkResolver(async (embyPath) => {
         resolveCalls++;
         return embyPath.startsWith(MOUNT) || embyPath.startsWith(HTTP_MOUNT)
-          ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath }
+          ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath, timings: { pathMs: 0, linkMs: 0 } }
           : { ok: false, reason: "not-mounted" };
       });
     }
@@ -339,7 +349,7 @@ test("解析抛异常也回源，不让播放直接失败", async () => {
     setLinkResolver(async (embyPath) => {
       resolveCalls++;
       return embyPath.startsWith(MOUNT) || embyPath.startsWith(HTTP_MOUNT)
-        ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath }
+        ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath, timings: { pathMs: 0, linkMs: 0 } }
         : { ok: false, reason: "not-mounted" };
     });
   });
@@ -377,6 +387,13 @@ test("挂载点里的媒体源被标成可直连，本地源不动", async () =>
     assert.match(pan.DirectStreamUrl, /api_key=k/, "查询串要保留，丢了客户端就没法鉴权");
 
     assert.equal(local.SupportsDirectPlay, false, "本地源不该被改");
+  });
+
+test("PlaybackInfo 响应带 Server-Timing：Emby 用时和流数", async () => {
+    reset();
+    const res = await app.inject({ method: "POST", url: "/emby/Items/item-1/PlaybackInfo", payload: {} });
+    assert.equal(res.statusCode, 200);
+    assert.match(String(res.headers["server-timing"]), /^emby;dur=\d+, streams;desc=\d+$/);
   });
 
 test("只在任务上开了 302、没手填 mediaMountPath：PlaybackInfo 同样改写", async () => {
@@ -491,14 +508,14 @@ test("回源时带上真实客户端 IP", async () => {
 
 test("非 ASCII 直链才转义，且只转非 ASCII 部分", async () => {
     reset();
-    setLinkResolver(async () => ({ ok: true, url: UNICODE_URL, accountName: "主号", panPath: "/x" }));
+    setLinkResolver(async () => ({ ok: true, url: UNICODE_URL, accountName: "主号", panPath: "/x", timings: { pathMs: 0, linkMs: 0 } }));
     const res = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
     assert.equal(res.statusCode, 302);
     assert.equal(res.headers.location, "https://cdn.115.com/%E7%9B%B4%E9%93%BE?t=1");
     setLinkResolver(async (embyPath) => {
       resolveCalls++;
       return embyPath.startsWith(MOUNT) || embyPath.startsWith(HTTP_MOUNT)
-        ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath }
+        ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath, timings: { pathMs: 0, linkMs: 0 } }
         : { ok: false, reason: "not-mounted" };
     });
   });

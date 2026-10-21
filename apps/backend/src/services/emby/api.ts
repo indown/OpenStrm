@@ -28,6 +28,8 @@ export type EmbyItemLookup = {
 };
 
 const LOOKUP_TIMEOUT_MS = 10_000;
+/** PlaybackInfo 可能触发 ffprobe 隔着网盘读文件头，慢的要几十秒 */
+const PLAYBACK_INFO_TIMEOUT_MS = 90_000;
 
 /** Emby 上游地址。默认值和 catch-all 保持一致（docker 网关上的 Emby） */
 export function embyUpstream(): string {
@@ -89,12 +91,20 @@ export function normalizeMediaSourceId(id: string | undefined): string | undefin
   return id.startsWith("mediasource_") ? id.slice("mediasource_".length) : id;
 }
 
-async function fetchJson(url: string, timeoutMs = LOOKUP_TIMEOUT_MS): Promise<unknown> {
+export async function fetchJson(
+  url: string,
+  timeoutMs = LOOKUP_TIMEOUT_MS,
+  init: { method?: "GET" | "POST"; body?: string } = {},
+): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
-      headers: { Accept: "application/json" },
+      method: init.method ?? "GET",
+      headers: init.body === undefined
+        ? { Accept: "application/json" }
+        : { Accept: "application/json", "Content-Type": "application/json" },
+      body: init.body,
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`Emby ${res.status} ${res.statusText}`);
@@ -102,6 +112,34 @@ async function fetchJson(url: string, timeoutMs = LOOKUP_TIMEOUT_MS): Promise<un
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** 一组媒体源里一共几条媒体流；0 = Emby 还没探测过这个 strm（或探测失败） */
+export function countMediaStreams(sources: unknown): number {
+  if (!Array.isArray(sources)) return 0;
+  return (sources as Array<{ MediaStreams?: unknown }>).reduce(
+    (n, s) => n + (Array.isArray(s.MediaStreams) ? s.MediaStreams.length : 0),
+    0,
+  );
+}
+
+/**
+ * 服务端替播放器问一次 PlaybackInfo。
+ *
+ * strm 条目只有被问到 PlaybackInfo 时 Emby 才去探测媒体流，扫库和 Refresh 都不探；
+ * 探过一次就落库，之后再问不再探。只带 API Key、不带 UserId 和设备档案也行（真 Emby 验过），
+ * 所以预热和起播诊断都走这里。回的是响应里的 MediaSources（Path 是 strm 的内容）。
+ */
+export async function requestPlaybackInfo(
+  itemId: string,
+  opts: { apiKey?: string; timeoutMs?: number } = {},
+): Promise<EmbyMediaSource[]> {
+  const apiKey = opts.apiKey || configuredApiKey();
+  const url = `${embyUpstream()}/Items/${encodeURIComponent(itemId)}/PlaybackInfo?api_key=${encodeURIComponent(apiKey)}`;
+  const body = (await fetchJson(url, opts.timeoutMs ?? PLAYBACK_INFO_TIMEOUT_MS, { method: "POST", body: "{}" })) as
+    | { MediaSources?: EmbyMediaSource[] }
+    | null;
+  return Array.isArray(body?.MediaSources) ? body.MediaSources : [];
 }
 
 /**

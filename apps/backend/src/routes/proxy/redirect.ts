@@ -87,6 +87,19 @@ function safeLocation(url: string): string {
 }
 
 /**
+ * 302 响应带 Server-Timing：排查起播慢时 curl -I 一眼能看到时间花在查 Emby、找路径还是取链上；
+ * 缓存命中只有 total 和 cache;desc=hit。单位毫秒，整数
+ */
+function serverTiming(parts: Record<string, number | string | undefined>): string {
+  return Object.entries(parts)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => (typeof v === "number" ? `${k};dur=${v}` : `${k};desc=${v}`))
+    .join(", ");
+}
+
+const ms = (from: number): number => Math.round(performance.now() - from);
+
+/**
  * 需要"两跳"的客户端。
  *
  * 115 直链和换链时用的 User-Agent 严格绑定（实测：用 A 换的链接拿 B 去取，CDN 直接 403）。
@@ -140,6 +153,7 @@ async function redirectWithLookup(
   const mediaSourceId = queryValue(request.query, "MediaSourceId", "mediaSourceId");
   const userAgent = request.headers["user-agent"];
   const settings = readSettingsSafe();
+  const started = performance.now();
 
   /**
    * 没有客户端凭据就不往下走，而且必须在查缓存之前拦——否则匿名请求能白拿
@@ -204,16 +218,20 @@ async function redirectWithLookup(
   const cached = linkCache.get(cacheKey);
   if (cached) {
     // 每次拖进度条都命中一次，info 太吵；首次解析那条仍是 info
-    request.log.debug({ itemId, ua: userAgent }, "302 缓存命中");
+    request.log.debug({ itemId, ua: userAgent, totalMs: ms(started) }, "302 缓存命中");
+    reply.header("server-timing", serverTiming({ cache: "hit", total: ms(started) }));
     return reply.redirect(cached, 302);
   }
 
   // 解析和响应分开：redirect 一旦写了 location 头再抛错，
   // catch 里的回源会带着这个坏头去发流，兜底也跟着崩。
   let target: string;
+  let timing: Record<string, number> = {};
   try {
     // 为了裁决路由已经查过的就不再查
+    const lookupStart = performance.now();
     if (item === undefined) item = await lookup(itemId, { mediaSourceId, apiKey });
+    timing.lookup = ms(lookupStart);
     if (!item?.path) {
       request.log.info({ itemId }, "Emby 未返回路径，回源");
       return toEmby(request, reply);
@@ -238,13 +256,16 @@ async function redirectWithLookup(
 
     target = safeLocation(resolved.url);
     linkCache.set(cacheKey, target);
-    // 带上 UA：直链和它绑定，排查"能起播不能拖动"之类的问题时要看两跳的 UA 是否一致
-    request.log.info({ itemId, account: resolved.accountName, ua: userAgent }, "302 到 115 直链");
+    timing = { ...timing, path: resolved.timings.pathMs, link: resolved.timings.linkMs, total: ms(started) };
+    // 带上 UA：直链和它绑定，排查"能起播不能拖动"之类的问题时要看两跳的 UA 是否一致；
+    // 分段耗时（查 Emby / 找路径 / 取链 / 总计，毫秒）：起播慢时先看这一行
+    request.log.info({ itemId, account: resolved.accountName, ua: userAgent, lookupMs: timing.lookup, pathMs: timing.path, linkMs: timing.link, totalMs: timing.total }, "302 到 115 直链");
   } catch (err) {
     request.log.error({ err, itemId }, "302 解析失败，回源");
     return toEmby(request, reply);
   }
 
+  reply.header("server-timing", serverTiming(timing));
   return reply.redirect(target, 302);
 }
 

@@ -79,7 +79,7 @@ setLinkResolver(async (embyPath) => {
   });
   const body = (await res.json()) as { code: number; data?: { raw_url: string } };
   if (body.code !== 200 || !body.data) return { ok: false, reason: "not-found" };
-  return { ok: true, url: body.data.raw_url, accountName: "lab", panPath: rest };
+  return { ok: true, url: body.data.raw_url, accountName: "lab", panPath: rest, timings: { pathMs: 0, linkMs: 0 } };
 });
 
 const app = Fastify({ logger: false, requestTimeout: 300_000 });
