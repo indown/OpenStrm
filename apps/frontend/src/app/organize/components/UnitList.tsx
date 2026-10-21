@@ -585,7 +585,7 @@ function EpisodeCells({ item, pin, disabled, onPin }: { item: OrganizeItem; pin?
     if (ev.key === "Enter") ev.currentTarget.blur();
   };
   return (
-    <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground" title="直接填第几季第几集，失焦就按它重新规划；钉了的不再受文件名、季覆盖 / 集偏移影响，两格都清空就撤掉">
+    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground" title="直接填第几季第几集，失焦就按它重新规划；钉了的不再受文件名、季覆盖 / 集偏移影响，两格都清空就撤掉">
       S
       <Input className="h-6 w-10 px-1 text-center text-[11px] tabular-nums" value={s} onChange={(ev) => setS(ev.target.value)} onBlur={commit} onKeyDown={blurOnEnter} disabled={disabled} inputMode="numeric" aria-label="季" />
       E
@@ -662,7 +662,7 @@ function FileMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="mt-1 size-6" disabled={disabled} aria-label="更多改法">
+        <Button variant="ghost" size="icon" className="size-6" disabled={disabled} aria-label="更多改法">
           <MoreHorizontal className="size-3.5" />
         </Button>
       </DropdownMenuTrigger>
@@ -713,7 +713,7 @@ function ConflictMenu({ current, disabled, onPick }: { current?: string; disable
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="mt-1 h-6 gap-1 px-1.5 text-[11px] font-normal" disabled={disabled}>
+        <Button variant="outline" size="sm" className="h-6 gap-1 px-1.5 text-[11px] font-normal" disabled={disabled}>
           {current ?? "怎么办"}
           <ChevronDown className="size-3 opacity-60" />
         </Button>
@@ -773,13 +773,15 @@ function ItemsTable({
   const toggleable = (it: OrganizeItem) => it.kind !== "dir" && (excluded.has(it.srcPath) || it.action === "rename" || it.action === "move" || it.action === "conflict");
   return (
     <div className="mt-3 overflow-x-auto rounded-md border">
-      <table className="w-full min-w-[640px] text-xs">
+      {/* 行里的东西高矮不一（勾选框 16、徽标 22、按钮 24），文字行统一 leading-5 并把每列的第一行都放进 h-5 的行框里，第一行才对得齐 */}
+      <table className="w-full min-w-[640px] text-xs leading-5">
         <thead className="bg-muted/40 text-muted-foreground">
           <tr>
-            {editable && <th className="w-8 px-2 py-1.5" aria-label="勾选" />}
-            <th className="px-2 py-1.5 text-left font-medium">动作</th>
+            {editable && <th className="w-9 px-2 py-1.5" aria-label="勾选" />}
+            <th className="w-28 px-2 py-1.5 text-left font-medium">动作</th>
             <th className="px-2 py-1.5 text-left font-medium">原来</th>
             <th className="px-2 py-1.5 text-left font-medium">整理后</th>
+            {editable && <th className="w-10 px-2 py-1.5" aria-label="更多" />}
           </tr>
         </thead>
         <tbody>
@@ -789,35 +791,30 @@ function ItemsTable({
             return (
               <tr key={it.id} className={`border-t align-top ${userExcluded ? "opacity-60" : ""}`}>
                 {editable && (
-                  <td className="px-2 py-1.5">
+                  <td className="px-2 py-2">
                     {toggleable(it) && (
-                      <Checkbox checked={!userExcluded} disabled={pending} onCheckedChange={(v) => onToggleItems([it.id], v === true)} title={userExcluded ? "勾上才会动这个文件" : "取消勾选：这个文件留在原处"} />
+                      <div className="flex h-5 items-center">
+                        <Checkbox checked={!userExcluded} disabled={pending} onCheckedChange={(v) => onToggleItems([it.id], v === true)} title={userExcluded ? "勾上才会动这个文件" : "取消勾选：这个文件留在原处"} />
+                      </div>
                     )}
                   </td>
                 )}
-                <td className="px-2 py-1.5 whitespace-nowrap">
-                  <ItemStatus it={it} stage={stage} />
-                  {it.attempts > 1 && <div className="mt-0.5 text-muted-foreground tabular-nums">已试 {it.attempts} 轮</div>}
+                <td className="px-2 py-2 whitespace-nowrap">
+                  <div className="flex h-5 items-center">
+                    <ItemStatus it={it} stage={stage} />
+                  </div>
+                  {it.attempts > 1 && <div className="text-muted-foreground tabular-nums">已试 {it.attempts} 轮</div>}
                   {editable && !userExcluded && (it.action === "conflict" || resolutions[it.srcPath]) && (
-                    <ConflictMenu
-                      current={resolutions[it.srcPath] ? CONFLICT_LABEL[resolutions[it.srcPath].how] : undefined}
-                      disabled={pending}
-                      onPick={(how) => onResolve(it, how)}
-                    />
-                  )}
-                  {editable && it.kind !== "dir" && (
-                    <FileMenu
-                      canPin={tv && !local && it.kind === "video"}
-                      canKind={!local && it.kind === "video"}
-                      pinned={!!pins[it.srcPath]}
-                      renamed={!!renames[it.srcPath]}
-                      kind={kinds[it.srcPath]}
-                      disabled={pending}
-                      onPick={(what) => onFileEdit(it, what)}
-                    />
+                    <div className="mt-1">
+                      <ConflictMenu
+                        current={resolutions[it.srcPath] ? CONFLICT_LABEL[resolutions[it.srcPath].how] : undefined}
+                        disabled={pending}
+                        onPick={(how) => onResolve(it, how)}
+                      />
+                    </div>
                   )}
                 </td>
-                <td className="px-2 py-1.5">
+                <td className="px-2 py-2">
                   <div className="break-all">{baseName(it.srcPath)}</div>
                   <div className="break-all text-muted-foreground">{dirName(it.srcPath)}</div>
                   {it.probe && <div className="text-muted-foreground">探测到 {probeLine(it.probe)}</div>}
@@ -830,21 +827,38 @@ function ItemsTable({
                     <div className={`break-all ${reasonClass(it, unitSelected, userExcluded)}`}>{it.reason}</div>
                   ) : null}
                 </td>
-                <td className="px-2 py-1.5">
+                <td className="px-2 py-2">
                   {changed || it.action === "conflict" ? (
                     <>
                       <div className={`break-all ${changed ? "font-medium" : ""}`}>{baseName(it.dstPath)}</div>
                       <div className="break-all text-muted-foreground">{dirName(it.dstPath)}</div>
                     </>
                   ) : (
-                    <span className="text-muted-foreground">—</span>
+                    <div className="text-muted-foreground">—</div>
                   )}
                   {editable && tv && !local && it.kind === "video" && !userExcluded && it.action !== "skip" && (
-                    <div>
+                    <div className="mt-1">
                       <EpisodeCells item={it} pin={pins[it.srcPath]} disabled={pending} onPin={(pin) => onPin(it, pin)} />
                     </div>
                   )}
                 </td>
+                {editable && (
+                  <td className="px-2 py-2">
+                    {it.kind !== "dir" && (
+                      <div className="flex h-5 items-center justify-end">
+                        <FileMenu
+                          canPin={tv && !local && it.kind === "video"}
+                          canKind={!local && it.kind === "video"}
+                          pinned={!!pins[it.srcPath]}
+                          renamed={!!renames[it.srcPath]}
+                          kind={kinds[it.srcPath]}
+                          disabled={pending}
+                          onPick={(what) => onFileEdit(it, what)}
+                        />
+                      </div>
+                    )}
+                  </td>
+                )}
               </tr>
             );
           })}
@@ -876,8 +890,10 @@ function DirFiles({ runId, stage, version }: { runId: string; stage: OrganizeRun
   return (
     <ul className="mt-3 space-y-1 text-xs">
       {items.map((it) => (
-        <li key={it.id} className="flex items-start gap-2">
-          <ItemStatus it={it} stage={stage} />
+        <li key={it.id} className="flex items-start gap-2 leading-5">
+          <span className="flex h-5 shrink-0 items-center">
+            <ItemStatus it={it} stage={stage} />
+          </span>
           <span className="break-all">{it.action === "rmdir" ? it.srcPath : it.dstPath}</span>
           {it.error && <span className="break-all text-destructive">{it.error}</span>}
         </li>
