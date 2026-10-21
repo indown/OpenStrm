@@ -83,6 +83,11 @@ export type AppSettings = {
      */
     allowAnonymousRedirect?: boolean;
     /**
+     * 入库后预热：新入库、Emby 还没探测过媒体流的 strm 条目，服务端替播放器先问一次 PlaybackInfo，
+     * 让 Emby 在没人看的时候把探测做掉，首播就不用等它了。默认开；同步 / 整理在跑时让路。
+     */
+    prewarm?: boolean;
+    /**
      * 302 代理的路径映射：Emby 看到的路径前缀 → 哪个网盘账号的哪个目录。
      * 开了 302 的任务推得出来的不用填（strmPrefix + originPath 就是映射）；这里是给任务推不出来的：
      * 别的工具生成的 strm、挂载结构不是「一个前缀对一个目录」的。手填的优先于任务推出来的。

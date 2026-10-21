@@ -31,6 +31,10 @@ let byId: Record<string, EmbyNewItem> = {};
 let byIdCalls: string[][] = [];
 let fetchCalls = 0;
 let notified: NotifyEvent[] = [];
+/** 桩的预热：记下问过哪些 id；回什么流由测试定；问完可以改 byId 模拟 Emby 落库 */
+let pbiCalls: string[] = [];
+let pbiResult: (id: string) => Array<{ MediaStreams?: unknown[] }> = () => [];
+let busy = false;
 
 const T0 = 1_800_000_000_000;
 const ep = (over: Partial<EmbyNewItem>): EmbyNewItem => ({
@@ -61,6 +65,12 @@ before(() => {
     notify: async (ev) => {
       notified.push(ev);
     },
+    playbackInfo: async (id) => {
+      pbiCalls.push(id);
+      return pbiResult(id);
+    },
+    busy: () => busy,
+    wait: async () => {},
   });
 });
 
@@ -72,6 +82,9 @@ beforeEach(async () => {
   byIdCalls = [];
   fetchCalls = 0;
   notified = [];
+  pbiCalls = [];
+  pbiResult = () => [];
+  busy = false;
 });
 
 after(async () => {
@@ -228,4 +241,56 @@ test("入库时 Emby 还没分析流的条目：记进 pending，之后每轮按
   const calls = byIdCalls.length;
   await tickEmbyNew();
   assert.equal(byIdCalls.length, calls, "都处理完了，pending 空了就不再按 id 问");
+});
+
+test("入库后预热：pending 里的条目服务端问一次 PlaybackInfo，一轮最多 5 条、问过的不再问；探好的同一轮就回填", async () => {
+  replaceTasks([{ id: "emby-t", account: "acc", accountType: "quark", originPath: "tv", targetPath: "x/tv", strmPrefix: "/mnt" }]);
+  __test_resetMediaProbes();
+  const items = [1, 2, 3, 4, 5, 6, 7].map((n) => ep({ id: `w-${n}`, episode: n, at: T0 - n, sources: [{ path: `/mnt/tv/W/W.S01E0${n}.mkv`, size: 1, streams: [] }] }));
+  page = items;
+  byId = Object.fromEntries(items.map((i) => [i.id, i]));
+  // Emby 探完就落库：预热桩顺手把 byId 里的那条换成带流的
+  pbiResult = (id) => {
+    byId[id] = { ...byId[id], sources: [{ path: byId[id].sources![0].path, size: 2, streams: [{ Type: "Video", Codec: "h264", Width: 1920, Height: 1080 }] }] };
+    return [{ MediaStreams: [{}, {}] }];
+  };
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["w-1", "w-2", "w-3", "w-4", "w-5"], "按入库先后、一轮最多 5 条");
+  assert.equal(countMediaProbes(), 5, "这轮预热探好的，同一轮按 id 再问时就回填了");
+
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls.slice(5), ["w-6", "w-7"], "下一轮接着问剩下的");
+  assert.equal(countMediaProbes(), 7);
+
+  const before = pbiCalls.length;
+  await tickEmbyNew();
+  assert.equal(pbiCalls.length, before, "都探好、pending 空了就不再问");
+});
+
+test("预热：Emby 探不到的只问一次不反复问；关掉开关不问；同步 / 整理在跑时让路、空下来再问", async () => {
+  __test_resetMediaProbes();
+  const cold = ep({ id: "c-1", episode: 1, sources: [{ path: "/mnt/tv/C/C.S01E01.mkv", size: 1, streams: [] }] });
+  page = [cold];
+  byId = { "c-1": cold };
+  pbiResult = () => [{ MediaStreams: [] }];
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["c-1"]);
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["c-1"], "探不到的记了时间，隔天才再试，这轮不重复问");
+
+  await __test_resetEmbyNew();
+  replaceAppSettings({ ...readAppSettings(), emby: { prewarm: false } });
+  pbiCalls = [];
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, [], "开关关着不预热");
+  assert.ok(byIdCalls.length > 0, "但 pending 照样按 id 再问（Emby 自己播放过也会有流）");
+
+  await __test_resetEmbyNew();
+  replaceAppSettings({ ...readAppSettings(), emby: {} });
+  busy = true;
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, [], "同步 / 整理在跑：让路");
+  busy = false;
+  await tickEmbyNew();
+  assert.deepEqual(pbiCalls, ["c-1"], "空下来那轮就问了");
 });

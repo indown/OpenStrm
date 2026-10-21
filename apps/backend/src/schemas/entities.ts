@@ -213,6 +213,7 @@ export const settingsPatchSchema = z.looseObject({
       url: z.string().optional(),
       apiKey: z.string().optional(),
       allowAnonymousRedirect: z.boolean().optional(),
+      prewarm: z.boolean().optional(),
       pathMappings: z
         .array(
           z.object({

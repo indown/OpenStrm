@@ -20,6 +20,9 @@ import { moduleLogger } from "../../lib/logger.js";
 import { createPollingLoop } from "../../lib/polling.js";
 import { notify, notifyPrefs, type EmbyNewGroup, type NotifyEvent } from "../notify.js";
 import { backfillProbesFromEmby, type EmbyStreamSource } from "../media/emby-streams.js";
+import { countMediaStreams, requestPlaybackInfo, type EmbyMediaSource } from "./api.js";
+import { listRunningTaskIds } from "../task/registry.js";
+import { jobs as organizeJobs } from "../organize/run-state.js";
 
 const log = moduleLogger("emby-new");
 
@@ -59,6 +62,12 @@ interface Deps {
   /** 按 id 取条目（带媒体源）：入库时还没分析流的条目之后几轮再问；Emby 未配置时回 null */
   fetchByIds: (ids: string[]) => Promise<EmbyNewItem[] | null>;
   notify: (event: NotifyEvent) => Promise<unknown>;
+  /** 预热：服务端替播放器问一次 PlaybackInfo，Emby 借此探测 strm 的媒体流并落库 */
+  playbackInfo: (id: string) => Promise<EmbyMediaSource[]>;
+  /** 同步 / 整理在跑：预热让路（它们已经在占网盘和 Emby） */
+  busy: () => boolean;
+  /** 两次预热之间歇一下；测试里换成不等 */
+  wait: (ms: number) => Promise<void>;
 }
 
 /** Emby 的一页条目 → 我们的结构；sources 只在要了 MediaSources 时有 */
@@ -113,7 +122,14 @@ async function fetchByIdsReal(ids: string[]): Promise<EmbyNewItem[] | null> {
   return out;
 }
 
-const realDeps: Deps = { fetch: fetchLatestReal, fetchByIds: fetchByIdsReal, notify };
+const realDeps: Deps = {
+  fetch: fetchLatestReal,
+  fetchByIds: fetchByIdsReal,
+  notify,
+  playbackInfo: (id) => requestPlaybackInfo(id),
+  busy: () => listRunningTaskIds().length > 0 || organizeJobs.size > 0,
+  wait: (ms) => new Promise((r) => setTimeout(r, ms)),
+};
 
 let deps: Deps = { ...realDeps };
 
@@ -163,6 +179,48 @@ const PENDING_TTL_MS = 30 * 24 * 3600 * 1000;
 interface Pending {
   id: string;
   since: number;
+  /** 上次预热（服务端问 PlaybackInfo）的时间；探测失败的条目隔一天再试一次，不每轮都试 */
+  warmedAt?: number;
+}
+
+/** 预热：一轮最多这么多条、每条之间歇这么久——PlaybackInfo 会让 Emby 隔着网盘读文件头，一条就是几秒到几十秒 */
+const PREWARM_PER_ROUND = 5;
+const PREWARM_GAP_MS = 3_000;
+/** 探测失败（Emby 读不到 strm 指向的位置）的条目多久后再试 */
+const PREWARM_RETRY_MS = 24 * 3600 * 1000;
+
+/**
+ * 入库后预热。Emby 对 strm 条目只在被问到 PlaybackInfo 时才探测媒体流（扫库、Refresh 都不探），
+ * 不预热的话这几秒到几十秒就全算在首播头上。这里替播放器先问一次：探成功的 Emby 就落库了，
+ * 之后真播放不再探；探不到的（Emby 主机读不到 strm 指向的位置）记下时间，隔天再试。
+ * 一次一条、慢慢来：Emby 的探测要真读网盘，和同步 / 整理抢的是同一条带宽，它们在跑时整轮让路。
+ */
+async function prewarmRound(pending: Pending[], now: number): Promise<void> {
+  if (pending.length === 0 || readAppSettings().emby?.prewarm === false) return;
+  if (deps.busy()) {
+    log.debug("同步 / 整理在跑，这轮不预热");
+    return;
+  }
+  const due = pending.filter((p) => !p.warmedAt || now - p.warmedAt >= PREWARM_RETRY_MS).slice(0, PREWARM_PER_ROUND);
+  let probed = 0;
+  let empty = 0;
+  let failed: string | null = null;
+  for (const [i, p] of due.entries()) {
+    if (i > 0) await deps.wait(PREWARM_GAP_MS);
+    p.warmedAt = now;
+    try {
+      if (countMediaStreams(await deps.playbackInfo(p.id)) > 0) probed += 1;
+      else empty += 1;
+    } catch (err) {
+      failed ??= err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (due.length === 0) return;
+  const parts = [`预热了 ${due.length} 个新入库条目的媒体流`];
+  if (probed > 0) parts.push(`${probed} 个 Emby 已探测落库`);
+  if (empty > 0) parts.push(`${empty} 个 Emby 探测不到（它读不到 strm 指向的位置，明天再试）`);
+  if (failed) parts.push(`有条目没问成：${failed}`);
+  log.info(parts.join("，"));
 }
 
 const hasVideoStream = (i: EmbyNewItem): boolean => (i.sources ?? []).some((src) => src.streams.some((st) => st.Type === "Video"));
@@ -183,6 +241,9 @@ async function backfillRound(sorted: EmbyNewItem[]): Promise<void> {
   const known = new Set(pending.map((p) => p.id));
   const ready = fresh.filter(hasVideoStream);
   for (const i of fresh) if (!hasVideoStream(i) && (i.sources?.length ?? 0) > 0 && !known.has(i.id)) pending.push({ id: i.id, since: now });
+
+  // 先预热再按 id 看：这轮刚探好的同一轮就能回填
+  await prewarmRound(pending, now);
 
   // 之前没分析的：按 id 再看一眼
   if (pending.length > 0) {

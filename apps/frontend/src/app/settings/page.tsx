@@ -172,6 +172,7 @@ const schema = z.object({
     url: httpUrl("填 http:// 或 https:// 开头的地址"),
     apiKey: z.string(),
     allowAnonymousRedirect: z.boolean(),
+    prewarm: z.boolean(),
     // 302 代理的两张规则表。行里的错误挂在整张表上（第几条、什么问题），FormMessage 显示在表下面；后端还会再校验一遍
     pathMappings: z.array(z.object({ from: z.string(), account: z.string(), to: z.string() })).superRefine((rows, ctx) => {
       const seen = new Set<string>();
@@ -254,6 +255,7 @@ function fromSettings(s: AppSettings): SettingsValues {
       url: s.emby?.url ?? "",
       apiKey: s.emby?.apiKey ?? "",
       allowAnonymousRedirect: s.emby?.allowAnonymousRedirect === true,
+      prewarm: s.emby?.prewarm !== false,
       pathMappings: (s.emby?.pathMappings ?? []).map((m) => ({ from: m.from ?? "", account: m.account ?? "", to: m.to ?? "" })),
       routeRules: (s.emby?.routeRules ?? []).map((r) => ({
         action: r.action === "redirect" ? ("redirect" as const) : ("relay" as const),
@@ -313,6 +315,7 @@ function toSettings(v: SettingsValues): AppSettings {
       url: v.emby.url,
       apiKey: v.emby.apiKey,
       allowAnonymousRedirect: v.emby.allowAnonymousRedirect,
+      prewarm: v.emby.prewarm,
       pathMappings: v.emby.pathMappings.map((m) => ({ from: m.from.trim(), account: m.account, ...optional("to", m.to) })),
       routeRules: v.emby.routeRules.map((r) => ({
         action: r.action,
@@ -734,6 +737,19 @@ export default function SettingsPage() {
                     label="允许未认证的请求换取直链"
                     description="默认关闭。开启后，任何能访问代理端口的人报一个条目 id 就能拿到你的媒体直链，无需登录 Emby。"
                     hint="不带 Emby 令牌的请求会改用上面那个 API Key 去解析直链。绝大多数播放器都会带令牌，只有确认播放器一个令牌都不发、且播放确实不走直连时才需要开启。"
+                    checked={field.value === true}
+                    onCheckedChange={field.onChange}
+                  />
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="emby.prewarm"
+                render={({ field }) => (
+                  <SwitchRow
+                    label="入库后预热媒体流"
+                    description="新入库的 strm 条目，服务端替播放器先问一次 PlaybackInfo，让 Emby 在没人看的时候把媒体流探测做掉，首播就不用等它了。"
+                    hint="Emby 对 strm 条目只在第一次播放时才探测媒体流（隔着网盘读文件头，几秒到几十秒），扫库和刷新都不探。预热一次一条、两分钟最多 5 条；同步 / 整理在跑时让路。Emby 读不到 strm 指向的位置时预热帮不上，那样的条目一天只试一次。"
                     checked={field.value === true}
                     onCheckedChange={field.onChange}
                   />
