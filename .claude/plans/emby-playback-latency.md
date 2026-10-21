@@ -77,3 +77,40 @@ Emby 的 strm 条目只在首次 PlaybackInfo 才探。我们已经有每两分�
 ## 四、建议的顺序
 
 0 → 1 → 2 → 3，一两天；4、5、6 看 0 量出来的数字再定。真机环境用 `scripts/emby-lab.sh`（真 Emby 容器 + strm 库 + 直链桩）量①和②，再接真 115 量一遍 ③。
+
+## 实施计划（2026-10-21，用户：「按你的推荐制定计划开始吧」）
+
+顺序 0 → 1 → 2 → 3，每步独立提交；4 / 5 / 6 看第 0 步量出来的数字再定。
+
+**第 0 步 量**：`redirect.ts` 的 302 日志带 `lookupMs / pathMs / linkMs / totalMs`（缓存命中记 0），302 响应加 `Server-Timing` 头；`playback-info.ts` 记 Emby 回答用了多久、条目有没有 MediaStreams（`embyMs`、`hasStreams`）。`ResolveResult` 的成功分支多一个 `timings`。设置页 Emby 一节加「起播诊断」：`POST /api/emby/playback-diagnose`，挑最近入库的一个 strm 条目（或指定 id），服务端走一遍 PlaybackInfo（量 Emby 的时间、有没有流）+ 直链解析（分段），把几段时间和结论摆出来。
+
+**第 1 步 预热**：lab 先验两件事——服务端带 API key 的 `POST /Items/{id}/PlaybackInfo?UserId=` 能不能让 Emby 探 strm 并持久化；`POST /Items/{id}`（UpdateItem）带 MediaStreams 能不能直接写进去。能写就两条都做（有探测缓存的写、没有的预热），不能就只预热。预热挂在 `library-new.ts` 的一轮里：pending 列表里没流的条目，服务端自己发 PlaybackInfo，一次一个、隔 3 秒、一轮最多 5 条；设置 `emby.prewarm`（默认开）；整理 / 同步在跑时不预热（让路）。
+
+**第 2 步 预解析**：`playback-info.ts` 改写完响应后，对每个我们的媒体源异步调 `redirect.ts` 导出的 `prewarmLink({ itemId, mediaSourceId, path, mediaSource, userAgent })`：直接用响应体里的路径填 lookupCache，再解析直链填 linkCache；同 key 并发只跑一次；失败只记 debug。`direct-link.ts` 加 path → pickcode 的 LRU（1 小时），Infuse 第二跳换 UA 时至少省掉找路径那几次。
+
+**第 3 步 少打请求**：`toDirectUrl` 先查 `path_cache`（按账号 + 绝对路径取 file_id，代理进程只读库也能查）→ `getPickcodeToId`（已有缓存）→ 取链；没有的退回 `getIdToPath`。
+
+**测试**：proxy.itest（日志字段、Server-Timing、PlaybackInfo 之后 stream 命中缓存、桩只被调一次）、library-new.itest（pending 条目触发预热、一轮上限、开关关掉不发、整理在跑不发）、direct-link 单测（path_cache 命中走短路、没命中退回）。lab：真 Emby 容器验第 1 步的两个前提，再把 strm 指向容器里的真文件量首播前后。
+
+### 实验记录：真 Emby 容器（2026-10-21，`scripts/emby-lab.sh up`，EMBY_PORT=8097）
+
+strm 指向容器里一个 ffmpeg 生成的 5 秒 mp4（像 Emby 主机挂着网盘），另一条指向宿主机 http 静态服务（像 http 前缀）。看 Emby 日志里 ffprobe 的行数判断有没有探测：
+
+| 动作 | 结果 |
+| --- | --- |
+| 服务端 `POST /Items/{id}/PlaybackInfo?api_key=`（不带 UserId、不带设备档案、body `{}`） | 200，真跑 ffprobe，MediaStreams / Container / Size / RunTimeTicks 落库；`/Items?Ids=` 再查带着流回来 |
+| 同一条目再问 PlaybackInfo | 不再探，110 ms → 14 ms |
+| 带 `UserId=` | 一样，不是必需 |
+| http 的 strm | 一样探、一样落库 |
+| `POST /Items/{id}/Refresh?MetadataRefreshMode=FullRefresh` | 204 但 **不探**（和分析里的判断一致：扫库 / 刷新都不碰 strm 的流） |
+| `POST /Items/{id}`（UpdateItem）带 MediaStreams | 204 但 **不落**，之后 PlaybackInfo 照样探——「把探测缓存写回 Emby」这条路走不通 |
+| strm 指向读不到的 `/mnt/pan/…` | PlaybackInfo 仍 200（SupportsDirectStream true，我们照样 302），但 **每次都重探**（一次 3 回 ffprobe），永远不落库 |
+| PlaybackInfo 响应里 `MediaSources[].Path` | 就是 strm 的内容（`/mnt/pan/...`），302 要解析的就是它——第 2 步预解析可以直接从响应体拿，不用再问 Emby |
+
+结论：第 1 步只做「预热」（服务端替播放器问一次 PlaybackInfo），不做「写回」。探测失败的条目（Emby 主机读不到 strm 指向的位置）预热帮不上，每条只试一次、别反复试。
+
+### 第 0 步实施记录（2026-10-21）
+
+- `direct-link.ts` 成功分支带 `timings { pathMs, linkMs }`；`redirect.ts` 的 302 日志带 `lookupMs / pathMs / linkMs / totalMs`，响应头 `Server-Timing: lookup;dur=…, path;dur=…, link;dur=…, total;dur=…`，缓存命中是 `cache;desc=hit, total;dur=…`；`playback-info.ts` 记 `embyMs` 和流数（0 = Emby 刚才探测失败），响应头 `Server-Timing: emby;dur=…, streams;desc=N`。
+- `POST /api/emby/playback-diagnose`（`services/emby/diagnose.ts`，deps 可注入）：没指定 id 就在最近入库 50 条里挑还没探测过的 strm，服务端问一次 PlaybackInfo（`requestPlaybackInfo`，只带 API Key）、再调 `resolveEmbyPath` 换直链，把两段用时、流数前后、失败原因回给前端；设置页 Emby 一节的「起播诊断」块（`PlaybackDiagnoseButton`）把结论写成人话。shared 多了 `PlaybackDiagnosis` / `DirectLinkFailure`（后端 `ResolveFailure` 改成它的别名）。
+- 真 Emby 验过：自动挑到唯一没探过的那条（132 ms、流 0 → 2、probed），探过的 14 ms；不存在的 id 回 404。
