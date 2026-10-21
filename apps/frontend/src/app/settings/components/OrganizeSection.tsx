@@ -2,7 +2,6 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { OrganizeCategoryRule, OrganizeSettings, OrganizeTemplatePreview } from "@openstrm/shared";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SwitchRow } from "@/components/switch-row";
@@ -141,21 +140,35 @@ export function OrganizeSection({ value, onChange }: Props) {
         「整理」页按 TMDB 识别网盘里的文件，套下面的模板在网盘上改名 / 归位，本地 strm 跟着走。电影和剧集各一套模板；任务弹框里能给某个任务单独设。
       </p>
 
-      <div className="space-y-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-medium">媒体服务器</span>
-          {SERVERS.map((s) => (
-            <Button key={s.key} type="button" variant={activeServer === s.key ? "secondary" : "outline"} size="sm" className="h-8 text-xs" onClick={() => applyServer(s)} title={s.hint}>
-              {s.label}
-            </Button>
-          ))}
-          <span className="text-xs text-muted-foreground">{activeServer ? `当前是 ${SERVERS.find((s) => s.key === activeServer)?.label} 的规范` : "当前是自定义写法"}</span>
+      <div className="flex flex-col gap-1.5">
+        <Label>
+          媒体服务器
+          <FieldHint label="媒体服务器预设做什么">
+            按一下只改 id 标签写法、特别篇和花絮目录名、两类模板的文件名细节（Plex 是小写 s01e01、文件名带年份）；目录结构（年份 / 系列 / 分类那几层）和「保留原文件名」保留。
+            改完下面的模板、id 标签还能再单独调，调到和预设不一样就显示「自定义写法」。
+          </FieldHint>
+        </Label>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <div role="group" aria-label="媒体服务器预设" className="inline-flex rounded-md border p-0.5 text-xs">
+            {SERVERS.map((s) => (
+              <button
+                key={s.key}
+                type="button"
+                aria-pressed={activeServer === s.key}
+                onClick={() => applyServer(s)}
+                title={s.hint}
+                className={`rounded px-2.5 py-1 ${activeServer === s.key ? "bg-brand/15 font-medium text-brand" : "text-muted-foreground hover:text-foreground"}`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-xs text-muted-foreground">{activeServer ? `当前是 ${SERVERS.find((s) => s.key === activeServer)?.label} 的规范` : "当前是自定义写法，按一下预设会换掉文件名细节"}</span>
         </div>
-        <p className="text-xs text-muted-foreground">按一下只改 id 标签写法、特别篇和花絮目录名、两类模板的文件名细节；目录结构（年份 / 系列 / 分类那几层）保留。</p>
       </div>
 
-      <div className="space-y-3">
-        <div role="tablist" aria-label="命名模板" className="flex gap-1 border-b">
+      <div className="rounded-lg border">
+        <div role="tablist" aria-label="命名模板" className="flex gap-1 border-b bg-muted/40 px-2">
           {(["movie", "tv"] as MediaKind[]).map((k) => (
             <button
               key={k}
@@ -163,38 +176,40 @@ export function OrganizeSection({ value, onChange }: Props) {
               role="tab"
               aria-selected={tab === k}
               onClick={() => setTab(k)}
-              className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === k ? "border-brand font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+              className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === k ? "border-brand font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
             >
               {KIND_LABEL[k]}
               <span className="ml-1 text-xs font-normal text-muted-foreground">· {structureLabel(k)}</span>
             </button>
           ))}
         </div>
-        {tab === "movie" ? (
-          <TemplateEditor type="movie" mode="settings" value={movieTpl} fallback={DEFAULT_TEMPLATES.movie} server={server} preview={previewFor(preview, "movie")} onChange={(v) => set({ templates: { ...(value.templates ?? {}), movie: v } })} />
-        ) : (
-          <TemplateEditor type="tv" mode="settings" value={tvTpl} fallback={DEFAULT_TEMPLATES.tv} server={server} preview={previewFor(preview, "tv")} onChange={(v) => set({ templates: { ...(value.templates ?? {}), tv: v } })}>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <SwitchRow
-                label="文件名里写集标题"
-                description="每部剧多拉几次 TMDB 季详情；对 Emby 识别没影响，纯观感。"
-                checked={episodeTitle}
-                onCheckedChange={(v) => set({ episodeTitle: v })}
-              />
-              <div className="space-y-2 rounded-md border p-3">
-                <Label>特别篇目录名</Label>
-                <Select value={specials} onValueChange={(v) => set({ specials: v as OrganizeSettings["specials"] })}>
-                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="season00">Season 00（Emby / Jellyfin 默认）</SelectItem>
-                    <SelectItem value="specials">Specials（Plex / Kodi 惯例）</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">第 0 季的季目录：模板渲染出的 Season 00 换成 Specials；Emby / Jellyfin 两种都认。</p>
+        <div className="p-4">
+          {tab === "movie" ? (
+            <TemplateEditor type="movie" mode="settings" value={movieTpl} fallback={DEFAULT_TEMPLATES.movie} server={server} preview={previewFor(preview, "movie")} onChange={(v) => set({ templates: { ...(value.templates ?? {}), movie: v } })} />
+          ) : (
+            <TemplateEditor type="tv" mode="settings" value={tvTpl} fallback={DEFAULT_TEMPLATES.tv} server={server} preview={previewFor(preview, "tv")} onChange={(v) => set({ templates: { ...(value.templates ?? {}), tv: v } })}>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <SwitchRow
+                  label="文件名里写集标题"
+                  description="每部剧多拉几次 TMDB 季详情；对 Emby 识别没影响，纯观感。"
+                  checked={episodeTitle}
+                  onCheckedChange={(v) => set({ episodeTitle: v })}
+                />
+                <div className="flex flex-col gap-1.5 rounded-md border p-3">
+                  <Label>特别篇目录名</Label>
+                  <Select value={specials} onValueChange={(v) => set({ specials: v as OrganizeSettings["specials"] })}>
+                    <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="season00">Season 00（Emby / Jellyfin 默认）</SelectItem>
+                      <SelectItem value="specials">Specials（Plex / Kodi 惯例）</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">第 0 季的季目录：模板渲染出的 Season 00 换成 Specials；Emby / Jellyfin 两种都认。</p>
+                </div>
               </div>
-            </div>
-          </TemplateEditor>
-        )}
+            </TemplateEditor>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -275,10 +290,10 @@ export function OrganizeSection({ value, onChange }: Props) {
       </div>
 
       {value.extras !== "keep" && (
-        <div className="flex flex-wrap items-center gap-2 text-xs">
+        <div className="flex flex-col gap-1.5">
           <Label htmlFor={extrasId}>花絮目录名</Label>
-          <Input id={extrasId} value={extrasDir} placeholder="extras" className="h-8 w-40 font-mono text-xs" onChange={(e) => set({ extrasDir: e.target.value })} />
-          <span className="text-muted-foreground">Emby / Jellyfin 认 extras；Plex 只认 Other、Featurettes 这几个固定名字；不能带斜杠，留空就是 extras。</span>
+          <Input id={extrasId} value={extrasDir} placeholder="extras" className="w-56 font-mono text-xs" onChange={(e) => set({ extrasDir: e.target.value })} />
+          <p className="text-xs text-muted-foreground">作品目录下装花絮的子目录：Emby / Jellyfin 认 extras，Plex 只认 Other、Featurettes 这几个固定名字；不能带斜杠，留空就是 extras。</p>
         </div>
       )}
 

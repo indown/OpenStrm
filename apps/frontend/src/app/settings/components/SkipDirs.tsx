@@ -78,9 +78,9 @@ export function SkipDirs() {
         预览时这些目录下的东西不当作品扫：手工整理过的、不想动的目录放这里；整理页作品卡片的「…」里也能加。改了立刻生效，不用点保存。
       </p>
       {skips === null ? (
-        <p className="text-xs text-muted-foreground">读取中…</p>
+        <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">读取中…</p>
       ) : skips.length === 0 ? (
-        <p className="text-xs text-muted-foreground">还没有。</p>
+        <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">还没有不整理的目录。</p>
       ) : (
         <ul className="divide-y rounded-md border text-xs">
           {skips.map((s) => (
@@ -100,8 +100,8 @@ export function SkipDirs() {
         </ul>
       )}
       <div className="flex flex-wrap items-end gap-2">
-        <div className="w-full space-y-1 sm:w-44">
-          <Label className="text-xs text-muted-foreground">账号</Label>
+        <div className="flex w-full flex-col gap-1 sm:w-44">
+          <Label className="text-xs font-medium text-muted-foreground">账号</Label>
           <Select value={account} onValueChange={setAccount} disabled={accounts.length === 0}>
             <SelectTrigger className="h-8 w-full text-xs">
               <SelectValue placeholder={accounts.length === 0 ? "还没有账号" : "选账号"} />
@@ -115,12 +115,12 @@ export function SkipDirs() {
             </SelectContent>
           </Select>
         </div>
-        <div className="min-w-0 flex-1 space-y-1">
-          <Label className="text-xs text-muted-foreground">网盘目录（绝对路径）</Label>
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <Label className="text-xs font-medium text-muted-foreground">网盘目录（绝对路径）</Label>
           <Input className="h-8 font-mono text-xs" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/tv/旧剧" onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && void add()} />
         </div>
-        <div className="w-full space-y-1 sm:w-48">
-          <Label className="text-xs text-muted-foreground">备注（可不填）</Label>
+        <div className="flex w-full flex-col gap-1 sm:w-48">
+          <Label className="text-xs font-medium text-muted-foreground">备注（可不填）</Label>
           <Input className="h-8 text-xs" value={note} onChange={(e) => setNote(e.target.value)} placeholder="手工整理过" />
         </div>
         <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => void add()} disabled={busy || !account || !path.trim()}>
