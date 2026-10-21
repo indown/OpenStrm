@@ -11,7 +11,8 @@
     "build:frontend": "pnpm --filter @openstrm/frontend build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
-    "test": "CONFIG_DIR=/tmp/openstrm-test/config DATA_DIR=/tmp/openstrm-test/data pnpm --filter @openstrm/backend test"
+    "test": "CONFIG_DIR=/tmp/openstrm-test/config DATA_DIR=/tmp/openstrm-test/data pnpm --filter @openstrm/backend test && pnpm --filter @openstrm/frontend test",
+    "test:frontend": "pnpm --filter @openstrm/frontend test"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

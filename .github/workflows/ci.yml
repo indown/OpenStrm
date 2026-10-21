@@ -46,6 +46,9 @@ jobs:
           CONFIG_DIR: ${{ runner.temp }}/openstrm-config
           DATA_DIR: ${{ runner.temp }}/openstrm-data
         run: pnpm test
+      - name: Frontend unit tests
+        working-directory: apps/frontend
+        run: pnpm test
 
   docker:
     name: Docker image

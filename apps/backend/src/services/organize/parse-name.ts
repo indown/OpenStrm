@@ -838,7 +838,7 @@ export function isEditionOnlyName(name: string): boolean {
 
 const RE_SEASON_DIR = /^(?:season|s|series)[\s._-]*(\d{1,2})$|^第(\d{1,2}|[一二两三四五六七八九十]+)[季部]$/i;
 const RE_SPECIALS_DIR = /^(?:specials?|sp|ova|oad|extras?|特别篇|特別篇|番外|番外篇|season[\s._-]*0+|s0+)$/i;
-const RE_EXTRAS_DIR = /^(?:extras?|featurettes?|trailers?|behind[\s._-]*the[\s._-]*scenes|deleted[\s._-]*scenes|interviews?|scenes?|shorts?|samples?|花絮|预告|其他|其它|附赠|特典|cd|menu|bonus|bdmv|certificate)$/i;
+const RE_EXTRAS_DIR = /^(?:extras?|featurettes?|trailers?|behind[\s._-]*the[\s._-]*scenes|deleted[\s._-]*scenes|interviews?|scenes?|shorts?|samples?|other|花絮|预告|其他|其它|附赠|特典|cd|menu|bonus|bdmv|certificate)$/i;
 
 /** 季目录：Season 1 / S01 / 第一季 → 季号；Specials / SP / 番外 → 0；不是季目录返回 null */
 export function seasonDirNumber(name: string): number | null {

@@ -219,6 +219,14 @@ function fillNote(fill: EpisodeFill, count: number): string {
   return `${fill.from}：${count} 个没写季的文件${what.join("、")}`;
 }
 
+/** 特别篇季目录叫 Specials：路径里恰好是 `Season 00` 的那一段换掉 */
+export function withSpecialsDir(path: string): string {
+  return path
+    .split("/")
+    .map((seg) => (seg === "Season 00" ? "Specials" : seg))
+    .join("/");
+}
+
 /** 文件级的模板变量：文件名里的标签优先，没有的用探测结果（file.probe）补 */
 function fileVars(file: UnitFile): TemplateVars {
   const t = file.parsed.tags;
@@ -410,9 +418,11 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
       push(f, null, `模板有问题：${r.errors.join("；") || "空路径"}`);
       continue;
     }
+    // 特别篇的季目录按设置叫 Specials：模板渲染出来的 Season 00 那一段换掉（只换恰好等于它的段，老模板也生效）
+    const dst = match.mediaType === "tv" && s.specials === "specials" ? withSpecialsDir(r.path) : r.path;
     // 跟着它的字幕 / nfo 按改过名的目标跟
-    videoDst.set(f, renamed(f, r.path));
-    push(f, r.path);
+    videoDst.set(f, renamed(f, dst));
+    push(f, dst);
   }
 
   // 同一单元里两个视频算出同一个目标（画质标签一样的多版本）：后面的标冲突。
@@ -483,7 +493,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
     // 花絮（sample 也算）：跟着正片进作品目录下的 extras/，平铺、原名（媒体服务器不认 extras 里再套目录）；设置成留在原处就不动。
     // 算附属：正片一个都没挪它也不挪，目标被占就留下、不算冲突
     if (asExtra(f)) {
-      if (s.extras === "move" && dstRoot && !inWork) push(f, join(join(dstRoot, "extras"), f.name), input.kinds?.get(f.path) === "extra" ? "按花絮处理（人改判的）" : "按花絮处理", undefined, { follows: allVideos, soft: true });
+      if (s.extras === "move" && dstRoot && !inWork) push(f, join(join(dstRoot, s.extrasDir), f.name), input.kinds?.get(f.path) === "extra" ? "按花絮处理（人改判的）" : "按花絮处理", undefined, { follows: allVideos, soft: true });
       else push(f, f.path, "花絮不动", "keep");
       continue;
     }

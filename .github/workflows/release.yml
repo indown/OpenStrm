@@ -32,6 +32,9 @@ jobs:
           CONFIG_DIR: ${{ runner.temp }}/openstrm-config
           DATA_DIR: ${{ runner.temp }}/openstrm-data
         run: pnpm test
+      - name: Frontend unit tests
+        working-directory: apps/frontend
+        run: pnpm test
 
   # 两个架构各用原生 runner 分别构建，再合并成多架构 manifest——
   # QEMU 模拟下 next build 慢得多。

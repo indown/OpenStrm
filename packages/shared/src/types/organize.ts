@@ -120,6 +120,10 @@ export interface OrganizeSettings {
   auto?: OrganizeAutoMode;
   /** 预览时自动探测编码：missing 是文件名里缺模板要用的标签的视频才探（每个文件读几 MB 文件头，大库第一次会慢）；默认 off */
   probe?: "off" | "missing";
+  /** 特别篇（第 0 季）的季目录名：season00 是模板渲染出来的 Season 00（默认），specials 把它换成 Specials（Plex / Kodi 的惯例，Emby / Jellyfin 两种都认） */
+  specials?: "season00" | "specials";
+  /** 花絮挪进作品目录下的哪个子目录；默认 extras（Emby / Jellyfin），Plex 只认 Other 这几个固定名字 */
+  extrasDir?: string;
 }
 
 /** 探测出来的、模板能用的标签（services/media/probe.ts）：文件名里没有对应标签时回退用 */
@@ -495,4 +499,6 @@ export interface OrganizeTemplatePreview {
   movie: string;
   tv: string;
   errors: string[];
+  /** 两个样例的变量值（变量表的「本例」列）：id 标签已按写法拼好，分类按传来的 / 当前的分类规则算 */
+  vars: { movie: Record<string, string>; tv: Record<string, string> };
 }

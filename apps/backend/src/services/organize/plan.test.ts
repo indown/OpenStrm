@@ -590,3 +590,19 @@ test("改判类型：被当成花絮的正片改判成正片就按集排；正�
   assert.equal(dst("S01E02.1080p.WEB-DL.mkv").reason, "按花絮处理（人改判的）");
   assert.equal(dst("S01E01.1080p.WEB-DL.mkv").dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv");
 });
+
+test("特别篇目录名按设置叫 Specials：只换恰好是 Season 00 的那一段，字幕跟着；默认还是 Season 00", () => {
+  const paths = ["inbox/BEEF/BEEF.S00E01.1080p.mkv", "inbox/BEEF/BEEF.S00E01.1080p.chs.srt", "inbox/BEEF/BEEF.S01E01.1080p.mkv"];
+  const dflt = plan(paths, beef).items;
+  assert.equal(dflt.find((i) => i.srcPath.endsWith("S00E01.1080p.mkv"))!.dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 00/怒呛人生 - S00E01.mkv");
+  const sp = plan(paths, beef, {}, { ...settings, specials: "specials" }).items;
+  assert.equal(sp.find((i) => i.srcPath.endsWith("S00E01.1080p.mkv"))!.dstPath, "怒呛人生 (2023) [tmdbid=153312]/Specials/怒呛人生 - S00E01.mkv");
+  assert.equal(sp.find((i) => i.srcPath.endsWith("chs.srt"))!.dstPath, "怒呛人生 (2023) [tmdbid=153312]/Specials/怒呛人生 - S00E01.zh-CN.srt");
+  assert.equal(sp.find((i) => i.srcPath.endsWith("S01E01.1080p.mkv"))!.dstPath, "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv", "正常季不受影响");
+  assert.ok(sp.some((i) => i.action === "mkdir" && i.dstPath === "怒呛人生 (2023) [tmdbid=153312]/Specials"), "季目录按新名字建");
+});
+
+test("花絮目录名按设置来（Plex 的 Other）", () => {
+  const { items } = plan(["x/Dune.2024.mkv", "x/Featurettes/making.mkv"], dune, {}, { ...settings, extrasDir: "Other" });
+  assert.equal(items.find((i) => i.srcPath.endsWith("making.mkv"))!.dstPath, "沙丘：第二部 (2024) [tmdbid=693134]/Other/making.mkv");
+});

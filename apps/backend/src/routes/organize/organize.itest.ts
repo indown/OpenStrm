@@ -259,6 +259,18 @@ test("模板试算：默认模板出样例；坏模板报错但不抛", async ()
   assert.equal(ok.movie, "沙丘：第二部 (2024) [tmdbid=693134]/沙丘：第二部 (2024) - 2160p.mkv");
   assert.equal(ok.tv, "怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv");
   assert.deepEqual(ok.errors, []);
+  assert.equal(ok.vars.movie.title, "沙丘：第二部");
+  assert.equal(ok.vars.movie.idTag, "[tmdbid=693134]");
+  assert.equal(ok.vars.movie.category, "", "没开分类：样例没有分类层");
+  assert.equal(ok.vars.tv.absolute000, "001");
+  assert.equal(ok.vars.tv.episodeTitle, "", "集标题关着就是空");
+  // 页面上还没保存的分类规则：样例按它算分类
+  const cat = await json<OrganizeTemplatePreview>("POST", "/api/organize/preview-name", {
+    categories: { enabled: true, movie: [{ name: "动画电影", genreIds: [16] }, { name: "外语电影" }], tv: [{ name: "国产剧", countries: ["CN"] }, { name: "欧美剧" }] },
+  });
+  assert.equal(cat.movie, "外语电影/沙丘：第二部 (2024) [tmdbid=693134]/沙丘：第二部 (2024) - 2160p.mkv");
+  assert.equal(cat.vars.tv.category, "欧美剧");
+  assert.equal(cat.tv, "欧美剧/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.mkv");
   const plex = await json<OrganizeTemplatePreview>("POST", "/api/organize/preview-name", { idTag: "plex", episodeTitle: true, templates: { tv: "{title}/S{season00}E{episode00}[ - {episodeTitle}].{ext}" } });
   assert.equal(plex.movie, "沙丘：第二部 (2024) {tmdb-693134}/沙丘：第二部 (2024) - 2160p.mkv");
   assert.equal(plex.tv, "怒呛人生/S01E01 - 飞鸟不鸣.mkv");
@@ -272,8 +284,12 @@ test("设置：坏模板 / 坏识别词存不进去；好的存得进去", async
   assert.match(bad.json().message, /ext/);
   const badRule = await app.inject({ method: "PUT", url: "/api/settings", headers: auth, payload: { organize: { rules: ["x <> y >> nope"] } } });
   assert.equal(badRule.statusCode, 400);
-  await json("PUT", "/api/settings", { organize: { idTag: "jellyfin", rules: ["高清剧集"], auto: "review" } });
+  const badExtras = await app.inject({ method: "PUT", url: "/api/settings", headers: auth, payload: { organize: { extrasDir: "a/b" } } });
+  assert.equal(badExtras.statusCode, 400, "花絮目录名不能带斜杠");
+  await json("PUT", "/api/settings", { organize: { idTag: "jellyfin", rules: ["高清剧集"], auto: "review", specials: "specials", extrasDir: "Other" } });
   assert.equal(readAppSettings().organize?.idTag, "jellyfin");
+  assert.equal(readAppSettings().organize?.specials, "specials");
+  assert.equal(readAppSettings().organize?.extrasDir, "Other");
   rememberMatch({ accountName: "acc", srcPath: "/x", mediaType: "tv", tmdbId: 1, title: "", year: "", season: null, episodeOffset: 0 });
 });
 

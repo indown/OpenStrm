@@ -152,7 +152,7 @@ export const lifeMonitorSchema = z.looseObject({
   mediaServerRefreshMaxWait: z.number().int().min(0).optional(),
 }) satisfies z.ZodType<LifeMonitorSettings>;
 
-const categoryRuleSchema = z.object({
+export const categoryRuleSchema = z.object({
   name: z.string().trim().min(1),
   genreIds: z.array(z.number().int()).optional(),
   countries: z.array(z.string()).optional(),
@@ -175,6 +175,13 @@ export const organizeSettingsSchema = z
     extras: z.enum(["keep", "move"]).optional(),
     auto: z.enum(["off", "review", "auto"]).optional(),
     probe: z.enum(["off", "missing"]).optional(),
+    specials: z.enum(["season00", "specials"]).optional(),
+    extrasDir: z
+      .string()
+      .trim()
+      .max(64)
+      .refine((v) => !/[\\/]/.test(v), { message: "花絮目录名不能带斜杠" })
+      .optional(),
   });
 
 /** PUT /api/settings 的 body：只校验认识的键的类型，多出来的顶层键原样存 */

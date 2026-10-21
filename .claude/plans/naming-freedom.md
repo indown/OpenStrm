@@ -220,3 +220,17 @@
 tMM 的变量表示例值来自自己的库。`GET /api/organize/samples`：从最近几次整理 run 里各类型挑最多 10 个有匹配的单元，取第一个视频按规划同一条路算变量（`planUnit` 里的 common + `fileVars` 抽成可复用的函数），返回 `{ label: "片名 (年份) · 文件名", mediaType, vars }`；试算请求可带 `vars` 覆盖内置样例。面板示例旁一个「示例作品」下拉，默认「内置样例」。约半天。内置样例已经把每个变量都演示到了，这步纯锦上添花。
 
 > 2026-10-21 修正：预设列表里「Plex 风格」和「按年份分目录」不是一个轴的东西。改成「服务器」（设置页顶上 Emby / Jellyfin / Plex / Kodi 四个按钮，管 id 标签 + 文件名细节 + Specials / 花絮目录名）× 「结构预设」（每类一个下拉，只管目录结构），预设定义是 结构 × 服务器 → 模板 的函数。详见 organize-tmm.md 第六节；整个整理模块对照 tMM 的分析也在那份文件。
+
+## 实施记录：模板 / 预设交互重做 + 媒体服务器预设（2026-10-21，批次 A）
+
+**后端**：`OrganizeSettings` 多 `specials`（season00 / specials）和 `extrasDir`（默认 extras，入口校验不能带斜杠，`cleanExtrasDir` 去首尾斜杠空白）；`planUnit` 渲染后把剧集路径里恰好等于 `Season 00` 的段换成 `Specials`（`withSpecialsDir`，老模板也生效，字幕 / 建目录跟着），花絮目标目录用 `s.extrasDir`；`RE_EXTRAS_DIR` 加 `other`（Plex 的本地花絮只认 Behind The Scenes / Featurettes / … / Other，没有通用 Extras）。`POST /api/organize/preview-name` 多收 `categories`（页面没保存的分类规则盖在当前设置上归一后给样例算分类：沙丘 → 外语电影、怒呛人生 → 欧美剧）、多返 `vars`（两个样例的变量值，id 标签拼好）。测试：settings.test（specials / extrasDir 默认与清洗）、plan.test（Specials 换段 + 字幕 + mkdir；extrasDir=Other）、organize.itest（vars、分类、extrasDir 带斜杠 400、specials / extrasDir 存得进）。
+
+**前端**：
+- `lib/template-parts.ts`：按括号深度拆 / 拼（电影 目录 + 文件名，剧集 目录 + 季目录 + 文件名；倒数第二段含季变量且不含片名 / id 变量才算季目录；括号不配对返回 null）；`lib/organize-presets.ts` 重写成 服务器（Emby / Jellyfin / Plex / Kodi：idTag + specials + extrasDir + 两类文件名细节）× 结构（电影 默认 / 按年份 / 按系列 / 保留原名，剧集 默认 / 按年份 / 绝对集数 / 保留原名），`buildTemplate` / `detectStructure` / `detectServer`（整套都对上才算命中）/ `serverFromIdTag`；`lib/template-vars.ts` 变量说明表。前端第一次有纯函数测试：`node --import tsx --test 'src/lib/**/*.test.ts'`（tsx 进前端 devDependencies），根 `pnpm test` 顺带跑，CI 和 Release 工作流各加一步「Frontend unit tests」。
+- `components/template-editor.tsx`：单类型面板（预设下拉 + 恢复默认 + 三格 / 括号坏了退回整条 + 示例分目录 / 文件两行 + 变量表点一下插到最后聚焦那格的光标处，展开状态记 localStorage）。任务模式：空串 = 跟随全局，三格灰显只读、选预设或「自定义写法」才从全局值起步。Radix 的 Select 触发器会把选项里的所有内容显示出来，所以选项只放名字，命中的预设的说明单独一行放在下拉下面。
+- 设置页 `OrganizeSection`：顶上四个服务器按钮（只换 id 标签 / 特别篇 / 花絮目录名 / 文件名细节，目录结构和「保留原文件名」保留，绝对集数段也保留）+ 「当前是 X 的规范 / 自定义写法」；两个 tab（标签带当前结构名）；集标题开关和特别篇目录名进剧集面板；花絮开关开着时下面多一个花絮目录名输入框；试算带分类规则；识别词错误显示在识别词框下面。`template-preset-picker.tsx` 删掉。
+- 任务弹框 `TaskNamingFields`：展开时拉一次全局设置；按库类型给面板（电影 / 剧集库先给对应的那个，另一类收在「也给 X 设一套」链接后面、已设值就直接展开；混合库两个 tab 标「单独设了 / 跟随全局」）；集标题三选一进剧集面板；id 标签 + 「清空，沿用全局」在面板下面。
+
+**浏览器冒烟（scratch 库 4100 + dev 3223）**：设置页变量表插入落在光标处、下拉变「自定义写法」、tab 变「电影 · 自定义」、恢复默认回来；剧集 tab 三格 + 集标题 + 特别篇；选「动画」预设文件名带 `[ - {absolute000}]`；按 Plex：id 标签 → Plex、特别篇 → Specials、花絮目录 → Other、文件名换成 Plex 写法且绝对集数段保留、「当前是 Plex 的规范」；开二级分类示例多出「欧美剧/」；保存后重开页面没有「未保存」、Plex 仍命中；390px 无横向滚动。任务弹框：剧集库只给剧集面板、「也给电影设一套」展开只读的电影面板；跟随全局 → 选预设三格可编辑、头部变「单独设了」→ 清空 → 自定义写法从全局值起步 → 保存重开仍在；混合库两个 tab（剧集 · 单独设了），全局是 Plex 时 Emby 写法的模板正确显示为自定义。`next build` 干净。
+
+**没做 / 留意**：设置页「恢复默认」存的是显式的默认模板串而不是空串，原来没填过的人会看到「1 处未保存」（功能等价，先不处理）；Radix Select 用键盘（ArrowDown / Enter）在自动化里选不中，真点选项才行。

@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_TEMPLATES, resolveOrganizeSettings } from "./settings.js";
+import { DEFAULT_TEMPLATES, cleanExtrasDir, resolveOrganizeSettings } from "./settings.js";
 
 test("任务自己的命名设定盖过全局：模板 / id 标签 / 集标题；留空的沿用全局；分类和识别词仍是全局的", () => {
   const settings = { organize: { templates: { movie: "{title}/{title}.{ext}", tv: "" }, idTag: "jellyfin" as const, episodeTitle: true, rules: ["a => b"] } };
@@ -22,4 +22,16 @@ test("任务自己的命名设定盖过全局：模板 / id 标签 / 集标题�
 
   assert.deepEqual(resolveOrganizeSettings(settings, { organize: { libraryType: "tv" } }).templates, global.templates, "任务上没设就是全局");
   assert.deepEqual(resolveOrganizeSettings(settings, null).templates, global.templates);
+});
+
+test("特别篇目录名和花絮目录名：没设就是 Season 00 / extras；花絮目录名去掉首尾斜杠和空白，空的用默认", () => {
+  const d = resolveOrganizeSettings({});
+  assert.equal(d.specials, "season00");
+  assert.equal(d.extrasDir, "extras");
+  const o = resolveOrganizeSettings({ organize: { specials: "specials", extrasDir: " /Other/ " } });
+  assert.equal(o.specials, "specials");
+  assert.equal(o.extrasDir, "Other");
+  assert.equal(cleanExtrasDir(""), "extras");
+  assert.equal(cleanExtrasDir(undefined), "extras");
+  assert.equal(resolveOrganizeSettings({ organize: { specials: "season00" } }).specials, "season00");
 });

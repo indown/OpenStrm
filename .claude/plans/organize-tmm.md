@@ -124,3 +124,29 @@ naming-freedom.md 末节的预设列表里「Plex 风格」和「按年份分目
 - **结构预设**（每类一个下拉，naming-freedom.md 的方案）：默认 / 按年份分目录 / 按系列归档（电影）/ 动画绝对集数（剧集）/ 只归目录保留原文件名；每个预设按当前服务器生成文件名细节。
 
 这样预设定义是 `结构 × 服务器 → 模板` 的小函数，不是五条写死的字符串；选择器反推当前状态时两轴各自匹配。
+
+## 实施计划（2026-10-21，用户：「先发正式版，然后按照你的推荐制定计划开始吧」）
+
+v2.18.0 正式版已发（88b4f21）。按推荐先做「模板 / 预设重做 + 阶段 0 五条快赢」，库视图（阶段 1、2）等这批发出去再排。每批独立提交、独立可发；后端 node --test，前端这次加一个纯函数测试跑法（`node --import tsx --test`，tsx 进前端 devDependencies，根 `pnpm test` 顺带跑）。
+
+**批次 A：模板 / 预设重做 + 媒体服务器预设**（naming-freedom.md 末节 + 本文第六节）
+
+- 设置多两个键：`specials: "season00" | "specials"`（渲染后把恰好等于 `Season 00` 的路径段换成 `Specials`，老模板也生效）、`extrasDir`（默认 `extras`；Plex 的本地花絮只认 Behind The Scenes / Featurettes / … / Other 这几个名字，没有通用的 Extras，所以 Plex 预设填 `Other`；扫描时 `RE_EXTRAS_DIR` 加 `other`）。
+- 服务器预设（Emby / Jellyfin / Plex / Kodi）= idTag + specials + extrasDir + 两类文件名细节；结构预设（电影：默认 / 按年份 / 按系列 / 保留原名；剧集：默认 / 按年份 / 绝对集数 / 保留原名）只管目录；`buildTemplate(type, structure, server)` 生成、`detectPreset` 反推（Emby 和 Jellyfin 模板相同，靠 idTag 区分）。Kodi 不认目录名里的 id，idTag 给 none。
+- `POST /api/organize/preview-name` 多收 `categories`、多返 `vars`。
+- 前端：`lib/template-parts.ts`（拆 / 拼 + 测试）、`lib/organize-presets.ts`（重写 + 测试）、`lib/template-vars.ts`、`components/template-editor.tsx`（设置页和任务弹框共用的单类型面板）、设置页 OrganizeSection 模板块重写（服务器按钮 + 两个 tab；集标题、Specials 进剧集面板；花絮目录名跟着花絮开关）、任务弹框 TaskNamingFields 重写（按库类型给面板，跟随全局 / 预设 / 自定义）；删掉 template-preset-picker.tsx。
+
+**批次 B：缺集**：`TmdbDetails.lastAired`（tv 的 last_episode_to_air，老缓存缺键自愈重拉一次）→ `OrganizeMatch.lastAired`；规划时收每季出现的集号，缺的 = 已播的减去出现的（lastAired 之前的季全算已播，当季算到 lastAired.episode）；`OrganizeUnit.missing`（迁移 0028 加列）；卡片「缺 S01E03 E07」、筛选「缺集」、智能体 unitView 带 missing。
+
+**批次 C：不整理的目录**：迁移 0028 同时建 `organize_skips(account_name, path, note, created_at)`；`GET / POST / DELETE /api/organize/skips`；预览列完目录后剔掉这些路径下的条目，run 详情带 `skippedDirs`；设置页清单 + 卡片「…」里「以后不整理这个目录」。
+
+**批次 D：编辑作品 + 行内季集 + 候选**：卡片按钮收成「编辑」（一个弹框：识别 / 标题年份 / 季与集偏移 / 记住，换匹配的搜索仍开现有 MatchDialog）+「看文件」；卡片上前两个候选一键换；文件表剧集视频行直接填 S / E（失焦即重规划），钉集弹框留作兜底。
+
+每批：后端 / 前端测试 → typecheck / lint / build → 浏览器冒烟（scratch 库）→ 提交。四批完成后发 v2.19.0-rc.1。
+
+### 进度
+
+- [x] 批次 A（2026-10-21）：实施、测试、浏览器冒烟都完成，记录在 naming-freedom.md 末节「实施记录：模板 / 预设交互重做 + 媒体服务器预设」
+- [ ] 批次 B 缺集
+- [ ] 批次 C 不整理的目录
+- [ ] 批次 D 编辑作品 + 行内季集 + 候选

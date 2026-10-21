@@ -41,9 +41,9 @@ import {
 } from "../../services/organize/run.js";
 import { purgeTmdbCache } from "../../services/organize/identify.js";
 import { parseRules } from "../../services/organize/rules.js";
-import { DEFAULT_TEMPLATES, resolveOrganizeSettings } from "../../services/organize/settings.js";
-import { idTagFor, renderTemplate, validateTemplate } from "../../services/organize/template.js";
-import { idParamsSchema } from "../../schemas/entities.js";
+import { DEFAULT_TEMPLATES, pickCategory, resolveOrganizeSettings } from "../../services/organize/settings.js";
+import { idTagFor, renderTemplate, validateTemplate, type TemplateVars } from "../../services/organize/template.js";
+import { categoryRuleSchema, idParamsSchema } from "../../schemas/entities.js";
 
 const createSchema = z.object({
   taskId: z.string().trim().min(1, "taskId is required"),
@@ -105,6 +105,8 @@ const previewNameSchema = z.object({
   colon: z.enum(["smart", "delete", "dash", "spaceDash"]).optional(),
   episodeTitle: z.boolean().optional(),
   rules: z.array(z.string()).optional(),
+  /** 页面上还没保存的分类规则：样例的分类按它算，改分类立刻能在示例里看见 */
+  categories: z.object({ enabled: z.boolean().optional(), movie: z.array(categoryRuleSchema).optional(), tv: z.array(categoryRuleSchema).optional() }).optional(),
 });
 
 const forgetSchema = z.object({ accountName: z.string().min(1), srcPath: z.string().min(1) });
@@ -319,10 +321,11 @@ export default async function (fastify: FastifyInstance) {
     return { success: true };
   });
 
-  /** 设置页实时试算：拿两个固定样例套模板 */
+  /** 设置页实时试算：拿两个固定样例套模板，顺带把样例的变量值回给变量表 */
   fastify.post("/api/organize/preview-name", { preHandler: [fastify.authenticate] }, async (request) => {
     const body = parse(previewNameSchema, request.body);
-    const current = resolveOrganizeSettings(readAppSettings());
+    const app = readAppSettings();
+    const current = resolveOrganizeSettings(body.categories ? { ...app, organize: { ...(app.organize ?? {}), categories: body.categories } } : app);
     const movieTpl = body.templates?.movie?.trim() || current.templates.movie || DEFAULT_TEMPLATES.movie;
     const tvTpl = body.templates?.tv?.trim() || current.templates.tv || DEFAULT_TEMPLATES.tv;
     const idTag = body.idTag ?? current.idTag;
@@ -333,17 +336,59 @@ export default async function (fastify: FastifyInstance) {
       ...validateTemplate(tvTpl).map((e) => `剧集模板：${e}`),
       ...(body.rules ? parseRules(body.rules).errors.map((e) => `识别词${e}`) : []),
     ];
-    const movie = renderTemplate(
-      movieTpl,
-      { title: "沙丘：第二部", originalTitle: "Dune: Part Two", enTitle: "Dune: Part Two", year: "2024", tmdbId: 693134, imdbId: "tt15239678", idTag: idTagFor(idTag, 693134), collection: "沙丘（系列）", resolution: "2160p", source: "WEB-DL", videoCodec: "H.265", audio: "DDP", hdr: "DV", group: "FLUX", ext: "mkv", category: "" },
-      { colon },
-    ).path;
-    const tv = renderTemplate(
-      tvTpl,
-      { title: "怒呛人生", originalTitle: "BEEF", enTitle: "BEEF", year: "2023", tmdbId: 153312, idTag: idTagFor(idTag, 153312), season: 1, season00: "01", episode: "1", episode00: "01", episodeTitle: episodeTitle ? "飞鸟不鸣" : "", resolution: "1080p", source: "WEB-DL", ext: "mkv", category: "" },
-      { colon },
-    ).path;
-    const out: OrganizeTemplatePreview = { movie, tv, errors };
+    // 两个样例：沙丘：第二部（科幻 / 冒险，美国）和怒呛人生（喜剧 / 剧情，美国）；分类按规则算，没开分类就没有这一层
+    const cats = current.categories;
+    const movieVars: TemplateVars = {
+      category: cats.enabled ? pickCategory(cats.movie, { genreIds: [878, 12], countries: ["US"], originalLanguage: "en" }) : "",
+      collection: "沙丘（系列）",
+      title: "沙丘：第二部",
+      originalTitle: "Dune: Part Two",
+      enTitle: "Dune: Part Two",
+      year: "2024",
+      tmdbId: 693134,
+      imdbId: "tt15239678",
+      idTag: idTagFor(idTag, 693134),
+      part: "",
+      edition: "",
+      resolution: "2160p",
+      source: "WEB-DL",
+      videoCodec: "H.265",
+      audio: "DDP",
+      hdr: "DV",
+      group: "FLUX",
+      originalName: "Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX",
+      ext: "mkv",
+    };
+    const tvVars: TemplateVars = {
+      category: cats.enabled ? pickCategory(cats.tv, { genreIds: [35, 18], countries: ["US"], originalLanguage: "en" }) : "",
+      title: "怒呛人生",
+      originalTitle: "BEEF",
+      enTitle: "BEEF",
+      year: "2023",
+      tmdbId: 153312,
+      imdbId: "tt14403426",
+      idTag: idTagFor(idTag, 153312),
+      season: 1,
+      season00: "01",
+      episode: "1",
+      episode00: "01",
+      absolute: 1,
+      absolute000: "001",
+      episodeTitle: episodeTitle ? "飞鸟不鸣" : "",
+      part: "",
+      resolution: "1080p",
+      source: "WEB-DL",
+      videoCodec: "H.264",
+      audio: "DDP",
+      hdr: "",
+      group: "NTb",
+      originalName: "BEEF.S01E01.1080p.NF.WEB-DL.DDP5.1.H.264-NTb",
+      ext: "mkv",
+    };
+    const movie = renderTemplate(movieTpl, movieVars, { colon }).path;
+    const tv = renderTemplate(tvTpl, tvVars, { colon }).path;
+    const strings = (v: TemplateVars): Record<string, string> => Object.fromEntries(Object.entries(v).map(([k, x]) => [k, x === undefined || x === null ? "" : String(x)]));
+    const out: OrganizeTemplatePreview = { movie, tv, errors, vars: { movie: strings(movieVars), tv: strings(tvVars) } };
     return out;
   });
 

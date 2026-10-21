@@ -41,6 +41,17 @@ export interface ResolvedOrganizeSettings {
   extras: NonNullable<OrganizeSettings["extras"]>;
   auto: NonNullable<OrganizeSettings["auto"]>;
   probe: NonNullable<OrganizeSettings["probe"]>;
+  specials: NonNullable<OrganizeSettings["specials"]>;
+  /** 花絮子目录名（不带斜杠，默认 extras） */
+  extrasDir: string;
+}
+
+export const DEFAULT_EXTRAS_DIR = "extras";
+
+/** 花絮目录名：去掉首尾空白和斜杠，空的用默认 */
+export function cleanExtrasDir(v: string | undefined): string {
+  const name = (v ?? "").trim().replace(/^[\\/]+|[\\/]+$/g, "");
+  return name || DEFAULT_EXTRAS_DIR;
 }
 
 function cleanRules(list: OrganizeCategoryRule[] | undefined, fallback: OrganizeCategoryRule[]): OrganizeCategoryRule[] {
@@ -82,6 +93,8 @@ export function resolveOrganizeSettings(settings: AppSettings, task?: Pick<TaskD
     extras: o.extras ?? "move",
     auto: o.auto ?? "off",
     probe: o.probe ?? "off",
+    specials: o.specials === "specials" ? "specials" : "season00",
+    extrasDir: cleanExtrasDir(o.extrasDir),
   };
 }
 

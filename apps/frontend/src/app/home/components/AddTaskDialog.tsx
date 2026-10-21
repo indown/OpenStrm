@@ -6,7 +6,7 @@ import * as z from "zod";
 import { useForm, useWatch, type Control, type UseFormSetValue } from "react-hook-form";
 import { toast } from "sonner";
 import { FolderOpen } from "lucide-react";
-import type { OpenlistCopySettings, OrganizeTemplatePreview, TaskDefinition } from "@openstrm/shared";
+import type { OpenlistCopySettings, OrganizeIdTagStyle, OrganizeSettings, OrganizeTemplatePreview, TaskDefinition } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -38,7 +38,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { TemplatePresetPicker } from "@/components/template-preset-picker";
+import { TemplateEditor, previewFor } from "@/components/template-editor";
+import { DEFAULT_TEMPLATES, serverFromIdTag, type MediaKind } from "@/lib/organize-presets";
 import { apiErrorMessage } from "@/lib/axios";
 import { fmtWhen } from "@/lib/format";
 import { copyGapInDialog, isOpenlistRootInput, normTargetDir, OPENLIST_ROOT_TARGET } from "@/lib/openlist-copy";
@@ -151,8 +152,8 @@ const hasOwnNaming = (task: Pick<TaskDefinition, "organize"> | null | undefined)
   !!task?.organize?.templates?.movie?.trim() || !!task?.organize?.templates?.tv?.trim() || !!task?.organize?.idTag || task?.organize?.episodeTitle !== undefined;
 
 /**
- * 任务自己的命名设定（可选，折叠着）：电影 / 剧集模板、id 标签写法、集标题，留空沿用全局；
- * 和设置页一样实时试算（两个固定样例），没填的那格按全局模板算
+ * 任务自己的命名设定（可选，折叠着）：按库类型给电影 / 剧集面板（混合库两个 tab），每个面板「跟随全局 / 预设 / 自定义」；
+ * id 标签写法两类共用，集标题在剧集面板里；跟随全局的沿用设置页的。和设置页一样实时试算，没填的那格按全局模板算
  */
 function TaskNamingFields({ control, setValue, defaultOpen }: { control: Control<TaskFormValues>; setValue: UseFormSetValue<TaskFormValues>; defaultOpen: boolean }) {
   const [open, setOpen] = React.useState(defaultOpen);
@@ -160,6 +161,26 @@ function TaskNamingFields({ control, setValue, defaultOpen }: { control: Control
   const tv = useWatch({ control, name: "orgTvTemplate" }) ?? "";
   const idTag = useWatch({ control, name: "orgIdTag" }) ?? "";
   const episodeTitle = useWatch({ control, name: "orgEpisodeTitle" }) ?? "";
+  const libraryType = useWatch({ control, name: "libraryType" }) ?? "mixed";
+  /** 全局的整理设置：跟随全局时面板灰显它的写法、预设按它的 id 标签生成文件名细节；展开时拉一次 */
+  const [globalOrg, setGlobalOrg] = React.useState<OrganizeSettings | null>(null);
+  React.useEffect(() => {
+    if (!open || globalOrg) return;
+    let alive = true;
+    api.settings
+      .get()
+      .then((s) => {
+        if (alive) setGlobalOrg(s.organize ?? {});
+      })
+      .catch(() => {
+        if (alive) setGlobalOrg({});
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, globalOrg]);
+  const [tab, setTab] = React.useState<MediaKind>("movie");
+  const [showOther, setShowOther] = React.useState(false);
   const [preview, setPreview] = React.useState<OrganizeTemplatePreview | null>(null);
   const timer = React.useRef<NodeJS.Timeout | null>(null);
   const key = JSON.stringify([open, movie, tv, idTag, episodeTitle]);
@@ -182,6 +203,58 @@ function TaskNamingFields({ control, setValue, defaultOpen }: { control: Control
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   const own = !!movie.trim() || !!tv.trim() || !!idTag || !!episodeTitle;
+  const server = serverFromIdTag((idTag || globalOrg?.idTag || "emby") as OrganizeIdTagStyle);
+  const fallback: Record<MediaKind, string> = {
+    movie: globalOrg?.templates?.movie?.trim() || DEFAULT_TEMPLATES.movie,
+    tv: globalOrg?.templates?.tv?.trim() || DEFAULT_TEMPLATES.tv,
+  };
+  const clearAll = () => {
+    setValue("orgMovieTemplate", "", { shouldDirty: true });
+    setValue("orgTvTemplate", "", { shouldDirty: true });
+    setValue("orgIdTag", "", { shouldDirty: true });
+    setValue("orgEpisodeTitle", "", { shouldDirty: true });
+  };
+  const label = (k: MediaKind) => (k === "movie" ? "电影" : "剧集");
+  const pane = (type: MediaKind) => (
+    <TemplateEditor
+      key={type}
+      type={type}
+      mode="task"
+      value={type === "movie" ? movie : tv}
+      fallback={fallback[type]}
+      server={server}
+      preview={previewFor(preview, type)}
+      onChange={(v) => setValue(type === "movie" ? "orgMovieTemplate" : "orgTvTemplate", v, { shouldDirty: true })}
+    >
+      {type === "tv" && (
+        <FormField
+          control={control}
+          name="orgEpisodeTitle"
+          render={({ field }) => (
+            <FormItem className="sm:w-72">
+              <FormLabel>文件名里写集标题</FormLabel>
+              <Select onValueChange={(v) => field.onChange(v === "__global__" ? "" : v)} value={field.value || "__global__"}>
+                <FormControl>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                </FormControl>
+                <SelectContent className="z-[60]">
+                  <SelectItem value="__global__">跟随全局设置</SelectItem>
+                  <SelectItem value="on">写</SelectItem>
+                  <SelectItem value="off">不写</SelectItem>
+                </SelectContent>
+              </Select>
+            </FormItem>
+          )}
+        />
+      )}
+    </TemplateEditor>
+  );
+  // 库类型是电影 / 剧集：先给对应的面板，另一类收在一行链接后面（先验只管看不出类型的文件，剧集库里认出电影照样用电影模板）；
+  // 另一类已经设了值就直接展开。混合库两个 tab
+  const other: MediaKind | null = libraryType === "movie" ? "tv" : libraryType === "tv" ? "movie" : null;
+  const otherOwn = other === "tv" ? !!tv.trim() : other === "movie" ? !!movie.trim() : false;
   return (
     <div className="space-y-3 rounded-md border p-3">
       <button type="button" className="flex w-full items-center justify-between gap-2 text-left text-sm" onClick={() => setOpen((v) => !v)}>
@@ -192,66 +265,50 @@ function TaskNamingFields({ control, setValue, defaultOpen }: { control: Control
       </button>
       {open && (
         <div className="space-y-3">
-          <p className="text-xs text-muted-foreground">只给这个任务用的写法（比如动画库文件名带绝对集数）；留空的沿用设置页「整理与命名」里的。</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <TemplatePresetPicker
-              onPick={(p) => {
-                setValue("orgMovieTemplate", p.movie, { shouldDirty: true });
-                setValue("orgTvTemplate", p.tv, { shouldDirty: true });
-              }}
-            />
-            <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => {
-              setValue("orgMovieTemplate", "", { shouldDirty: true });
-              setValue("orgTvTemplate", "", { shouldDirty: true });
-              setValue("orgIdTag", "", { shouldDirty: true });
-              setValue("orgEpisodeTitle", "", { shouldDirty: true });
-            }}>
-              清空，沿用全局
-            </Button>
-          </div>
-          <FormField
-            control={control}
-            name="orgMovieTemplate"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>电影模板</FormLabel>
-                <FormControl>
-                  <Input {...field} value={field.value ?? ""} placeholder="留空沿用全局" className="font-mono text-xs" />
-                </FormControl>
-                <FormDescription className="break-all text-xs">示例：{preview?.movie ?? "…"}</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={control}
-            name="orgTvTemplate"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>剧集模板</FormLabel>
-                <FormControl>
-                  <Input {...field} value={field.value ?? ""} placeholder="留空沿用全局" className="font-mono text-xs" />
-                </FormControl>
-                <FormDescription className="break-all text-xs">示例：{preview?.tv ?? "…"}</FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          {preview && preview.errors.length > 0 && (
-            <ul className="space-y-0.5 text-xs text-destructive">
-              {preview.errors.map((e, i) => (
-                <li key={i} className="break-all">
-                  {e}
-                </li>
-              ))}
-            </ul>
+          <p className="text-xs text-muted-foreground">只给这个任务用的写法（比如动画库文件名带绝对集数）；跟随全局的沿用设置页「整理与命名」里的。</p>
+          {libraryType === "mixed" ? (
+            <>
+              <div role="tablist" aria-label="命名模板" className="flex gap-1 border-b">
+                {(["movie", "tv"] as MediaKind[]).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === k}
+                    onClick={() => setTab(k)}
+                    className={`-mb-px border-b-2 px-3 py-1.5 text-sm ${tab === k ? "border-brand font-medium" : "border-transparent text-muted-foreground hover:text-foreground"}`}
+                  >
+                    {label(k)}
+                    <span className="ml-1 text-xs font-normal text-muted-foreground">· {(k === "movie" ? movie : tv).trim() ? "单独设了" : "跟随全局"}</span>
+                  </button>
+                ))}
+              </div>
+              {pane(tab)}
+            </>
+          ) : (
+            <>
+              {pane(libraryType)}
+              {other &&
+                (showOther || otherOwn ? (
+                  <div className="space-y-2 border-t pt-3">
+                    <p className="text-xs text-muted-foreground">
+                      {label(other)}的写法：这个{label(libraryType)}库里认出{label(other)}时用
+                    </p>
+                    {pane(other)}
+                  </div>
+                ) : (
+                  <button type="button" className="text-xs text-brand hover:underline" onClick={() => setShowOther(true)}>
+                    也给{label(other)}设一套（这个库里认出{label(other)}时用）
+                  </button>
+                ))}
+            </>
           )}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="flex flex-wrap items-end gap-3">
             <FormField
               control={control}
               name="orgIdTag"
               render={({ field }) => (
-                <FormItem>
+                <FormItem className="w-full sm:w-72">
                   <FormLabel>id 标签写法</FormLabel>
                   <Select onValueChange={(v) => field.onChange(v === "__global__" ? "" : v)} value={field.value || "__global__"}>
                     <FormControl>
@@ -270,27 +327,9 @@ function TaskNamingFields({ control, setValue, defaultOpen }: { control: Control
                 </FormItem>
               )}
             />
-            <FormField
-              control={control}
-              name="orgEpisodeTitle"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>文件名里写集标题</FormLabel>
-                  <Select onValueChange={(v) => field.onChange(v === "__global__" ? "" : v)} value={field.value || "__global__"}>
-                    <FormControl>
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent className="z-[60]">
-                      <SelectItem value="__global__">跟随全局设置</SelectItem>
-                      <SelectItem value="on">写</SelectItem>
-                      <SelectItem value="off">不写</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormItem>
-              )}
-            />
+            <Button type="button" variant="ghost" size="sm" className="h-9 text-xs" onClick={clearAll}>
+              清空，沿用全局
+            </Button>
           </div>
         </div>
       )}
