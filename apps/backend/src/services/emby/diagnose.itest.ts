@@ -55,7 +55,7 @@ test("自动挑的冷条目：PlaybackInfo 带回流算 probed，直链两段用
     },
     resolve: async (path, ua) => {
       calls.push(`resolve:${path}:${ua}`);
-      return { ok: true, url: "https://cdn/x", accountName: "主号", panPath: "/a/S01E02.mkv", timings: { pathMs: 1200, linkMs: 300 } };
+      return { ok: true, url: "https://cdn/x", accountName: "主号", panPath: "/a/S01E02.mkv", timings: { pathMs: 1200, linkMs: 300, pathVia: "db" } };
     },
   });
   const d = await diagnosePlayback({ userAgent: "Infuse" });

@@ -568,7 +568,7 @@ export async function getDownloadUrlWeb(pickcode: string | number, { userAgent, 
     return decryptedData.url;
 }
 
-export async function getPickcodeToId(id: number, { userAgent = defaultUA(), accountInfo, signal }: { userAgent?: string; accountInfo?: AccountInfo; signal?: AbortSignal }) {
+export async function getPickcodeToId(id: number | string, { userAgent = defaultUA(), accountInfo, signal }: { userAgent?: string; accountInfo?: AccountInfo; signal?: AbortSignal }) {
   if (!accountInfo?.cookie) throw new Error('accountInfo.cookie is required');
   
   // 生成缓存键

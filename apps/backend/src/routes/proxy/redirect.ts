@@ -150,7 +150,7 @@ export function prewarmLink(opts: {
     }
     linkCache.set(cacheKey, safeLocation(resolved.url));
     opts.log.info(
-      { itemId: opts.itemId, account: resolved.accountName, ua: opts.userAgent, pathMs: resolved.timings.pathMs, linkMs: resolved.timings.linkMs },
+      { itemId: opts.itemId, account: resolved.accountName, ua: opts.userAgent, pathMs: resolved.timings.pathMs, pathVia: resolved.timings.pathVia, linkMs: resolved.timings.linkMs },
       "PlaybackInfo 后已预解析直链",
     );
   })()
@@ -338,7 +338,7 @@ async function redirectWithLookup(
     // 带上 UA：直链和它绑定，排查"能起播不能拖动"之类的问题时要看两跳的 UA 是否一致；
     // 分段耗时（查 Emby / 找路径 / 取链 / 总计，毫秒）：起播慢时先看这一行
     request.log.info(
-      { itemId, account: resolved.accountName, ua: userAgent, lookupMs: typeof timing.lookup === "number" ? timing.lookup : 0, lookupCached: timing.lookup === "cache", pathMs: timing.path, linkMs: timing.link, totalMs: timing.total },
+      { itemId, account: resolved.accountName, ua: userAgent, lookupMs: typeof timing.lookup === "number" ? timing.lookup : 0, lookupCached: timing.lookup === "cache", pathMs: timing.path, pathVia: resolved.timings.pathVia, linkMs: timing.link, totalMs: timing.total },
       "302 到 115 直链",
     );
   } catch (err) {

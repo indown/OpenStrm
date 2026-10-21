@@ -15,7 +15,8 @@ import type { AccountInfo, AppSettings, DirectLinkFailure, ProxyPathMapping, Tas
 import { listAccounts } from "../../db/repositories/accounts.js";
 import { listTasks } from "../../db/repositories/tasks.js";
 import { readSettingsSafe } from "../settings-safe.js";
-import { getIdToPath, getDownloadUrlWeb } from "../cloud-115/client.js";
+import { findPathCacheFile } from "../../db/repositories/life.js";
+import { getIdToPath, getDownloadUrlWeb, getPickcodeToId } from "../cloud-115/client.js";
 import { PermanentError } from "../../lib/errors.js";
 
 type Account115 = Extract<AccountInfo, { accountType: "115" }>;
@@ -23,10 +24,14 @@ type Account115 = Extract<AccountInfo, { accountType: "115" }>;
 /** 失败原因的定义在 shared 里（起播诊断要把它回给前端），这里只是别名 */
 export type ResolveFailure = DirectLinkFailure;
 
-/** 解析用了多久：找路径（getIdToPath）和取链各一段，毫秒，整数；起播诊断和 302 日志都靠它 */
+/** 找路径走的是哪条路：内存里记着 pickcode / 库里的路径缓存给了 file_id / 逐级列目录 */
+export type PathVia = "memo" | "db" | "list";
+
+/** 解析用了多久：找路径和取链各一段，毫秒，整数；起播诊断和 302 日志都靠它 */
 export interface ResolveTimings {
   pathMs: number;
   linkMs: number;
+  pathVia: PathVia;
 }
 
 /** 判别联合：ok 为 true 时直链和归属账号一定都有，调用方不用再逐个判空 */
@@ -178,17 +183,19 @@ function splitByAccountName(
   return null;
 }
 
-/** 115 那一段抽成可替换的：单测不碰接口就能验缓存和短路 */
-interface Pan115 {
+/** 会碰 115 和库的几步抽成可替换的：单测不碰接口就能验缓存和短路 */
+interface ResolverDeps {
   idToPath: typeof getIdToPath;
+  pickcodeById: typeof getPickcodeToId;
   downloadUrl: typeof getDownloadUrlWeb;
+  pathCacheFile: typeof findPathCacheFile;
 }
-const realPan: Pan115 = { idToPath: getIdToPath, downloadUrl: getDownloadUrlWeb };
-let pan: Pan115 = { ...realPan };
+const realDeps: ResolverDeps = { idToPath: getIdToPath, pickcodeById: getPickcodeToId, downloadUrl: getDownloadUrlWeb, pathCacheFile: findPathCacheFile };
+let pan: ResolverDeps = { ...realDeps };
 
-/** 仅供测试：换掉会碰 115 的部分；传 null 恢复 */
-export function setPan115(partial: Partial<Pan115> | null): void {
-  pan = partial ? { ...realPan, ...partial } : { ...realPan };
+/** 仅供测试：换掉会碰 115 / 库的部分；传 null 恢复 */
+export function setResolverDeps(partial: Partial<ResolverDeps> | null): void {
+  pan = partial ? { ...realDeps, ...partial } : { ...realDeps };
 }
 
 /**
@@ -204,14 +211,41 @@ export function clearPathCache(): void {
 }
 
 /**
- * 盘内路径 → pickcode；找不到回 null。
+ * 盘内路径 → pickcode；找不到回 null。三条路按代价排：
+ * 1. 内存里记过（一小时内解析过同一路径）：0 个请求；
+ * 2. 库里的路径缓存（同步 / 生活事件写的，账号 + 路径 → file_id）：1 个请求（file_id → pickcode，客户端还有半小时缓存）；
+ *    file_id 失效（文件删了、库里是旧的）就当没命中，别让一条陈旧记录把播放卡死；
+ * 3. 逐级列目录：冷的 1～3 个请求。
  * getIdToPath 找不到文件 / 目录时抛 PermanentError（网盘明确说没有），这里翻译成 null；
  * 网络 / 接口错误是别的类型，继续往上抛。按类型认、不按文案猜：接口报错的文案里也可能带着路径
  */
-export async function findPickcode(account: Account115, panPath: string, userAgent: string | undefined): Promise<string | null> {
+export async function findPickcode(
+  account: Account115,
+  panPath: string,
+  userAgent: string | undefined,
+): Promise<{ pickcode: string; via: PathVia } | null> {
   const key = `${account.name}:${panPath}`;
   const cached = pickcodeByPath.get(key);
-  if (cached) return cached;
+  if (cached) return { pickcode: cached, via: "memo" };
+
+  let row: ReturnType<typeof findPathCacheFile>;
+  try {
+    row = pan.pathCacheFile(account.name, panPath);
+  } catch {
+    row = undefined; // 库读不了（代理进程库还没建好）就走列目录
+  }
+  if (row) {
+    try {
+      const pickcode = String(await pan.pickcodeById(row.fileId, { userAgent, accountInfo: account }));
+      if (pickcode) {
+        pickcodeByPath.set(key, pickcode);
+        return { pickcode, via: "db" };
+      }
+    } catch {
+      /* file_id 陈旧或接口报错：退回逐级列目录，那一步自己会判断文件还在不在 */
+    }
+  }
+
   let pickcode: Awaited<ReturnType<typeof getIdToPath>>;
   try {
     pickcode = await pan.idToPath({ path: panPath, userAgent, accountInfo: account });
@@ -221,7 +255,7 @@ export async function findPickcode(account: Account115, panPath: string, userAge
   }
   if (!pickcode) return null;
   pickcodeByPath.set(key, String(pickcode));
-  return String(pickcode);
+  return { pickcode: String(pickcode), via: "list" };
 }
 
 async function toDirectUrl(
@@ -230,15 +264,21 @@ async function toDirectUrl(
   userAgent: string | undefined,
 ): Promise<ResolveResult> {
   const t0 = performance.now();
-  const pickcode = await findPickcode(account, panPath, userAgent);
-  if (!pickcode) return { ok: false, reason: "not-found" };
+  const found = await findPickcode(account, panPath, userAgent);
+  if (!found) return { ok: false, reason: "not-found" };
   const t1 = performance.now();
 
-  const url = await pan.downloadUrl(pickcode, { userAgent, accountInfo: account });
+  const url = await pan.downloadUrl(found.pickcode, { userAgent, accountInfo: account });
   if (!url) return { ok: false, reason: "no-url" };
   const t2 = performance.now();
 
-  return { ok: true, url, accountName: account.name, panPath, timings: { pathMs: Math.round(t1 - t0), linkMs: Math.round(t2 - t1) } };
+  return {
+    ok: true,
+    url,
+    accountName: account.name,
+    panPath,
+    timings: { pathMs: Math.round(t1 - t0), linkMs: Math.round(t2 - t1), pathVia: found.via },
+  };
 }
 
 type Located = { ok: true; account: Account115; panPath: string } | { ok: false; reason: ResolveFailure };

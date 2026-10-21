@@ -125,7 +125,7 @@ const defaultResolver: Parameters<typeof setLinkResolver>[0] = async (embyPath, 
   lastResolvedUa = userAgent;
   if (resolveDelayMs > 0) await new Promise((r) => setTimeout(r, resolveDelayMs));
   return embyPath.startsWith(MOUNT) || embyPath.startsWith(HTTP_MOUNT)
-    ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath, timings: { pathMs: 0, linkMs: 0 } }
+    ? { ok: true, url: DIRECT_URL, accountName: "主号", panPath: embyPath, timings: { pathMs: 0, linkMs: 0, pathVia: "list" } }
     : { ok: false, reason: "not-mounted" };
 };
 setLinkResolver(defaultResolver);
@@ -557,7 +557,7 @@ test("回源时带上真实客户端 IP", async () => {
 
 test("非 ASCII 直链才转义，且只转非 ASCII 部分", async () => {
     await reset();
-    setLinkResolver(async () => ({ ok: true, url: UNICODE_URL, accountName: "主号", panPath: "/x", timings: { pathMs: 0, linkMs: 0 } }));
+    setLinkResolver(async () => ({ ok: true, url: UNICODE_URL, accountName: "主号", panPath: "/x", timings: { pathMs: 0, linkMs: 0, pathVia: "list" } }));
     const res = await app.inject({ method: "GET", url: "/emby/Videos/item-1/stream.mkv?api_key=k" });
     assert.equal(res.statusCode, 302);
     assert.equal(res.headers.location, "https://cdn.115.com/%E7%9B%B4%E9%93%BE?t=1");

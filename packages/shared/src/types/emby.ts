@@ -41,8 +41,10 @@ export interface PlaybackDiagnosis {
     /** ok 为 false 时的原因；"error" 是解析过程抛了异常 */
     reason: DirectLinkFailure | "error" | null;
     account: string | null;
-    /** 找路径（逐级列目录）用时 */
+    /** 找路径用时 */
     pathMs: number;
+    /** 找路径走的哪条路：内存里记着 pickcode / 库里的路径缓存给了文件 id / 逐级列目录 */
+    pathVia: "memo" | "db" | "list" | null;
     /** 取链用时 */
     linkMs: number;
     /** 这一段总用时 */

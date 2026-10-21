@@ -110,7 +110,7 @@ export async function diagnosePlayback(opts: { itemId?: string; userAgent?: stri
   emby.probed = streamsBefore === 0 && emby.streamsAfter > 0;
 
   // 第二段：换直链，和 302 路由走的是同一个函数
-  const link: PlaybackDiagnosis["link"] = { ok: false, reason: null, account: null, pathMs: 0, linkMs: 0, ms: 0, error: null };
+  const link: PlaybackDiagnosis["link"] = { ok: false, reason: null, account: null, pathMs: 0, pathVia: null, linkMs: 0, ms: 0, error: null };
   const t1 = performance.now();
   try {
     const r = await deps.resolve(path, opts.userAgent);
@@ -118,6 +118,7 @@ export async function diagnosePlayback(opts: { itemId?: string; userAgent?: stri
       link.ok = true;
       link.account = r.accountName;
       link.pathMs = r.timings.pathMs;
+      link.pathVia = r.timings.pathVia;
       link.linkMs = r.timings.linkMs;
     } else {
       link.reason = r.reason;

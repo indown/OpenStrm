@@ -25,11 +25,17 @@ function embyNote(d: PlaybackDiagnosis): string {
   return "Emby 没探出媒体流：它读不到 strm 指向的位置，每次起播都会重探几遍再放弃。给 Emby 挂上网盘、或改用 http 前缀才能让它探成功。";
 }
 
+const PATH_VIA: Record<NonNullable<PlaybackDiagnosis["link"]["pathVia"]>, string> = {
+  memo: "内存里记着这个文件",
+  db: "库里的路径缓存直接给了文件 id",
+  list: "逐级列目录找到的",
+};
+
 function linkNote(d: PlaybackDiagnosis): string {
   const l = d.link;
   if (!l.ok) return `${LINK_REASON[l.reason ?? "error"]}${l.error ? ` ${l.error}` : ""}`;
-  const parts = [`找路径 ${l.pathMs} ms，取链 ${l.linkMs} ms`];
-  if (l.pathMs >= 1000 && l.pathMs > l.linkMs) parts.push("找路径占大头（逐级列目录），同一目录下的其它文件会快很多");
+  const parts = [`找路径 ${l.pathMs} ms${l.pathVia ? `（${PATH_VIA[l.pathVia]}）` : ""}，取链 ${l.linkMs} ms`];
+  if (l.pathVia === "list" && l.pathMs >= 1000 && l.pathMs > l.linkMs) parts.push("找路径占大头：同步过的目录会进路径缓存，之后只要一个请求");
   return parts.join("；") + "。";
 }
 
