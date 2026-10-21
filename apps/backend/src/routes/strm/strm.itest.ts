@@ -370,6 +370,7 @@ function organizedUnit(runId: string, dstRoot = "Organized Show", tmdbId = 99): 
     pins: {},
     renames: {},
     kinds: {},
+    missing: {},
   };
 }
 

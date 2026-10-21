@@ -143,3 +143,28 @@ export const ORGANIZE_CHANGED_EVENT = "openstrm:organize-changed";
 export function notifyOrganizeChanged(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(ORGANIZE_CHANGED_EVENT));
 }
+
+/** 连续的集号压成区间：3,4,5,7 → E03-E05、E07 */
+function episodeRanges(list: number[]): string {
+  const out: string[] = [];
+  const sorted = [...new Set(list)].sort((a, b) => a - b);
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+    const a = String(sorted[i]).padStart(2, "0");
+    const b = String(sorted[j]).padStart(2, "0");
+    out.push(j > i ? `E${a}-E${b}` : `E${a}`);
+    i = j + 1;
+  }
+  return out.join("、");
+}
+
+/** 缺集一句话：缺 6 集：S01 E03-E04、E07-E10；没缺返回空串 */
+export function formatMissing(missing: Record<string, number[]> | undefined): string {
+  const entries = Object.entries(missing ?? {})
+    .filter(([, l]) => l.length > 0)
+    .sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (entries.length === 0) return "";
+  const total = entries.reduce((n, [, l]) => n + l.length, 0);
+  return `缺 ${total} 集：${entries.map(([s, l]) => `S${String(s).padStart(2, "0")} ${episodeRanges(l)}`).join("；")}`;
+}

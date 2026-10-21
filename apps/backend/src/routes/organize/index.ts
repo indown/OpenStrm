@@ -10,7 +10,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { OrganizeTemplatePreview } from "@openstrm/shared";
-import { forgetMatch, getRun, listItems as listRunItemRows, listMatches } from "../../db/repositories/organize.js";
+import { addSkip, forgetMatch, getRun, listItems as listRunItemRows, listMatches, listSkips, removeSkip } from "../../db/repositories/organize.js";
 import { HttpError } from "../../lib/http-error.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { parse } from "../../lib/validate.js";
@@ -110,6 +110,15 @@ const previewNameSchema = z.object({
 });
 
 const forgetSchema = z.object({ accountName: z.string().min(1), srcPath: z.string().min(1) });
+
+/** 不整理的目录：网盘绝对路径，去掉尾斜杠；根目录不收（那是整个网盘都不整理） */
+const skipPath = z
+  .string()
+  .trim()
+  .transform((p) => `/${p.replace(/^\/+|\/+$/g, "")}`)
+  .refine((p) => p !== "/", { message: "不能是网盘根目录；要整个任务都不整理，把任务的自动整理关掉就行" });
+const skipDirSchema = z.object({ accountName: z.string().min(1), path: skipPath, note: z.string().trim().max(200).optional() });
+const unskipDirSchema = z.object({ accountName: z.string().min(1), path: skipPath });
 
 /** 批量勾选单元：全选、全不选、只选把握大的 */
 const unitsPatchSchema = z
@@ -400,5 +409,21 @@ export default async function (fastify: FastifyInstance) {
   fastify.delete("/api/organize/matches", { preHandler: [fastify.authenticate] }, async (request) => {
     const body = parse(forgetSchema, request.body);
     return { success: forgetMatch(body.accountName, body.srcPath) };
+  });
+
+  /** 不整理的目录：设置页清单、整理页「以后不整理这个目录」 */
+  fastify.get("/api/organize/skips", { preHandler: [fastify.authenticate] }, async (request) => {
+    const q = parse(z.object({ account: z.string().optional() }), request.query, "query");
+    return { skips: listSkips(q.account || undefined) };
+  });
+
+  fastify.post("/api/organize/skips", { preHandler: [fastify.authenticate] }, async (request) => {
+    const body = parse(skipDirSchema, request.body);
+    return addSkip(body.accountName, body.path, body.note ?? "");
+  });
+
+  fastify.delete("/api/organize/skips", { preHandler: [fastify.authenticate] }, async (request) => {
+    const body = parse(unskipDirSchema, request.body);
+    return { success: removeSkip(body.accountName, body.path) };
   });
 }

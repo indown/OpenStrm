@@ -11,21 +11,7 @@ import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import type { AccountInfo, AppSettings, OrganizeRun, TaskDefinition } from "@openstrm/shared";
 import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
-import {
-  __test_resetOrganize,
-  bumpOwnHit,
-  deleteFinishedRunsBefore,
-  findOwnOperation,
-  insertRun,
-  listItems,
-  listRuns as listRunRows,
-  listUnits,
-  recallMatch,
-  rememberMatch,
-  replaceItems,
-  updateItem,
-  updateRun,
-} from "../../db/repositories/organize.js";
+import { __test_resetOrganize, bumpOwnHit, deleteFinishedRunsBefore, findOwnOperation, insertRun, listItems, listRuns as listRunRows, listUnits, recallMatch, rememberMatch, replaceItems, updateItem, updateRun, addSkip, removeSkip } from "../../db/repositories/organize.js";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
 import { getShareFollow, insertShareFollow, replaceShareFollows } from "../../db/repositories/share-follows.js";
 import { readKv, writeKv } from "../../db/repositories/life.js";
@@ -2726,4 +2712,30 @@ test("改判正片 / 花絮：按文件改、只给视频、撤掉回到按规�
   await untilStatus(local.id, ["ready"]);
   const video = listItems(local.id).find((i) => i.kind === "video")!;
   await assert.rejects(patchItems(local.id, [video.id], { kind: "extra" }), (err: unknown) => err instanceof HttpError && err.extra.code === "NOT_TMDB_RUN");
+});
+
+test("不整理的目录：预览时挡在作品扫描之外，日志和详情都说明；缺集按每季集数算出来", async () => {
+  addSkip("acc", "/tv/inbox/BEEF.S01.1080p", "手工整理过");
+  try {
+    const run = await createRun({ taskId: "t1", subPath: "inbox" });
+    await untilStatus(run.id, ["ready"]);
+    const detail = getRunDetail(run.id);
+    assert.deepEqual(
+      detail.units.map((u) => u.rootPath),
+      ["inbox"],
+      "只剩散在 inbox 的电影",
+    );
+    assert.deepEqual(detail.skippedDirs, ["/tv/inbox/BEEF.S01.1080p"]);
+    assert.ok(detail.run.log.some((l) => l.includes("跳过 1 个设置里不整理的目录")), detail.run.log.join("\n"));
+  } finally {
+    removeSkip("acc", "/tv/inbox/BEEF.S01.1080p");
+  }
+  // 缺集：BEEF 一季 10 集，单元里只有 E01 E02（桩的详情没有 lastAired，按每季集数全算）
+  const again = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(again.id, ["ready"]);
+  const detail = getRunDetail(again.id);
+  assert.deepEqual(detail.skippedDirs, []);
+  const beef = detail.units.find((u) => u.rootPath === "inbox/BEEF.S01.1080p")!;
+  assert.deepEqual(beef.missing, { "1": [3, 4, 5, 6, 7, 8, 9, 10] });
+  assert.deepEqual(detail.units.find((u) => u.rootPath === "inbox")!.missing, {}, "电影没有缺集");
 });

@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import type { OrganizeKindOverride, OrganizeEpisodePin, OrganizeProbeResult, MediaProbeTags, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
-import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem } from "../../db/repositories/organize.js";
+import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem, listSkips } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { listTasks, getTask } from "../../db/repositories/tasks.js";
 import { isAbortError } from "../../lib/errors.js";
@@ -22,7 +22,7 @@ import { idTagFromName, identifyUnit, type IdEvidence, type KnownId, type TmdbAp
 import { nfoEvidence } from "./nfo.js";
 import { hintFor, hintSource } from "./hints.js";
 import { duplicatePathFor, isStagingDir } from "../strm/staging.js";
-import { type UnitPlanInput, finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan } from "./plan.js";
+import { type UnitPlanInput, finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan, missingEpisodes } from "./plan.js";
 import { indexLocalStrm, mapLocalStrm, planLocalUnit, toSyntheticUnit } from "./local-naming.js";
 import { cachedProbeTags, probeDriveFile, probeSummary, probeTags, type ProbeTarget } from "../media/probe.js";
 import { isTaskRunning } from "../task/registry.js";
@@ -116,6 +116,9 @@ export async function createRun(input: CreateRunInput): Promise<OrganizeRun> {
 }
 
 /* ------------------------------- 预览：列 → 分单元 → 识别 → 规划 ------------------------------- */
+
+/** 路径在不整理的目录里（或就是它） */
+export const underSkip = (abs: string, dir: string): boolean => abs === dir || abs.startsWith(`${dir}/`);
 
 interface Walked {
   entries: ScopeEntry[];
@@ -473,6 +476,7 @@ function toUnitRow(runId: string, unit: Unit, match: OrganizeMatch | null, plan:
     pins: {},
     renames: {},
     kinds: {},
+    missing: missingEpisodes(match, plan?.episodes),
   };
 }
 
@@ -526,8 +530,12 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
 
   const rules = parseRules(org.rules).rules;
   const scopes = unitScopesOf(run);
+  // 设置里「不整理的目录」：这些目录下的东西不当作品扫（冲突检测照样看得见）；范围里真挡掉了的记进日志
+  const skips = listSkips(provider.account.name).map((x) => x.path);
+  const skippedDirs = skips.filter((dir) => walked.entries.some((e) => underSkip(absOf(task, e.path), dir)));
+  if (skippedDirs.length > 0) jobLog(job, `跳过 ${skippedDirs.length} 个设置里不整理的目录：${skippedDirs.slice(0, 5).join("、")}${skippedDirs.length > 5 ? " 等" : ""}`);
   // 重复文件目录（冲突项挪进去的）、归档目录（复制后挪进去的）是暂存区，不再当作品扫；冲突检测还是要知道里面有什么，所以只挡 buildUnits
-  const units = buildUnits(walked.entries.filter((e) => !isStagingDir(e.path)), {
+  const units = buildUnits(walked.entries.filter((e) => !isStagingDir(e.path) && !skips.some((dir) => underSkip(absOf(task, e.path), dir))), {
     scopePath: run.scopePath,
     scopes,
     taskRootName: baseOf(normalizePath(task.originPath)),
@@ -602,6 +610,7 @@ async function preview(job: Job, runId: string, opts: { refreshTmdb: boolean }):
     );
     row.dstRoot = plan.dstRoot;
     row.notes = [...identifyNotes, ...plan.notes];
+    row.missing = missingEpisodes(match, plan.episodes);
     rows.push(row);
     plans.push(plan);
     jobLog(job, match ? `「${unit.rawName}」→ ${match.title} (${match.year}) [${match.confidence}] ${match.reason}` : `「${unit.rawName}」没有识别出来`);
@@ -973,6 +982,7 @@ function replanRun(run: OrganizeRun, state: PlanState, changed: Map<string, Orga
         referencedBy: refs,
         dstRoot: plan.dstRoot,
         notes: [...(state.identifyNotes.get(r.key) ?? []), ...plan.notes],
+        missing: missingEpisodes(r.match, plan.episodes),
       });
     } else if (pruned || refs !== r.referencedBy) {
       updateUnit(run.id, r.key, { ...(pruned ? { resolutions: Object.fromEntries(kept) } : {}), referencedBy: refs });
@@ -1083,7 +1093,7 @@ function applyFilePatches(row: OrganizeUnit, files: Array<[string, FilePatch]>):
 /** 刷新 TMDB 信息时比「拉回来的和原来一样吗」：只看会落到命名 / 分类 / 海报上的字段 */
 function sameMatchData(a: OrganizeMatch, b: OrganizeMatch): boolean {
   const pick = (m: OrganizeMatch) =>
-    JSON.stringify([m.title, m.originalTitle, m.enTitle ?? "", m.year, m.posterUrl, m.imdbId ?? "", m.genreIds ?? [], m.countries ?? [], m.originalLanguage ?? "", m.seasons ?? [], m.collection?.name ?? ""]);
+    JSON.stringify([m.title, m.originalTitle, m.enTitle ?? "", m.year, m.posterUrl, m.imdbId ?? "", m.genreIds ?? [], m.countries ?? [], m.originalLanguage ?? "", m.seasons ?? [], m.collection?.name ?? "", m.lastAired ?? null]);
   return pick(a) === pick(b);
 }
 

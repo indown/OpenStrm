@@ -27,12 +27,12 @@ import { apiErrorBody, apiErrorMessage } from "@/lib/axios";
 import { accountLabel } from "@/lib/drive";
 import { fmtTime } from "@/lib/format";
 import { NAMING_LABEL, RUN_STATUS_META, TRIGGER_LABEL, handPicked, isBusyStatus, notifyOrganizeChanged } from "@/lib/organize";
-import { AdjustDialog } from "./AdjustDialog";
+import Link from "next/link";
+import { EditUnitDialog } from "./EditUnitDialog";
 import { FailurePanel } from "./FailurePanel";
 import { MatchDialog } from "@/components/MatchDialog";
 import { RenameDialog } from "./RenameDialog";
 import { PinDialog } from "./PinDialog";
-import { TitleDialog } from "./TitleDialog";
 import { UnitList, type FileEdit } from "./UnitList";
 import { POLL_MS, plannedText, toastRunError } from "./helpers";
 
@@ -62,10 +62,10 @@ export function RunView({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [matching, setMatching] = useState<OrganizeUnit | null>(null);
-  const [adjusting, setAdjusting] = useState<OrganizeUnit | null>(null);
+  /** 「编辑作品」弹框开着的单元（记 key：换候选 / 重规划之后单元对象会换，按 key 从详情里取最新的） */
+  const [editing, setEditing] = useState<string | null>(null);
   /** 冲突项「自己改名」弹框：要改的项和它所在的单元 */
   const [renaming, setRenaming] = useState<{ unit: OrganizeUnit; item: OrganizeItem; mode: "conflict" | "any" } | null>(null);
-  const [titling, setTitling] = useState<OrganizeUnit | null>(null);
   const [pinning, setPinning] = useState<{ unit: OrganizeUnit; item: OrganizeItem } | null>(null);
   const [confirm, setConfirm] = useState<"apply" | "revert" | "delete" | null>(null);
   const [showLog, setShowLog] = useState(false);
@@ -206,6 +206,26 @@ export function RunView({
       else toast.info("TMDB 上的信息没有变化");
     } catch (err) {
       toast.error(apiErrorMessage(err, "刷新 TMDB 信息失败"));
+      await load();
+    } finally {
+      markPatching([unit.key], false);
+    }
+  };
+
+  /** 以后不整理这个目录：加进设置里的清单（按账号 + 网盘绝对路径），这次先取消勾选 */
+  const skipDir = async (unit: OrganizeUnit) => {
+    const t = tasks?.find((x) => x.id === detail?.run.taskId);
+    if (!t || !unit.rootPath) return;
+    const origin = t.originPath.replace(/^\/+|\/+$/g, "");
+    const abs = `/${origin ? `${origin}/` : ""}${unit.rootPath}`;
+    markPatching([unit.key], true);
+    try {
+      await api.organize.addSkip({ accountName: t.account, path: abs, note: `从整理页加的：${unit.match?.title || unit.rawName}` });
+      if (unit.selected && (unit.match || detail?.run.naming === "local")) await api.organize.patchUnit(runId, unit.key, { selected: false });
+      await load();
+      toast.success("已加进「不整理的目录」：下次预览不再扫它；要恢复到设置页「整理与命名」里删掉");
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "没加进去"));
       await load();
     } finally {
       markPatching([unit.key], false);
@@ -386,7 +406,8 @@ export function RunView({
   }
   if (!detail) return <TableSkeleton rows={4} />;
 
-  const { run, units, counts, dirCount, groups, revertable, applicable, editable, executed, outdated } = detail;
+  const { run, units, counts, dirCount, groups, revertable, applicable, editable, executed, outdated, skippedDirs } = detail;
+  const editingUnit = editing ? (units.find((u) => u.key === editing) ?? null) : null;
   const outdatedRunId = outdated?.kind === "changed" ? outdated.runId : undefined;
   const blockedBy = revertable.blockedBy;
   const meta = RUN_STATUS_META[run.status];
@@ -452,6 +473,15 @@ export function RunView({
                   </li>
                 ))}
               </ul>
+            )}
+            {skippedDirs.length > 0 && (
+              <div className="break-all text-xs text-muted-foreground">
+                按设置跳过了 {skippedDirs.length} 个不整理的目录：{skippedDirs.slice(0, 3).join("、")}
+                {skippedDirs.length > 3 ? " 等" : ""}
+                <Link href="/settings#organize" className="ml-1 text-brand hover:underline">
+                  去设置里改
+                </Link>
+              </div>
             )}
             {run.error && !previewFailed && <div className="break-all text-xs text-destructive">{run.error}</div>}
             {!revertable.ok && blockedBy && (
@@ -649,12 +679,13 @@ export function RunView({
           }
           onToggleItems={(u, ids, selected) => void toggleItems(u, ids, selected)}
           onResolve={pickResolve}
-          onMatch={setMatching}
-          onAdjust={setAdjusting}
+          onEdit={(u) => setEditing(u.key)}
+          onPickCandidate={(u, pick) => void patchUnit(u, { match: pick })}
+          onSkipDir={(u) => void skipDir(u)}
           onRefresh={(u) => void refreshUnit(u)}
           onProbe={(u) => void probeUnit(u)}
           onProbeMissing={(keys) => void probeMissing(keys)}
-          onTitle={setTitling}
+          onPin={(u, item, pin) => void editItem(u, item, { pin })}
           onFileEdit={fileEdit}
         />
       )}
@@ -665,7 +696,14 @@ export function RunView({
         onPick={(pick) => (matching ? patchUnit(matching, { match: pick }) : Promise.resolve(false))}
         pickingNote="正在按新的匹配重新规划…"
       />
-      <AdjustDialog unit={adjusting} onOpenChange={(o) => !o && setAdjusting(null)} onSave={(p) => (adjusting ? patchUnit(adjusting, p) : Promise.resolve(false))} />
+      <EditUnitDialog
+        unit={editingUnit}
+        pending={!!editing && patching.has(editing)}
+        onOpenChange={(o) => !o && setEditing(null)}
+        onSave={(patch) => (editingUnit ? patchUnit(editingUnit, patch) : Promise.resolve(false))}
+        onPickCandidate={(pick) => (editingUnit ? patchUnit(editingUnit, { match: pick }) : Promise.resolve(false))}
+        onSearch={() => editingUnit && setMatching(editingUnit)}
+      />
       <RenameDialog
         item={renaming?.item ?? null}
         title={renaming?.mode === "any" ? "改文件名" : "自己改名"}
@@ -685,7 +723,6 @@ export function RunView({
         onOpenChange={(o) => !o && setPinning(null)}
         onSave={(pin) => (pinning ? editItem(pinning.unit, pinning.item, { pin }) : Promise.resolve(false))}
       />
-      <TitleDialog unit={titling} onOpenChange={(o) => !o && setTitling(null)} onSave={(p) => (titling ? patchUnit(titling, p) : Promise.resolve(false))} />
 
       <AlertDialog open={confirm != null} onOpenChange={(o) => !o && setConfirm(null)}>
         <AlertDialogContent>

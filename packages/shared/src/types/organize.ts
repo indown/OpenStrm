@@ -197,6 +197,8 @@ export interface OrganizeMatch {
   seasons?: OrganizeSeasonInfo[];
   /** 电影所属的系列（TMDB 的 collection）：模板变量 {collection} */
   collection?: { id: number; name: string };
+  /** 剧集最近播出的一集（TMDB 的 last_episode_to_air）：算缺集时它之后的不算缺；null 是还没播过；老缓存没有这个键 */
+  lastAired?: { season: number; episode: number } | null;
   /** 备选（预览里「换匹配」时先给这些） */
   candidates?: OrganizeCandidate[];
 }
@@ -331,6 +333,8 @@ export interface OrganizeUnit {
   renames: Record<string, string>;
   /** 按文件改判的类型（键是网盘绝对路径）：规则把正片当成花絮、或反过来时，人来定；没记的按规则 */
   kinds: Record<string, OrganizeKindOverride>;
+  /** 缺的集：季号 → 集号（只算单元里出现过的季，按 TMDB 每季集数和已播到哪一集算；电影和没识别的是空对象） */
+  missing: Record<string, number[]>;
 }
 
 /** 文件类型改判：video 当正片、extra 当花絮 */
@@ -436,6 +440,18 @@ export interface OrganizeRunDetail extends OrganizeRunSummary {
   counts: Record<string, OrganizeUnitCounts>;
   /** 建目录 / 删空目录的项数（不属于某个作品，页面单列） */
   dirCount: number;
+  /** 这次预览的范围里被「不整理的目录」挡掉的目录（网盘绝对路径） */
+  skippedDirs: string[];
+}
+
+/** 不整理的目录（设置里的清单 + 整理页「以后不整理这个目录」） */
+export interface OrganizeSkip {
+  accountName: string;
+  /** 网盘绝对路径，带前导 / */
+  path: string;
+  note: string;
+  /** 秒 */
+  createdAt: number;
 }
 
 /**

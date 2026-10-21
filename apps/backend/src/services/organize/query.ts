@@ -2,7 +2,7 @@
  * 查询：列表、详情、要人管的整理；启动时对账中断的 run。
  */
 import type { OrganizeAttention, OrganizeAttentionReason, OrganizeItem, OrganizeRun, OrganizeFailureGroupKey, OrganizeRunDetail, OrganizeRunSummary, OrganizeUnitCounts, OrganizeUnit } from "@openstrm/shared";
-import { changedSince, getRun, listItems, listRuns as listRunRows, listRunsByStatus, listUnits, updateRun } from "../../db/repositories/organize.js";
+import { changedSince, getRun, listItems, listRuns as listRunRows, listRunsByStatus, listSkips, listUnits, updateRun } from "../../db/repositories/organize.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { HttpError } from "../../lib/http-error.js";
 import { providerForTask } from "../drive/registry.js";
@@ -73,12 +73,33 @@ function unitCounts(units: OrganizeUnit[], items: OrganizeItem[]): Record<string
 const lightUnit = (u: OrganizeUnit): OrganizeUnit =>
   u.match?.candidates?.length ? { ...u, match: { ...u.match, candidates: u.match.candidates.map(({ overview: _overview, ...c }) => c) } } : u;
 
+/** 这次 run 的范围里有哪些「不整理的目录」（设置现在的清单，不是预览当时的）：在范围里、或把整个范围罩住的都算 */
+function skippedDirsOf(run: OrganizeRun): string[] {
+  const task = getTask(run.taskId);
+  if (!task) return [];
+  const origin = `/${task.originPath.replace(/^\/+|\/+$/g, "")}`.replace(/\/+$/, "") || "";
+  const scopes = run.scopePaths.length > 0 ? run.scopePaths : [run.scopePath];
+  return listSkips(task.account)
+    .map((s) => s.path)
+    .filter((abs) => {
+      if (!(abs === origin || abs.startsWith(`${origin}/`))) return false;
+      const rel = abs.slice(origin.length).replace(/^\/+/, "");
+      return scopes.some((sc) => sc === "" || rel === sc || rel.startsWith(`${sc}/`) || sc.startsWith(`${rel}/`) || rel === "");
+    });
+}
+
 export function getRunDetail(runId: string): OrganizeRunDetail {
   const run = getRun(runId);
   if (!run) throw new HttpError(404, "整理记录不存在");
   const units = listUnits(runId);
   const items = listItems(runId);
-  return { ...summaryOf(run, units, items), units: units.map(lightUnit), counts: unitCounts(units, items), dirCount: items.filter((it) => it.unitKey === "").length };
+  return {
+    ...summaryOf(run, units, items),
+    units: units.map(lightUnit),
+    counts: unitCounts(units, items),
+    dirCount: items.filter((it) => it.unitKey === "").length,
+    skippedDirs: skippedDirsOf(run),
+  };
 }
 
 /** 按需拉项：一个单元的（unitKey 为空是建目录 / 删空目录），或者失败面板的一组 */

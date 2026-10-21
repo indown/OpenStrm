@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { OrganizeMatch } from "@openstrm/shared";
-import { EXCLUDED_REASON, finalizeItems, planUnit, resolveEpisode, type ScopeRoot } from "./plan.js";
+import { EXCLUDED_REASON, finalizeItems, missingEpisodes, planUnit, resolveEpisode, type ScopeRoot } from "./plan.js";
 import { parseRules } from "./rules.js";
 import { resolveOrganizeSettings } from "./settings.js";
 import { buildUnits, type ScopeEntry } from "./units.js";
@@ -605,4 +605,16 @@ test("特别篇目录名按设置叫 Specials：只换恰好是 Season 00 的那
 test("花絮目录名按设置来（Plex 的 Other）", () => {
   const { items } = plan(["x/Dune.2024.mkv", "x/Featurettes/making.mkv"], dune, {}, { ...settings, extrasDir: "Other" });
   assert.equal(items.find((i) => i.srcPath.endsWith("making.mkv"))!.dstPath, "沙丘：第二部 (2024) [tmdbid=693134]/Other/making.mkv");
+});
+
+test("缺集：按每季集数和已播到哪一集算，只看单元里出现过的季；多集文件算两集", () => {
+  const { plan: p } = plan(["x/BEEF.S01E01.mkv", "x/BEEF.S01E02.mkv", "x/BEEF.S01E05-E06.mkv"], beef);
+  assert.deepEqual(p.episodes, { 1: [1, 2, 5, 6] });
+  assert.deepEqual(missingEpisodes(beef, p.episodes), { "1": [3, 4, 7, 8, 9, 10] }, "老缓存没有 lastAired：按每季集数全算");
+  assert.deepEqual(missingEpisodes({ ...beef, lastAired: { season: 1, episode: 6 } }, p.episodes), { "1": [3, 4] }, "播到第 6 集：之后的不算缺");
+  assert.deepEqual(missingEpisodes({ ...beef, lastAired: { season: 2, episode: 3 } }, p.episodes), { "1": [3, 4, 7, 8, 9, 10] }, "已经播到下一季：第一季全算");
+  assert.deepEqual(missingEpisodes({ ...beef, lastAired: null }, p.episodes), {}, "还没播过什么都不缺");
+  assert.deepEqual(missingEpisodes({ ...beef, lastAired: { season: 1, episode: 2 } }, { 1: [1, 2], 2: [1] }), {}, "第二季还没播到不算缺；第一季齐了");
+  assert.deepEqual(missingEpisodes(dune, { 1: [1] }), {}, "电影没有缺集");
+  assert.deepEqual(plan(["x/Dune.2024.mkv"], dune).plan.episodes, {});
 });

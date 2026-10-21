@@ -1,27 +1,29 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { AlertTriangle, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, MoreHorizontal, PenLine, RefreshCw, ScanSearch, Search, SlidersHorizontal, Telescope, Tv } from "lucide-react";
-import type { MediaProbeTags, OrganizeConflictChoice, OrganizeEpisodePin, OrganizeItem, OrganizeKindOverride, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
+import { AlertTriangle, Ban, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, MoreHorizontal, PenLine, RefreshCw, ScanSearch, Search, Telescope, Tv } from "lucide-react";
+import type { MediaProbeTags, OrganizeConflictChoice, OrganizeEpisodePin, OrganizeItem, OrganizeKindOverride, OrganizeMediaType, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/status-badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { ACTION_META, CONFIDENCE_META, CONFLICT_CHOICES, CONFLICT_LABEL, ERROR_KIND_META, baseName, dirName } from "@/lib/organize";
+import { ACTION_META, CONFIDENCE_META, CONFLICT_CHOICES, CONFLICT_LABEL, ERROR_KIND_META, baseName, dirName, formatMissing } from "@/lib/organize";
+import { topCandidates } from "./EditUnitDialog";
 import { keywordFromName, searchHref } from "@/lib/resource";
 import { useRunItems } from "./helpers";
 
 const NO_COUNTS: OrganizeUnitCounts = { total: 0, changing: 0, conflicts: 0, skipped: 0, keep: 0, failed: 0, done: 0, reverted: 0, excluded: 0 };
 
-type UnitFilter = "all" | "attention" | "changing" | "noop";
+type UnitFilter = "all" | "attention" | "changing" | "missing" | "noop";
 
 const FILTERS: Array<{ key: UnitFilter; label: string; hint: string }> = [
   { key: "all", label: "全部", hint: "" },
   { key: "attention", label: "要处理", hint: "没识别、把握不大、有冲突、有失败或跳过里有问题的" },
   { key: "changing", label: "要动的", hint: "有文件要改名 / 移动的" },
+  { key: "missing", label: "缺集", hint: "按 TMDB 每季的集数，已播出的里少了几集（只看单元里出现过的季）" },
   { key: "noop", label: "已规范", hint: "已经是规范命名，没什么要动的" },
 ];
 
@@ -30,6 +32,7 @@ interface Row {
   counts: OrganizeUnitCounts;
   attention: boolean;
   changing: boolean;
+  missing: boolean;
   noop: boolean;
 }
 
@@ -42,7 +45,8 @@ function rowOf(unit: OrganizeUnit, counts: OrganizeUnitCounts, ready: boolean, l
   const attention = (!m && !local) || (ready && !!m && m.confidence !== "high") || counts.conflicts > 0 || counts.failed > 0 || counts.skipped > 0;
   const changing = counts.changing > 0;
   const noop = (!!m || local) && unit.selected && !changing && counts.conflicts === 0 && counts.failed === 0 && counts.skipped === 0 && counts.excluded === 0;
-  return { unit, counts, attention, changing, noop };
+  const missing = Object.values(unit.missing ?? {}).some((l) => l.length > 0);
+  return { unit, counts, attention, changing, missing, noop };
 }
 
 const rank = (r: Row) => (r.attention ? 0 : r.changing ? 1 : 2);
@@ -69,12 +73,13 @@ export function UnitList({
   onOnlyHigh,
   onToggleItems,
   onResolve,
-  onMatch,
-  onAdjust,
+  onEdit,
+  onPickCandidate,
+  onSkipDir,
   onRefresh,
   onProbe,
   onProbeMissing,
-  onTitle,
+  onPin,
   onFileEdit,
 }: {
   runId: string;
@@ -99,16 +104,20 @@ export function UnitList({
   onToggleItems: (unit: OrganizeUnit, ids: string[], selected: boolean) => void;
   /** 冲突行上选了办法（"stay" 是撤回选择，"custom" 由调用方弹框问名字） */
   onResolve: (unit: OrganizeUnit, item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
-  onMatch: (unit: OrganizeUnit) => void;
-  onAdjust: (unit: OrganizeUnit) => void;
+  /** 打开「编辑作品」弹框 */
+  onEdit: (unit: OrganizeUnit) => void;
+  /** 卡片上的候选一点就换 */
+  onPickCandidate: (unit: OrganizeUnit, pick: { mediaType: OrganizeMediaType; tmdbId: number }) => void;
+  /** 以后不整理这个目录（加进设置里的清单，这次取消勾选） */
+  onSkipDir: (unit: OrganizeUnit) => void;
   /** 刷新这部的 TMDB 信息（跳过缓存重新拉详情和季集） */
   onRefresh: (unit: OrganizeUnit) => void;
   /** 探测这部全部视频的编码（读文件头），填进文件名里缺的标签 */
   onProbe: (unit: OrganizeUnit) => void;
   /** 探测这些单元里文件名缺模板标签的视频 */
   onProbeMissing: (keys: string[]) => void;
-  /** 改这部的标题 / 年份（只影响命名） */
-  onTitle: (unit: OrganizeUnit) => void;
+  /** 文件行上直接填的季 / 集（null 撤掉） */
+  onPin: (unit: OrganizeUnit, item: OrganizeItem, pin: OrganizeEpisodePin | null) => void;
   /** 文件行「…」里选的：钉季 / 集、改文件名、撤掉 */
   onFileEdit: (unit: OrganizeUnit, item: OrganizeItem, what: FileEdit) => void;
 }) {
@@ -122,6 +131,7 @@ export function UnitList({
     all: rows.length,
     attention: rows.filter((r) => r.attention).length,
     changing: rows.filter((r) => r.changing).length,
+    missing: rows.filter((r) => r.missing).length,
     noop: rows.filter((r) => r.noop).length,
   };
   const q = query.trim().toLowerCase();
@@ -205,11 +215,12 @@ export function UnitList({
           onRemember={(remember) => onPatch(r.unit, { remember })}
           onToggleItems={(ids, selected) => onToggleItems(r.unit, ids, selected)}
           onResolve={(item, how) => onResolve(r.unit, item, how)}
-          onMatch={() => onMatch(r.unit)}
-          onAdjust={() => onAdjust(r.unit)}
+          onEdit={() => onEdit(r.unit)}
+          onPickCandidate={(pick) => onPickCandidate(r.unit, pick)}
+          onSkipDir={() => onSkipDir(r.unit)}
           onRefresh={() => onRefresh(r.unit)}
           onProbe={() => onProbe(r.unit)}
-          onTitle={() => onTitle(r.unit)}
+          onPin={(item, pin) => onPin(r.unit, item, pin)}
           onFileEdit={(item, what) => onFileEdit(r.unit, item, what)}
         />
       ))}
@@ -251,11 +262,12 @@ function UnitCard({
   onRemember,
   onToggleItems,
   onResolve,
-  onMatch,
-  onAdjust,
+  onEdit,
+  onPickCandidate,
+  onSkipDir,
   onRefresh,
   onProbe,
-  onTitle,
+  onPin,
   onFileEdit,
 }: {
   runId: string;
@@ -272,11 +284,12 @@ function UnitCard({
   onRemember: (remember: boolean) => void;
   onToggleItems: (ids: string[], selected: boolean) => void;
   onResolve: (item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
-  onMatch: () => void;
-  onAdjust: () => void;
+  onEdit: () => void;
+  onPickCandidate: (pick: { mediaType: OrganizeMediaType; tmdbId: number }) => void;
+  onSkipDir: () => void;
   onRefresh: () => void;
   onProbe: () => void;
-  onTitle: () => void;
+  onPin: (item: OrganizeItem, pin: OrganizeEpisodePin | null) => void;
   onFileEdit: (item: OrganizeItem, what: FileEdit) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -287,6 +300,8 @@ function UnitCard({
   const tmdbUrl = m ? `https://www.themoviedb.org/${m.mediaType}/${m.tmdbId}` : "";
   // 找资源按认出来的片名搜（TMDB 上的中文名最好搜），没认出来就用从文件名里拆出来的
   const searchKeyword = keywordFromName(m?.title || unit.parsedTitle || unit.rawName);
+  const missingText = formatMissing(unit.missing);
+  const candidates = topCandidates(unit, 2);
 
   return (
     <div className={`rounded-xl border bg-card p-4 ${unit.selected ? "" : "opacity-60"}`}>
@@ -339,6 +354,33 @@ function UnitCard({
               <span className="break-all">{n}</span>
             </div>
           ))}
+          {missingText && (
+            <div className="flex items-start gap-1 text-xs text-warning" title="按 TMDB 每季的集数和已播到哪一集算，只看这部里出现过的季；刷新 TMDB 信息后会重算">
+              <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+              <span className="break-all">{missingText}</span>
+            </div>
+          )}
+          {editable && !local && m && m.confidence !== "high" && candidates.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1 text-xs">
+              <span className="text-muted-foreground">也可能是：</span>
+              {candidates.map((c) => (
+                <button
+                  key={`${c.mediaType}-${c.tmdbId}`}
+                  type="button"
+                  disabled={pending}
+                  className="inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 hover:bg-muted disabled:opacity-60"
+                  onClick={() => onPickCandidate({ mediaType: c.mediaType, tmdbId: c.tmdbId })}
+                  title={`换成 ${c.title}${c.year ? ` (${c.year})` : ""}`}
+                >
+                  {c.mediaType === "tv" ? <Tv className="size-3" /> : <Film className="size-3" />}
+                  <span className="truncate">
+                    {c.title}
+                    {c.year ? ` (${c.year})` : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground tabular-nums">
             <span>
               {unit.fileCount} 个文件（{unit.videoCount} 个视频）
@@ -356,51 +398,54 @@ function UnitCard({
         </div>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
-        {editable && (
+        {editable && !local && (
           <>
-            {!local && (
-              <Button variant="outline" size="sm" className="h-8" onClick={onMatch} disabled={pending}>
-                <Search className="size-4" />
-                换匹配
-              </Button>
-            )}
-            {!local && m?.mediaType === "tv" && (
-              <Button variant="outline" size="sm" className="h-8" onClick={onAdjust} disabled={pending}>
-                <SlidersHorizontal className="size-4" />
-                季 / 集偏移
-              </Button>
-            )}
-            {m && !local && (
-              <Button variant="outline" size="sm" className="h-8" onClick={onTitle} disabled={pending} title="只改目录和文件名里的标题 / 年份：从 TMDB 的译名、原名、别名里挑，或自己填；识别不变">
-                <PenLine className="size-4" />
-                改标题
-              </Button>
-            )}
-            {m && !local && (
-              <Button variant="outline" size="sm" className="h-8" onClick={onRefresh} disabled={pending} title="不换作品：跳过缓存重新拉这部的详情和季集，按新信息重新规划">
-                <RefreshCw className="size-4" />
-                刷新 TMDB
-              </Button>
-            )}
-            {m && !local && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8"
-                onClick={onProbe}
-                disabled={pending}
-                title="读这部每个视频的文件头（几 MB，不下载整个文件）拿到真实的分辨率 / 编码 / 音频 / HDR，填进文件名里缺的标签并重新规划；读过的有缓存"
-              >
-                <ScanSearch className="size-4" />
-                探测编码
-              </Button>
-            )}
-            {m && !local && (
+            <Button variant="outline" size="sm" className="h-8" onClick={onEdit} disabled={pending} title="识别 / 候选 / 标题年份 / 季与集偏移 / 记住，一个弹框里改">
+              <PenLine className="size-4" />
+              编辑
+            </Button>
+            {m && (
               <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
                 <Checkbox checked={unit.remember} onCheckedChange={(v) => onRemember(v === true)} disabled={pending} />
                 记住这个识别
               </label>
             )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="size-8" disabled={pending} aria-label="更多">
+                  <MoreHorizontal className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="max-w-[min(20rem,calc(100vw-2rem))]">
+                {m && (
+                  <DropdownMenuItem onSelect={() => onRefresh()} className="flex-col items-start gap-0.5">
+                    <span className="inline-flex items-center gap-1 text-xs font-medium">
+                      <RefreshCw className="size-3.5" />
+                      刷新 TMDB 信息
+                    </span>
+                    <span className="text-[11px] whitespace-normal text-muted-foreground">不换作品：跳过缓存重新拉这部的详情和季集，按新信息重新规划</span>
+                  </DropdownMenuItem>
+                )}
+                {m && (
+                  <DropdownMenuItem onSelect={() => onProbe()} className="flex-col items-start gap-0.5">
+                    <span className="inline-flex items-center gap-1 text-xs font-medium">
+                      <ScanSearch className="size-3.5" />
+                      探测编码
+                    </span>
+                    <span className="text-[11px] whitespace-normal text-muted-foreground">读每个视频的文件头（几 MB）拿到真实的分辨率 / 编码 / 音频 / HDR，填进文件名里缺的标签</span>
+                  </DropdownMenuItem>
+                )}
+                {unit.rootPath && (
+                  <DropdownMenuItem onSelect={() => onSkipDir()} className="flex-col items-start gap-0.5">
+                    <span className="inline-flex items-center gap-1 text-xs font-medium">
+                      <Ban className="size-3.5" />
+                      以后不整理这个目录
+                    </span>
+                    <span className="text-[11px] whitespace-normal text-muted-foreground">加进设置里「不整理的目录」：下次预览不再扫它，这次先取消勾选；在设置页能删掉</span>
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </>
         )}
         {!local && searchKeyword && (
@@ -428,6 +473,7 @@ function UnitCard({
           pending={pending}
           onToggleItems={onToggleItems}
           onResolve={onResolve}
+          onPin={onPin}
           onFileEdit={onFileEdit}
         />
       )}
@@ -456,6 +502,7 @@ function UnitFiles({
   pending,
   onToggleItems,
   onResolve,
+  onPin,
   onFileEdit,
 }: {
   runId: string;
@@ -470,6 +517,7 @@ function UnitFiles({
   pending: boolean;
   onToggleItems: (ids: string[], selected: boolean) => void;
   onResolve: (item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
+  onPin: (item: OrganizeItem, pin: OrganizeEpisodePin | null) => void;
   onFileEdit: (item: OrganizeItem, what: FileEdit) => void;
 }) {
   const { items, error } = useRunItems(runId, { unit: unit.key }, true, version);
@@ -492,8 +540,58 @@ function UnitFiles({
       pending={pending}
       onToggleItems={onToggleItems}
       onResolve={onResolve}
+      onPin={onPin}
       onFileEdit={onFileEdit}
     />
+  );
+}
+
+const RE_SE = /S(\d{1,2})E(\d{1,4})/i;
+
+/**
+ * 文件行上直接填第几季第几集（剧集的视频）：失焦 / 回车就按它钉上重新规划；两格都清空就撤掉钉的。
+ * 没钉的按规划出来的名字预填，所以没改就不提交
+ */
+function EpisodeCells({ item, pin, disabled, onPin }: { item: OrganizeItem; pin?: OrganizeEpisodePin; disabled: boolean; onPin: (pin: OrganizeEpisodePin | null) => void }) {
+  const parsed = RE_SE.exec(baseName(item.dstPath));
+  const initS = pin?.season !== undefined ? String(pin.season) : parsed ? String(Number(parsed[1])) : "";
+  const initE = pin?.episode !== undefined ? String(pin.episode) : parsed ? String(Number(parsed[2])) : "";
+  const [s, setS] = useState(initS);
+  const [e, setE] = useState(initE);
+  useEffect(() => {
+    setS(initS);
+    setE(initE);
+  }, [initS, initE]);
+  const commit = () => {
+    const ns = s.trim();
+    const ne = e.trim();
+    if (ns === initS && ne === initE) return;
+    if ((ns !== "" && !/^\d{1,2}$/.test(ns)) || (ne !== "" && !/^\d{1,4}$/.test(ne))) {
+      setS(initS);
+      setE(initE);
+      return;
+    }
+    if (ns === "" && ne === "") {
+      if (pin) onPin(null);
+      else {
+        setS(initS);
+        setE(initE);
+      }
+      return;
+    }
+    onPin({ ...(ns !== "" ? { season: Number(ns) } : {}), ...(ne !== "" ? { episode: Number(ne) } : {}) });
+  };
+  const blurOnEnter = (ev: React.KeyboardEvent<HTMLInputElement>) => {
+    if (ev.key === "Enter") ev.currentTarget.blur();
+  };
+  return (
+    <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground" title="直接填第几季第几集，失焦就按它重新规划；钉了的不再受文件名、季覆盖 / 集偏移影响，两格都清空就撤掉">
+      S
+      <Input className="h-6 w-10 px-1 text-center text-[11px] tabular-nums" value={s} onChange={(ev) => setS(ev.target.value)} onBlur={commit} onKeyDown={blurOnEnter} disabled={disabled} inputMode="numeric" aria-label="季" />
+      E
+      <Input className="h-6 w-12 px-1 text-center text-[11px] tabular-nums" value={e} onChange={(ev) => setE(ev.target.value)} onBlur={commit} onKeyDown={blurOnEnter} disabled={disabled} inputMode="numeric" aria-label="集" />
+      {pin && <span className="text-brand">已钉</span>}
+    </span>
   );
 }
 
@@ -640,6 +738,7 @@ function ItemsTable({
   pending,
   onToggleItems,
   onResolve,
+  onPin,
   onFileEdit,
 }: {
   items: OrganizeItem[];
@@ -660,6 +759,7 @@ function ItemsTable({
   pending: boolean;
   onToggleItems: (ids: string[], selected: boolean) => void;
   onResolve: (item: OrganizeItem, how: OrganizeConflictChoice | "stay") => void;
+  onPin: (item: OrganizeItem, pin: OrganizeEpisodePin | null) => void;
   onFileEdit: (item: OrganizeItem, what: FileEdit) => void;
 }) {
   // 能单独勾的：要改名 / 移动的、冲突的（勾掉一份另一份就能走），和已经被勾掉的
@@ -731,6 +831,11 @@ function ItemsTable({
                     </>
                   ) : (
                     <span className="text-muted-foreground">—</span>
+                  )}
+                  {editable && tv && !local && it.kind === "video" && !userExcluded && it.action !== "skip" && (
+                    <div>
+                      <EpisodeCells item={it} pin={pins[it.srcPath]} disabled={pending} onPin={(pin) => onPin(it, pin)} />
+                    </div>
                   )}
                 </td>
               </tr>

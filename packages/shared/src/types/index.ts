@@ -106,6 +106,7 @@ export type {
   OrganizeRunSummary,
   OrganizeSeasonInfo,
   OrganizeSettings,
+  OrganizeSkip,
   OrganizeSkipResult,
   OrganizeTemplatePreview,
   OrganizeTrigger,

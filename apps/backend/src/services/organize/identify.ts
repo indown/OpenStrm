@@ -99,9 +99,10 @@ export class TmdbClient implements TmdbApi {
     const key = `details:${kind}:${id}`;
     const fetcher = () => getDetails(this.apiKey, kind, id, this.language);
     const d = await this.cached(key, DETAILS_TTL, fetcher, this.fresh);
-    if (!d || kind !== "movie" || d.collection !== undefined) return d;
-    // 2026-10-19 之前存的电影详情没有 collection 这个键（现在对电影总会写上，没系列是 null）：当没缓存重拉一次，
-    // 不然 {collection} 在老条目上要等缓存过期才有
+    // 老缓存缺键（2026-10-19 之前的电影没有 collection，2026-10-21 之前的剧集没有 lastAired；现在都总会写上，没有是 null）：
+    // 当没缓存重拉一次，不然 {collection} / 缺集在老条目上要等缓存过期才有
+    const stale = !!d && (kind === "movie" ? d.collection === undefined : d.lastAired === undefined);
+    if (!stale) return d;
     this.memo.delete(`${key}:${this.language}`);
     return this.cached(key, DETAILS_TTL, fetcher, true);
   }
@@ -278,6 +279,7 @@ async function fromDetails(tmdb: TmdbApi, kind: OrganizeMediaType, id: number, c
     originalLanguage: d.originalLanguage,
     seasons: d.seasons,
     ...(d.collection ? { collection: d.collection } : {}),
+    ...(d.lastAired !== undefined ? { lastAired: d.lastAired } : {}),
     candidates,
   };
 }

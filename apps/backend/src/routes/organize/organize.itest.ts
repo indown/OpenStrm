@@ -10,7 +10,7 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 import axios, { type AxiosResponse } from "axios";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { AccountInfo, AppSettings, OrganizeItem, OrganizeProbeResult, OrganizeRun, OrganizeRunDetail, OrganizeRunSummary, OrganizeTemplatePreview, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AppSettings, OrganizeItem, OrganizeProbeResult, OrganizeRun, OrganizeRunDetail, OrganizeRunSummary, OrganizeTemplatePreview, OrganizeUnit, TaskDefinition, OrganizeSkip } from "@openstrm/shared";
 import type { MediaInfoResult } from "mediainfo.js";
 import { __test_resetMediaProbes } from "../../db/repositories/media-probes.js";
 import { setProbeDeps } from "../../services/media/probe.js";
@@ -496,4 +496,16 @@ test("旧缓存没有 collection 键的电影详情：当没缓存重拉一次�
   } finally {
     axios.defaults.adapter = adapter;
   }
+});
+
+test("不整理的目录：加 / 列 / 删；路径归一成绝对路径、根目录不收", async () => {
+  const added = await json<OrganizeSkip>("POST", "/api/organize/skips", { accountName: "acc", path: "tv/inbox/旧剧/", note: "手工整理过" });
+  assert.equal(added.path, "/tv/inbox/旧剧");
+  assert.equal(added.note, "手工整理过");
+  const list = await json<{ skips: OrganizeSkip[] }>("GET", "/api/organize/skips?account=acc");
+  assert.deepEqual(list.skips.map((s) => s.path), ["/tv/inbox/旧剧"]);
+  const root = await app.inject({ method: "POST", url: "/api/organize/skips", headers: auth, payload: { accountName: "acc", path: "/" } });
+  assert.equal(root.statusCode, 400);
+  assert.equal((await json<{ success: boolean }>("DELETE", "/api/organize/skips", { accountName: "acc", path: "/tv/inbox/旧剧" })).success, true);
+  assert.deepEqual((await json<{ skips: OrganizeSkip[] }>("GET", "/api/organize/skips")).skips, []);
 });

@@ -346,6 +346,7 @@ export function unitView(
     ...(u.yearOverride ? { year: u.yearOverride } : {}),
     ...(u.dstRoot ? { dst: u.dstRoot } : {}),
     ...(episodes ? { episodes } : {}),
+    ...(Object.keys(u.missing ?? {}).length ? { missing: u.missing } : {}),
     ...(Object.keys(counts).length ? { files: counts } : {}),
     ...(u.referencedBy ? { referencedBy: u.referencedBy } : {}),
     // 绝对集数折算这类说明一个文件一条，几百集的番能有几百条：只给前几条，其余给个数

@@ -147,6 +147,20 @@ v2.18.0 正式版已发（88b4f21）。按推荐先做「模板 / 预设重做 +
 ### 进度
 
 - [x] 批次 A（2026-10-21）：实施、测试、浏览器冒烟都完成，记录在 naming-freedom.md 末节「实施记录：模板 / 预设交互重做 + 媒体服务器预设」
-- [ ] 批次 B 缺集
-- [ ] 批次 C 不整理的目录
-- [ ] 批次 D 编辑作品 + 行内季集 + 候选
+- [x] 批次 B 缺集（2026-10-21，迁移 0028）
+- [x] 批次 C 不整理的目录（2026-10-21，迁移 0028）
+- [x] 批次 D 编辑作品 + 行内季集 + 候选（2026-10-21）
+- [ ] 发 v2.19.0-rc.1（等用户定）
+- [ ] 阶段 1 库视图、阶段 2 新入库（等这批发出去再排）
+
+### 实施记录：批次 B + C + D（2026-10-21）
+
+**B 缺集**：`TmdbDetails.lastAired`（tv 的 `last_episode_to_air`，剧集总写上、没播过是 null；老缓存缺键时 `details()` 自愈重拉一次，和电影缺 collection 同一处）→ `OrganizeMatch.lastAired`，`sameMatchData` 把它算进去（新一集播出后「刷新 TMDB」会重算缺集）。`planUnit` 把排上的集收进 `UnitPlan.episodes`（多集文件按区间展开，最多 50），`missingEpisodes(match, episodes)`：只看单元里出现过的季，每季按 TMDB 集数，lastAired 那季只算到播出的那集、更晚的季不算、null 什么都不缺、undefined 按全算。`OrganizeUnit.missing`（迁移 0028 加列）在预览建行、重规划两处回填；智能体 `unitView` 带 `missing`。前端：卡片一行「缺 6 集：S01 E03-E04、E07-E10」（`formatMissing` 连续集压成区间）、筛选条「缺集 N」。
+
+**C 不整理的目录**：`organize_skips(account_name, path, note, created_at)`（迁移 0028 同时建）；仓储 `listSkips / addSkip（已有只改备注）/ removeSkip`；`GET / POST / DELETE /api/organize/skips`（路径归一成以 / 开头、去尾斜杠，根目录不收）。预览列完目录后，这些目录下的条目不进 `buildUnits`（冲突检测照样看得见），日志记「跳过 N 个设置里不整理的目录」；`OrganizeRunDetail.skippedDirs` 按设置现在的清单 ∩ run 范围算。前端：设置页「不整理的目录」清单（账号 / 路径 / 备注，加删立即生效）、整理页卡片「…」里「以后不整理这个目录」（加清单 + 取消勾选）、run 头部一行「按设置跳过了 N 个」带去设置的链接。本地结构（naming=local）的清单没接这个过滤。
+
+**D 编辑作品**：`EditUnitDialog` 一个弹框：识别（当前匹配 + 候选一点就换、「搜索其他…」开原来的换匹配弹框叠在上面）、标题 / 年份（TMDB 名字可挑）、季与集偏移、记住，「重新规划」一次提交（候选是立刻生效的，换了作品后表单按新作品重填）。卡片按钮收成「编辑」+ 记住 + 「…」（刷新 TMDB / 探测编码 / 以后不整理）；把握不大的卡片上直接摆前两个候选；文件表剧集视频行直接填 S / E（失焦 / 回车就钉，两格都清空撤掉，没钉的按规划出的名字预填、没改不提交）。`AdjustDialog` / `TitleDialog` 删掉，`PinDialog` 留着（文件行「…」里）。
+
+**测试**：plan.test（缺集的六种情况 + episodes）、organize.itest（skips 三个接口 + 根目录 400）、run.itest（预览时挡掉目录、日志、详情 skippedDirs、BEEF 缺 3–10）；夹具补 `missing: {}`。
+
+**浏览器冒烟（真配置库的副本起 4101，整理页的 run 用 XHR 假数据，设置页走真接口）**：卡片缺集一行、候选 chip、筛选「缺集 1」只剩那一部；头部「按设置跳过了 1 个不整理的目录」带链接；文件行 S/E 填 5 失焦 → 发 `{ids:[i2], pin:{season:1,episode:5}}`、整理后名字变 S01E05、「已钉」「钉在 S01E05」；「编辑」弹框三段齐全、点候选「另一部剧」立刻换（弹框不关、表单按新作品重填）、挑别名 + 集偏移 -1 + 记住 → 一次提交 `{title, year:null, seasonOverride:null, episodeOffset:-1, remember:true}`，卡片显示「标题 → 别名甲 集偏移 -1」；没识别的单元弹框只有识别段、「重新规划」灰、「搜索其他」叠开换匹配；「…」→「以后不整理这个目录」真写进 4101（115，/tv/inbox/BEEF.S01.1080p，备注「从整理页加的：另一部剧」）、toast、单元取消勾选；设置页清单显示它、删掉变「还没有」、表单加 `/tv/旧剧/` 归一成 `/tv/旧剧` 再删掉。本机配置库里没有 TMDB key，所以整理页只能假数据冒烟，真盘预览没跑。Radix 的下拉菜单在自动化里要 pointerdown 打开、菜单项 keydown Enter 才选得中（真点击和 el.click 都不行）。

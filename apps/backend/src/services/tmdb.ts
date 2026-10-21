@@ -228,6 +228,8 @@ export interface TmdbDetails {
   seasons?: TmdbSeasonSummary[];
   /** 电影所属的系列（belongs_to_collection，名字按请求的语言）：电影总有这个键，不属于系列是 null；剧集没有 */
   collection?: { id: number; name: string } | null;
+  /** 剧集最近播出的一集（last_episode_to_air）：剧集总有这个键，还没播过是 null；电影没有。算缺集时它之后的不算缺 */
+  lastAired?: { season: number; episode: number } | null;
 }
 
 interface RawDetails {
@@ -249,6 +251,7 @@ interface RawDetails {
   alternative_titles?: { titles?: Array<{ title: string }>; results?: Array<{ title: string }> };
   translations?: { translations?: Array<{ iso_639_1: string; data?: { title?: string; name?: string } }> };
   belongs_to_collection?: { id: number; name: string } | null;
+  last_episode_to_air?: { season_number: number; episode_number: number } | null;
 }
 
 function toDetails(raw: RawDetails, mediaType: "movie" | "tv"): TmdbDetails {
@@ -280,6 +283,9 @@ function toDetails(raw: RawDetails, mediaType: "movie" | "tv"): TmdbDetails {
         ? (raw.seasons ?? []).map((s) => ({ season: s.season_number, episodeCount: s.episode_count, name: s.name }))
         : undefined,
     ...(mediaType === "movie" ? { collection: raw.belongs_to_collection?.name ? { id: raw.belongs_to_collection.id, name: raw.belongs_to_collection.name } : null } : {}),
+    ...(mediaType === "tv"
+      ? { lastAired: raw.last_episode_to_air ? { season: raw.last_episode_to_air.season_number, episode: raw.last_episode_to_air.episode_number } : null }
+      : {}),
   };
 }
 

@@ -42,6 +42,7 @@ import type {
   OrganizeRunDetail,
   OrganizeRunSummary,
   OrganizeSettings,
+  OrganizeSkip,
   OrganizeSkipResult,
   OrganizeTemplatePreview,
   OrganizeUnit,
@@ -810,6 +811,11 @@ export const api = {
     matches: (account?: string) => data(axiosInstance.get<{ matches: OrganizeMatchMemory[] }>("/api/organize/matches", { params: { account } })),
     forgetMatch: (accountName: string, srcPath: string) =>
       data(axiosInstance.delete<{ success: boolean }>("/api/organize/matches", { data: { accountName, srcPath } })),
+    /** 不整理的目录：设置页清单、整理页「以后不整理这个目录」；改了立刻生效，下次预览就不扫 */
+    skips: (account?: string) => data(axiosInstance.get<{ skips: OrganizeSkip[] }>("/api/organize/skips", { params: { account } })),
+    addSkip: (body: { accountName: string; path: string; note?: string }) => data(axiosInstance.post<OrganizeSkip>("/api/organize/skips", body)),
+    removeSkip: (accountName: string, path: string) =>
+      data(axiosInstance.delete<{ success: boolean }>("/api/organize/skips", { data: { accountName, path } })),
   },
 
   drive115: {

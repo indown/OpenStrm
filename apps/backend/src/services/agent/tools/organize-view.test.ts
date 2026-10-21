@@ -40,6 +40,7 @@ function unit(key: string, extra: Partial<OrganizeUnit> = {}): OrganizeUnit {
     pins: {},
     renames: {},
     kinds: {},
+    missing: {},
     ...extra,
   };
 }

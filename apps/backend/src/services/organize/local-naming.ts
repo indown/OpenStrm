@@ -357,5 +357,5 @@ export function planLocalUnit(unit: LocalUnit, input: LocalPlanInput): UnitPlan 
       ...(f.role === "sidecar" ? { follows: [f.follows!], soft: true } : {}),
     });
   }
-  return { unitKey: unit.key, dstRoot: unit.dstRoot, items, notes: [...unit.notes] };
+  return { unitKey: unit.key, dstRoot: unit.dstRoot, items, notes: [...unit.notes], episodes: {} };
 }

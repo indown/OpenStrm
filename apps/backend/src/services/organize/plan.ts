@@ -54,6 +54,35 @@ export interface UnitPlan {
   dstRoot: string;
   items: PlannedItem[];
   notes: string[];
+  /** 单元里排上的集：季号 → 集号（算缺集用；电影 / 没识别是空） */
+  episodes: Record<number, number[]>;
+}
+
+/**
+ * 缺的集：只看单元里出现过的季；每季按 TMDB 的集数，最近播出的那一季只算到播出的那一集，更晚的季不算；
+ * 还没播过（lastAired 是 null）什么都不缺；老缓存没有 lastAired（undefined）就按每季集数全算，刷新 TMDB 信息之后就准了
+ */
+export function missingEpisodes(match: OrganizeMatch | null, episodes: Record<number, number[]> | undefined): Record<string, number[]> {
+  if (!match || match.mediaType !== "tv" || !episodes) return {};
+  const out: Record<string, number[]> = {};
+  const last = match.lastAired;
+  for (const [s, have] of Object.entries(episodes)) {
+    const season = Number(s);
+    if (!(season >= 1)) continue;
+    const info = match.seasons?.find((x) => x.season === season);
+    if (!info) continue;
+    let aired = info.episodeCount;
+    if (last === null) aired = 0;
+    else if (last) {
+      if (season > last.season) aired = 0;
+      else if (season === last.season) aired = Math.min(aired, last.episode);
+    }
+    const set = new Set(have);
+    const miss: number[] = [];
+    for (let e = 1; e <= aired; e++) if (!set.has(e)) miss.push(e);
+    if (miss.length) out[String(season)] = miss;
+  }
+  return out;
 }
 
 export interface UnitPlanInput {
@@ -341,11 +370,11 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
 
   if (!match) {
     for (const f of unit.files) push(f, null, "没有识别出作品");
-    return { unitKey: unit.key, dstRoot: "", items, notes };
+    return { unitKey: unit.key, dstRoot: "", items, notes, episodes: {} };
   }
   if (!input.selected) {
     for (const f of unit.files) push(f, null, "未勾选");
-    return { unitKey: unit.key, dstRoot: "", items, notes };
+    return { unitKey: unit.key, dstRoot: "", items, notes, episodes: {} };
   }
 
   const s = ctx.settings;
@@ -385,6 +414,8 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
 
   const excluded = input.excluded ?? new Set<string>();
   let filledCount = 0;
+  /** 排上的集（算缺集用） */
+  const present = new Map<number, number[]>();
   for (const f of unit.files) {
     if (f.kind !== "video" || asExtra(f)) continue;
     if (excluded.has(f.path)) {
@@ -412,6 +443,9 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
         episodeTitle: input.episodeTitles?.get(key) ?? "",
       };
       videoKey.set(f, key);
+      const list = present.get(se.season) ?? [];
+      for (let e = se.episode; e <= (se.episodeEnd ?? se.episode) && e < se.episode + 50; e++) list.push(e);
+      present.set(se.season, list);
     }
     const r = renderTemplate(template, vars, { colon: s.colon });
     if (r.errors.length > 0 || !r.path) {
@@ -544,7 +578,7 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
     else push(f, f.path, "不认识的文件类型，不动", "keep");
   }
 
-  return { unitKey: unit.key, dstRoot, items, notes };
+  return { unitKey: unit.key, dstRoot, items, notes, episodes: Object.fromEntries([...present].map(([season, list]) => [season, [...new Set(list)].sort((a, b) => a - b)])) };
 }
 
 /** 删空目录的边界：只删根里面腾空的目录，根本身 removable 才删 */

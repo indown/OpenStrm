@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { api } from "@/lib/api";
 import { FieldHint } from "@/components/field-hint";
 import { TemplateEditor, previewFor } from "@/components/template-editor";
+import { SkipDirs } from "./SkipDirs";
 import { DEFAULT_TEMPLATES, SERVERS, STRUCTURES, buildTemplate, detectServer, detectStructure, serverFromIdTag, type MediaKind, type ServerPreset } from "@/lib/organize-presets";
 import { joinMovie, joinTv, splitMovie, splitTv } from "@/lib/template-parts";
 
@@ -355,6 +356,8 @@ export function OrganizeSection({ value, onChange }: Props) {
           </FieldHint>
         </p>
       </div>
+
+      <SkipDirs />
     </section>
   );
 }

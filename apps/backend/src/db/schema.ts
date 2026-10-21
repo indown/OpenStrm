@@ -439,6 +439,8 @@ export const organizeUnits = sqliteTable(
     renames: text("renames").notNull().default("{}"),
     /** 按文件改判的类型（JSON：网盘绝对路径 → video / extra） */
     kinds: text("kinds").notNull().default("{}"),
+    /** 缺的集（JSON：季号 → 集号数组）：按 TMDB 每季集数和已播到哪一集算，只算单元里出现过的季 */
+    missing: text("missing").notNull().default("{}"),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.runId, t.key] }),
@@ -501,6 +503,21 @@ export const organizeMatches = sqliteTable(
   },
   (t) => ({
     pk: primaryKey({ columns: [t.accountName, t.srcPath] }),
+  }),
+);
+
+/** 不整理的目录：按账号 + 网盘绝对路径记，预览列目录时这些目录下的东西不当作品扫 */
+export const organizeSkips = sqliteTable(
+  "organize_skips",
+  {
+    accountName: text("account_name").notNull(),
+    /** 网盘绝对路径，带前导 / */
+    path: text("path").notNull(),
+    note: text("note").notNull().default(""),
+    createdAt: integer("created_at").notNull().default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.accountName, t.path] }),
   }),
 );
 

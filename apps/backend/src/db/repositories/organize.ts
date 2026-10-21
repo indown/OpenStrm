@@ -3,28 +3,9 @@
  * item 的 src_path / dst_path 是网盘绝对路径（带前导 /）；时间戳一律秒。
  */
 import { and, asc, desc, eq, gt, inArray, like, lt, ne, or, sql } from "drizzle-orm";
-import type {
-  OrganizeAction,
-  OrganizeConfidence,
-  OrganizeErrorKind,
-  OrganizeFileKind,
-  OrganizeHint,
-  OrganizeItem,
-  OrganizeItemStatus,
-  OrganizeMatch,
-  OrganizeMatchMemory,
-  OrganizeNaming,
-  OrganizeMediaType,
-  OrganizeRun,
-  OrganizeRunMode,
-  OrganizeRunStage,
-  OrganizeRunStats,
-  OrganizeRunStatus,
-  OrganizeTrigger,
-  OrganizeUnit,
-} from "@openstrm/shared";
+import type { OrganizeAction, OrganizeConfidence, OrganizeErrorKind, OrganizeFileKind, OrganizeHint, OrganizeItem, OrganizeItemStatus, OrganizeMatch, OrganizeMatchMemory, OrganizeNaming, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStage, OrganizeRunStats, OrganizeRunStatus, OrganizeTrigger, OrganizeUnit, OrganizeSkip } from "@openstrm/shared";
 import { db } from "../client.js";
-import { organizeItems, organizeMatches, organizeRuns, organizeUnits, tmdbCache } from "../schema.js";
+import { organizeItems, organizeMatches, organizeRuns, organizeUnits, tmdbCache, organizeSkips } from "../schema.js";
 
 type RunRow = typeof organizeRuns.$inferSelect;
 type UnitRow = typeof organizeUnits.$inferSelect;
@@ -113,6 +94,7 @@ function toUnit(row: UnitRow): OrganizeUnit {
     pins: parseJson<OrganizeUnit["pins"]>(row.pins, {}),
     renames: parseJson<OrganizeUnit["renames"]>(row.renames, {}),
     kinds: parseJson<OrganizeUnit["kinds"]>(row.kinds, {}),
+    missing: parseJson<OrganizeUnit["missing"]>(row.missing, {}),
   };
 }
 
@@ -357,6 +339,7 @@ export function replaceUnits(runId: string, units: OrganizeUnit[]): void {
           pins: JSON.stringify(u.pins ?? {}),
           renames: JSON.stringify(u.renames ?? {}),
           kinds: JSON.stringify(u.kinds ?? {}),
+          missing: JSON.stringify(u.missing ?? {}),
         })
         .run();
     }
@@ -394,6 +377,7 @@ export function updateUnit(runId: string, key: string, patch: Partial<OrganizeUn
         pins: JSON.stringify(merged.pins ?? {}),
         renames: JSON.stringify(merged.renames ?? {}),
         kinds: JSON.stringify(merged.kinds ?? {}),
+        missing: JSON.stringify(merged.missing ?? {}),
         parsedTitle: merged.parsedTitle,
         parsedYear: merged.parsedYear,
       })
@@ -656,6 +640,28 @@ export function listMatches(accountName?: string): OrganizeMatchMemory[] {
 
 /* ------------------------------- TMDB 缓存 ------------------------------- */
 
+/* ------------------------------- 不整理的目录 ------------------------------- */
+
+const toSkip = (r: typeof organizeSkips.$inferSelect): OrganizeSkip => ({ accountName: r.accountName, path: r.path, note: r.note, createdAt: r.createdAt });
+
+export function listSkips(accountName?: string): OrganizeSkip[] {
+  const rows = accountName ? db.select().from(organizeSkips).where(eq(organizeSkips.accountName, accountName)).all() : db.select().from(organizeSkips).all();
+  return rows.map(toSkip).sort((a, b) => a.accountName.localeCompare(b.accountName) || a.path.localeCompare(b.path));
+}
+
+/** 加一条（已有就只更新备注） */
+export function addSkip(accountName: string, path: string, note = ""): OrganizeSkip {
+  db.insert(organizeSkips)
+    .values({ accountName, path, note })
+    .onConflictDoUpdate({ target: [organizeSkips.accountName, organizeSkips.path], set: { note } })
+    .run();
+  return toSkip(db.select().from(organizeSkips).where(and(eq(organizeSkips.accountName, accountName), eq(organizeSkips.path, path))).get()!);
+}
+
+export function removeSkip(accountName: string, path: string): boolean {
+  return db.delete(organizeSkips).where(and(eq(organizeSkips.accountName, accountName), eq(organizeSkips.path, path))).run().changes > 0;
+}
+
 export function readTmdbCache<T>(key: string, maxAgeSec: number): T | null {
   return peekTmdbCache<T>(key, maxAgeSec)?.value ?? null;
 }
@@ -694,6 +700,7 @@ export function __test_resetOrganize(): void {
   db.delete(organizeUnits).run();
   db.delete(organizeRuns).run();
   db.delete(organizeMatches).run();
+  db.delete(organizeSkips).run();
   db.delete(tmdbCache).run();
 }
 
