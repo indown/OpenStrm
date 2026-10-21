@@ -160,3 +160,30 @@ strm 指向容器里一个 ffmpeg 生成的 5 秒 mp4（像 Emby 主机挂着网
 - `toDirectUrl`：pickcode 来自内存 / 库而取链失败（回空或抛错）→ 清内存、`findPickcode(..., { fresh: true })` 现找一次再取；现找的取链失败照旧 no-url / 抛错。
 - `findPathCacheFile` 按 `updated_at desc, rowid desc` 取最新行。
 - 真机只读：父目录错的行 → list 2075 ms；对的行 → db 524 ms（一个请求）；内存 0 ms；整条解析取链 1381 ms。
+
+### 评审与修补（2026-10-21，用户「review 一下」，`/code-review max 04195a2..HEAD`，15 条全部确认、全部修完）
+
+评审范围是 rc.1 之后的十个提交。第一次跑撞上模型额度，重跑后给了 15 条，核对代码都是真问题；另外顺手修了它「超出条数上限」里的三条（Alist 式路径没有前导斜杠、路由规则已查过条目时 Server-Timing 仍报 `lookup;dur=0`、前端 120 秒超时比后端最坏情况短）。一个提交修完，按严重程度：
+
+1. **预热让假令牌能拿到直链**（redirect.ts）。两份缓存都按条目记、不分令牌；以前每次都带客户端令牌问 Emby、不认就 401 回源，PlaybackInfo 预热把条目路径先放进 lookupCache 之后这一步被跳过了——能访问代理端口的人报个条目 id、随便编个令牌就能换到 115 直链。修法：`trustedTokens`（15 分钟）——没被 Emby 认过的令牌先带着它查一次条目（Emby 裁决），认了才能用条目缓存 / 直链缓存；PlaybackInfo 透传成功时 `trustToken(客户端令牌)`。允许匿名 302 的部署照旧。测试：假令牌换 UA / 同 UA 都不 302、要问一次 Emby；认过的令牌换 UA 不问 Emby。
+2. **库里的行核对父目录形同虚设**（direct-link.ts）。Provider 列目录（`rememberListing`）和整理挪文件（`noteRelocated`）写的行 `parent_id` 都是空的，核对退化成只看文件名；而且就算记了，上一级目录改了名它照样对得上。修法：不看行里的 parent_id，按路径现问目录 id（`fsDirGetId`，10 分钟缓存，列目录那条路第一步也是它）和档案里的 cid 比；根目录下的文件 cid 是 0。库路线冷的 2 个请求（get_info + getid），目录 id 热的 1 个。
+3. **内存里的 pickcode 一小时不验**：同路径换了文件（整理的「替换」冲突办法、重新转存）会播旧文件最多一小时、所有 UA。修法：内存记录 15 分钟（和直链缓存一样长）、记下文件 id 和时刻；命中时读一眼库里这一行（本地读，不花请求），行比记录新（整理 / 转存 / 监控改过）就作废重新核对。监控没开时外部换文件的窗口回到以前直链缓存的量级。
+4. **取链失败后的「现找一次」绕不过客户端缓存**：`fresh` 只跳过内存和库，`getIdToPath` 照样用 dirIdCache / filesListCache / pickcodeCache（get_info 刚把同一个 id 的 pickcode 喂了进去），重找回来还是那个 pickcode，第二次失败按「现找的」抛出去回源，而且内存又记上，每次播放都重复一遍。修法：`fresh` 一路传到 `fsDirGetId` / `listDirEntries` / `getPickcodeToId`，三份缓存都绕过。
+5. **预热不认停机信号**：`tickEmbyNew` 不接 `createPollingLoop` 给的 signal，一轮预热最坏 5 × 90 秒，`stopEmbyNewWatcher()` 等它跑完才轮到 `app.close()`，docker 10 秒就 SIGKILL，pending 落库也丢。修法：signal 传到 `requestPlaybackInfo`（`AbortSignal.any` 和超时合起来）和两次之间的等待；掐断就停，在问的那条不记时间，pending 照样落库；另加每轮 60 秒的预算，超过就不开新的。
+6. **诊断输入框回车提交整页设置**（前端）：输入框在设置页的 `<form>` 里，回车走 HTML 隐式提交，点到表单里第一个没写 type 的按钮（更新一节的「立即检查」）并 PATCH 整页设置。修法：`onKeyDown` 回车 `preventDefault` 并开始诊断（tag-input 同款）。
+7. **取链的任何错误都当「pickcode 过期」**：超时、风控、cookie 失效（115 回 state:false，`decrypt(undefined)` 抛 TypeError）都触发清内存 → 列目录 → 再取，一次 30 秒变两次 60 秒，真正的错误还被盖掉。修法：`getDownloadUrlWeb` 先 `ensureOk`（state:false 按 115 的文案抛 Cloud115ApiError，data 不是密文回空）；只有「115 回答了不行、且不是登录失效 / 风控」（`classifyAccountIssue` 认不出账号问题）才算记录过期，而且只对内存里的 pickcode 重找——库里的刚核对过档案、现找的本来就新，取不到就是真失败，照常抛。`getFileInfoById` 的非 20018 失败同样改成 Cloud115ApiError；库路线里 get_info 的网络错误不再退回列目录（一样过不去），直接抛。
+8. **预热拖住入库通知、加急被丢**：通知在 `backfillRound`（含预热）之后，一批剧集的 Telegram 要等几十秒到几分钟；`createPollingLoop` 的加急到点时正有一轮在跑就丢掉。修法：一轮的顺序改成 取条目 → 通知 → 回填（预热 → 按 id 再看）；polling.ts 的加急到点时正在跑就记下，这一轮一结束紧接着来一轮（监控那条循环也受益：同步结束的补跑不再丢）。
+9. **多版本条目的预解析同时发、不限量、和真正的 302 同优先级**：各版本各自列一遍目录，客户端要的版本排在兄弟后面；PlaybackInfo 问过但没播的也排 2～4 个请求在别人前面。修法：`prewarmLink` 接 `after`，几个版本挨个来（第一个版本不等别的，后面的接着用目录缓存），只做前 3 个；限流器加 Bottleneck 优先级（`PRIORITY_BACKGROUND = 7`，通道链到节奏上一起带过去），预解析的 115 请求排在普通请求后面。`priority` 从 `resolveEmbyPath` → 客户端各函数 → `request115` → `scheduleForAccount` 一路传。
+10. **`warmedAt` 在问之前就盖、抛错也留着**：Emby 重启 / 5xx / 90 秒超时的条目被按「探测失败」记 24 小时。修法：Emby 答了才记 `warmedAt`；没问成记 `failedAt`，十分钟后再试；停机掐断的什么都不记。
+11. **一轮只看最新 50 条**：整季 80 集一次入库，后 30 集既不预热也不回填、通知总数也少。修法：`fetch(limit, startIndex)` 翻页——这一页最老的那条还比两个游标都新就翻下一页，最多 10 页，按 id 去重、一页没新的就停；首轮（没游标）只看一页。
+12. **Infuse 的路径预热和第二跳撞车**：预热是 fire-and-forget、不在 inflight 里，`findPickcode` 没有单飞，第二跳几百毫秒内到就把同样的请求再发一遍、还排在预热后面。修法：`findPickcode` 按 `账号:路径` 单飞（`finding` Map），后到的等先到的结果。
+13. **诊断的 Emby 失败成 500 未处理异常、不查地址**：`getItem` / `listRecent` 的 `fetch failed` 直接落到错误处理器（栈日志 + 500）；只查 apiKey 不查 url，url 空时 `embyUpstream()` 退到 docker 网关默认值，对着不存在的 Emby 报「没回答」。修法：地址和 key 都空则 400；取条目的失败包成 `upstreamError("Emby 没回答：…")`。
+14. **诊断在 API 进程里量，不是播放代理**：同步 / 整理在跑时网盘请求排在几百个请求后面、量出来的是排队时间；第二次点命中 API 进程自己的内存、报 0 ms，而代理是冷的。修法：同步 / 整理在跑时回 409 让用户等；量之前 `forgetPanPath` 忘掉这条路径的内存记录，每次量的都是冷路径（相当于代理冷启动的用时）；界面文案说明。两进程各一套缓存这一点没法改，文档和文案里写明。
+15. **客户端那条 PlaybackInfo 转发仍是 15 秒超时**（上游 `fetchUpstream`）：探测超过 15 秒的条目（最慢的那些）回源 → 客户端拿到没改写的回答去转码；而且回源时 body 是 Buffer，reply-from 按 application/json 把它 `JSON.stringify` 成 `{"type":"Buffer","data":[…]}`，设备档案丢了。修法：`fetchUpstream(request, { timeoutMs })`，PlaybackInfo 用 90 秒（和服务端自己问的一个常量）；`toEmby(request, reply, { body })` 带 contentType 原样转发。测试里起了个小应用对着假 Emby 的 echo 路由验 body 原样到达。
+
+现在的缓存口径：直链 15 分钟（UA 进 key）、条目查询 15 分钟、**认过的令牌 15 分钟**、**路径 → pickcode 内存 15 分钟**（命中时核对库里这一行没改过）、115 客户端 pickcode 30 分钟 / 目录 id 10 分钟 / 目录列表 5 分钟、path_cache 行 180 天。库路线冷的 2 个请求（get_info + getid）、目录 id 热的 1 个。
+
+测试：direct-link 35、proxy 54、library-new 15、diagnose 8、polling 新增「加急撞上正在跑的一轮」；前端 typecheck / lint / 11 个单测过。
+
+顺手的三处清理（评审「超出条数」里的）：pending 里探过了但只有音频流的条目拿掉（以前没有视频流就一直挂着、每轮按 id 问到 30 天）；diagnose.ts 用 lib/errors 的 `messageOf`，不再自带一份；115 客户端按 id 取 pickcode 的缓存键收成 `pickcodeKey()`（files/file 和 get_info 两条路喂同一份缓存，键必须一个算法）。全量后端 1672 过。
+
