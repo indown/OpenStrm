@@ -81,12 +81,16 @@ export function getPathCacheRow(fileId: string): PathCacheRow | undefined {
   return db.select().from(pathCache).where(eq(pathCache.fileId, fileId)).get();
 }
 
-/** 按账号 + 盘内绝对路径找文件（不含目录）：302 换直链时拿 file_id 直接要 pickcode，省掉逐级列目录 */
+/**
+ * 按账号 + 盘内绝对路径找文件（不含目录）：302 换直链时拿 file_id 直接要 pickcode，省掉逐级列目录。
+ * 同一路径可能有多行（换过文件、旧行还没清），取最近更新的那行
+ */
 export function findPathCacheFile(accountName: string, path: string): PathCacheRow | undefined {
   return db
     .select()
     .from(pathCache)
     .where(and(eq(pathCache.accountName, accountName), eq(pathCache.path, path), eq(pathCache.isDir, 0)))
+    .orderBy(desc(pathCache.updatedAt), desc(sql`rowid`))
     .get();
 }
 

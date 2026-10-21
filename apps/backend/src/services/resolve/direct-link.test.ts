@@ -9,8 +9,12 @@ import assert from "node:assert/strict";
 import { test as t } from "node:test";
 import type { AppSettings, ProxyPathMapping, TaskDefinition } from "@openstrm/shared";
 import { PermanentError } from "../../lib/errors.js";
-import { findPathCacheFile, upsertPathCache } from "../../db/repositories/life.js";
-import { accountNameByTask, clearPathCache, effectiveMountPaths, findPickcode, joinPanPath, matchPathMapping, normalizeMediaPath, safeDecode, setResolverDeps, stripMountPath } from "./direct-link.js";
+import { deleteAccount, insertAccount } from "../../db/repositories/accounts.js";
+import { deletePathCache, findPathCacheFile, upsertPathCache } from "../../db/repositories/life.js";
+import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
+import { resetSettingsMemo } from "../settings-safe.js";
+import type { FileInfo115 } from "../cloud-115/client.js";
+import { accountNameByTask, clearPathCache, effectiveMountPaths, findPickcode, joinPanPath, matchPathMapping, normalizeMediaPath, pathCacheRowMatches, resolveEmbyPath, safeDecode, setResolverDeps, stripMountPath } from "./direct-link.js";
 // ---- stripMountPath ----
 t("剥掉挂载前缀，剩下的就是盘内路径", () => {
   const r = stripMountPath("/mnt/pan/tv/Show/ep1.mkv", ["/mnt/pan"]);
@@ -226,17 +230,35 @@ t("路径 → pickcode 记一小时：同一路径第二次（哪怕换了 UA）
   }
 });
 
-t("库里的路径缓存有这个文件：拿 file_id 直接要 pickcode，不列目录；file_id 失效就退回列目录；目录行不算", async () => {
+const info = (over: Partial<FileInfo115>): FileInfo115 => ({ fileId: "3117196816692065836", parentId: "p1", name: "a.mkv", pickcode: "pc-db", size: 1, area: 1, ...over });
+
+t("库里的行要和网盘现状核对：文件名、父目录、还在正常区；parent_id 是 0 的老行只看名字", () => {
+  const row = { parentId: "p1", name: "a.mkv", path: "/tv/a.mkv" };
+  assert.equal(pathCacheRowMatches(info({}), row), true);
+  assert.equal(pathCacheRowMatches(info({ name: "b.mkv" }), row), false, "改过名");
+  assert.equal(pathCacheRowMatches(info({ parentId: "p2" }), row), false, "挪到别的目录了");
+  assert.equal(pathCacheRowMatches(info({ area: 7 }), row), false, "进了回收站");
+  assert.equal(pathCacheRowMatches(info({ parentId: "p2" }), { ...row, parentId: "0" }), true, "老行没记父目录，只能看名字");
+  assert.equal(pathCacheRowMatches(info({}), { parentId: "p1", name: "", path: "/tv/a.mkv" }), true, "没记名字就拿路径末段比");
+  assert.equal(pathCacheRowMatches(info({ name: "x.mkv" }), { parentId: "p1", name: "", path: "/tv/a.mkv" }), false);
+});
+
+t("库里的路径缓存有这个文件：按 file_id 取档案核对后直接用 pickcode，不列目录；对不上 / 没了 / 接口报错都退回列目录", async () => {
   const calls: string[] = [];
+  const rows: Record<string, { fileId: string; parentId: string; name: string; path: string; isDir: number }> = {
+    "/tv/a.mkv": { fileId: "3117196816692065836", parentId: "p1", name: "a.mkv", path: "/tv/a.mkv", isDir: 0 },
+    "/tv/moved.mkv": { fileId: "2", parentId: "p1", name: "moved.mkv", path: "/tv/moved.mkv", isDir: 0 },
+    "/tv/gone.mkv": { fileId: "3", parentId: "p1", name: "gone.mkv", path: "/tv/gone.mkv", isDir: 0 },
+    "/tv/err.mkv": { fileId: "4", parentId: "p1", name: "err.mkv", path: "/tv/err.mkv", isDir: 0 },
+  };
   setResolverDeps({
-    pathCacheFile: (_account, path) =>
-      path === "/tv/a.mkv" || path === "/tv/stale.mkv"
-        ? ({ fileId: path === "/tv/a.mkv" ? "3117196816692065836" : "1", path, isDir: 0 } as never)
-        : undefined,
-    pickcodeById: (async (id: number | string) => {
-      calls.push(`pc:${id}`);
-      if (id === "1") throw new Error("file not exist");
-      return "pc-db";
+    pathCacheFile: (_account, path) => rows[path] as never,
+    fileInfoById: (async (id: number | string) => {
+      calls.push(`info:${id}`);
+      if (id === "3117196816692065836") return info({});
+      if (id === "2") return info({ fileId: "2", name: "moved.mkv", parentId: "elsewhere" });
+      if (id === "3") return null;
+      throw new Error("115 接口抽风");
     }) as never,
     idToPath: (async ({ path }: { path: string }) => {
       calls.push(`list:${path}`);
@@ -246,25 +268,102 @@ t("库里的路径缓存有这个文件：拿 file_id 直接要 pickcode，不�
   try {
     clearPathCache();
     assert.deepEqual(await findPickcode(account, "/tv/a.mkv", undefined), { pickcode: "pc-db", via: "db" });
-    assert.deepEqual(calls, ["pc:3117196816692065836"], "file_id 原样传过去（字符串，别转成 number 失真）");
+    assert.deepEqual(calls, ["info:3117196816692065836"], "file_id 原样传过去（字符串，别转成 number 失真），对上了就不列目录");
     assert.deepEqual(await findPickcode(account, "/tv/a.mkv", undefined), { pickcode: "pc-db", via: "memo" });
-    assert.deepEqual(await findPickcode(account, "/tv/stale.mkv", undefined), { pickcode: "pc-list", via: "list" });
-    assert.deepEqual(calls.slice(1), ["pc:1", "list:/tv/stale.mkv"], "库里的 file_id 失效：退回列目录");
+    assert.deepEqual(await findPickcode(account, "/tv/moved.mkv", undefined), { pickcode: "pc-list", via: "list" });
+    assert.deepEqual(await findPickcode(account, "/tv/gone.mkv", undefined), { pickcode: "pc-list", via: "list" });
+    assert.deepEqual(await findPickcode(account, "/tv/err.mkv", undefined), { pickcode: "pc-list", via: "list" });
+    assert.deepEqual(calls.slice(1), ["info:2", "list:/tv/moved.mkv", "info:3", "list:/tv/gone.mkv", "info:4", "list:/tv/err.mkv"], "挪走 / 没了 / 报错：都退回列目录");
     assert.deepEqual(await findPickcode(account, "/tv/other.mkv", undefined), { pickcode: "pc-list", via: "list" });
+    assert.deepEqual(await findPickcode(account, "/tv/a.mkv", undefined, { fresh: true }), { pickcode: "pc-list", via: "list" }, "fresh 跳过内存和库");
   } finally {
     setResolverDeps(null);
     clearPathCache();
   }
 });
 
-t("findPathCacheFile：按账号 + 路径只认文件行", () => {
+t("缓存来的 pickcode 取不到链：清掉现找一次再取；现找的取不到就是真失败", async () => {
+  const baseline = readAppSettings();
+  replaceAppSettings({ ...baseline, emby: { ...baseline.emby, pathMappings: [{ from: "/mnt/dl-test", account: "直链测试号" }] } });
+  resetSettingsMemo();
+  insertAccount({ name: "直链测试号", accountType: "115", cookie: "c" } as never);
+  const calls: string[] = [];
+  let listPickcode = "pc-fresh";
+  setResolverDeps({
+    pathCacheFile: () => ({ fileId: "9", parentId: "p1", name: "a.mkv", path: "/tv/a.mkv", isDir: 0 }) as never,
+    fileInfoById: (async () => info({ fileId: "9", pickcode: "pc-stale" })) as never,
+    idToPath: (async ({ path }: { path: string }) => {
+      calls.push(`list:${path}`);
+      return listPickcode;
+    }) as never,
+    downloadUrl: (async (pickcode: string) => {
+      calls.push(`link:${pickcode}`);
+      if (pickcode === "pc-stale") throw new Error("pickcode 已失效");
+      if (pickcode === "pc-dead") return "";
+      return `https://cdn/${pickcode}`;
+    }) as never,
+  });
+  try {
+    clearPathCache();
+    const r = await resolveEmbyPath("/mnt/dl-test/tv/a.mkv");
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.url, "https://cdn/pc-fresh");
+      assert.equal(r.timings.pathVia, "list", "库里的 pickcode 取不到链，现找了一次");
+    }
+    assert.deepEqual(calls, ["link:pc-stale", "list:/tv/a.mkv", "link:pc-fresh"]);
+    assert.deepEqual(await findPickcode({ name: "直链测试号" } as never, "/tv/a.mkv", undefined), { pickcode: "pc-fresh", via: "memo" }, "内存里换成现找的");
+
+    // 现找的也取不到链：不再重找，老老实实回 no-url
+    clearPathCache();
+    listPickcode = "pc-dead";
+    setResolverDeps({
+      pathCacheFile: () => undefined,
+      idToPath: (async () => listPickcode) as never,
+      downloadUrl: (async (pickcode: string) => {
+        calls.push(`link:${pickcode}`);
+        return "";
+      }) as never,
+    });
+    calls.length = 0;
+    const dead = await resolveEmbyPath("/mnt/dl-test/tv/a.mkv");
+    assert.deepEqual(dead, { ok: false, reason: "no-url" });
+    assert.deepEqual(calls, ["link:pc-dead"]);
+
+    // 现找的取链抛异常：往上抛，交给调用方回源
+    clearPathCache();
+    setResolverDeps({
+      pathCacheFile: () => undefined,
+      idToPath: (async () => "pc-x") as never,
+      downloadUrl: (async () => {
+        throw new Error("115 风控");
+      }) as never,
+    });
+    await assert.rejects(resolveEmbyPath("/mnt/dl-test/tv/a.mkv"), /115 风控/);
+  } finally {
+    setResolverDeps(null);
+    clearPathCache();
+    deleteAccount("直链测试号");
+    replaceAppSettings(baseline);
+    resetSettingsMemo();
+  }
+});
+
+t("findPathCacheFile：按账号 + 路径只认文件行；同路径多行取最新的", () => {
   upsertPathCache([
     { fileId: "dl-dir", parentId: "0", name: "tv", path: "/dl/tv", isDir: true, accountName: "主号" },
     { fileId: "dl-file", parentId: "dl-dir", name: "a.mkv", path: "/dl/tv/a.mkv", isDir: false, accountName: "主号" },
     { fileId: "dl-other", parentId: "dl-dir", name: "a.mkv", path: "/dl/tv/a.mkv", isDir: false, accountName: "别的号" },
   ]);
-  assert.equal(findPathCacheFile("主号", "/dl/tv/a.mkv")?.fileId, "dl-file");
-  assert.equal(findPathCacheFile("别的号", "/dl/tv/a.mkv")?.fileId, "dl-other");
-  assert.equal(findPathCacheFile("主号", "/dl/tv"), undefined, "目录行不算");
-  assert.equal(findPathCacheFile("主号", "/dl/tv/b.mkv"), undefined);
+  try {
+    assert.equal(findPathCacheFile("主号", "/dl/tv/a.mkv")?.fileId, "dl-file");
+    assert.equal(findPathCacheFile("别的号", "/dl/tv/a.mkv")?.fileId, "dl-other");
+    assert.equal(findPathCacheFile("主号", "/dl/tv"), undefined, "目录行不算");
+    assert.equal(findPathCacheFile("主号", "/dl/tv/b.mkv"), undefined);
+    // 同路径换了文件、旧行还没清：取后写的那行
+    upsertPathCache([{ fileId: "dl-file-2", parentId: "dl-dir", name: "a.mkv", path: "/dl/tv/a.mkv", isDir: false, accountName: "主号" }]);
+    assert.equal(findPathCacheFile("主号", "/dl/tv/a.mkv")?.fileId, "dl-file-2");
+  } finally {
+    deletePathCache(["dl-dir", "dl-file", "dl-file-2", "dl-other"]);
+  }
 });

@@ -603,6 +603,50 @@ export async function getPickcodeToId(id: number | string, { userAgent = default
   return pickcode;
 }
 
+/** 115 文件档案（files/get_info）：带父目录 id 和文件名，302 按库里的 file_id 取 pickcode 时拿它核对文件还在不在原处 */
+export interface FileInfo115 {
+  fileId: string;
+  /** 父目录 id */
+  parentId: string;
+  name: string;
+  pickcode: string;
+  size: number;
+  /** 115 的区：1 = 正常文件区；回收站等别的区的文件不该拿来播 */
+  area: number;
+}
+
+/**
+ * 按 file_id 取文件档案。文件不存在 / 已删除时回 null（code 20018，真机验过），别的失败照常抛。
+ * files/file 那个接口只回文件名、大小和 pickcode，没有父目录，核对不了「还在不在原处」，所以这里用 get_info
+ */
+export async function getFileInfoById(
+  id: number | string,
+  { userAgent = defaultUA(), accountInfo, signal }: { userAgent?: string; accountInfo?: AccountInfo; signal?: AbortSignal },
+): Promise<FileInfo115 | null> {
+  if (!accountInfo?.cookie) throw new Error('accountInfo.cookie is required');
+  const response = await request115<{ state: boolean; code?: number; message?: string; data?: Array<Record<string, unknown>> }>(
+    `https://webapi.115.com/files/get_info?file_id=${id}`,
+    { method: 'GET', headers: { "User-Agent": userAgent }, userAgent, useCommonHeaders: false, accountInfo, signal },
+  );
+  if (!response.state) {
+    if (response.code === 20018) return null;
+    throw new Error(JSON.stringify(response));
+  }
+  const d = response.data?.[0];
+  if (!d) return null;
+  const info: FileInfo115 = {
+    fileId: String(d.fid ?? id),
+    parentId: String(d.cid ?? ""),
+    name: String(d.n ?? ""),
+    pickcode: String(d.pc ?? ""),
+    size: Number(d.s ?? 0),
+    area: Number(d.aid ?? 1),
+  };
+  // 顺手喂给按 id 取 pickcode 的缓存，列目录那条路之后要同一个文件就不用再问
+  if (info.pickcode) pickcodeCache.set(`pickcode:${id}:${accountInfo.cookie.substring(0, 20)}`, info.pickcode);
+  return info;
+}
+
 /* ------------------------ 115 分享接口 (对应 p115client P115ShareFileSystem) ------------------------ */
 const SHARE_BASE = "https://webapi.115.com";
 

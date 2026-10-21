@@ -16,7 +16,7 @@ import { listAccounts } from "../../db/repositories/accounts.js";
 import { listTasks } from "../../db/repositories/tasks.js";
 import { readSettingsSafe } from "../settings-safe.js";
 import { findPathCacheFile } from "../../db/repositories/life.js";
-import { getIdToPath, getDownloadUrlWeb, getPickcodeToId } from "../cloud-115/client.js";
+import { getIdToPath, getDownloadUrlWeb, getFileInfoById, type FileInfo115 } from "../cloud-115/client.js";
 import { PermanentError } from "../../lib/errors.js";
 
 type Account115 = Extract<AccountInfo, { accountType: "115" }>;
@@ -186,11 +186,11 @@ function splitByAccountName(
 /** 会碰 115 和库的几步抽成可替换的：单测不碰接口就能验缓存和短路 */
 interface ResolverDeps {
   idToPath: typeof getIdToPath;
-  pickcodeById: typeof getPickcodeToId;
+  fileInfoById: typeof getFileInfoById;
   downloadUrl: typeof getDownloadUrlWeb;
   pathCacheFile: typeof findPathCacheFile;
 }
-const realDeps: ResolverDeps = { idToPath: getIdToPath, pickcodeById: getPickcodeToId, downloadUrl: getDownloadUrlWeb, pathCacheFile: findPathCacheFile };
+const realDeps: ResolverDeps = { idToPath: getIdToPath, fileInfoById: getFileInfoById, downloadUrl: getDownloadUrlWeb, pathCacheFile: findPathCacheFile };
 let pan: ResolverDeps = { ...realDeps };
 
 /** 仅供测试：换掉会碰 115 / 库的部分；传 null 恢复 */
@@ -210,12 +210,28 @@ export function clearPathCache(): void {
   pickcodeByPath.clear();
 }
 
+const memoKey = (account: Account115, panPath: string): string => `${account.name}:${panPath}`;
+
+/**
+ * 库里的这一行还对得上网盘现状吗：文件名一样、父目录一样、还在正常区。
+ * 对不上就是文件被挪走 / 改名 / 进了回收站，而这一行没人更新（生活事件监控没开时外部改动不会写进来），
+ * 照它取链会无声播错文件。parent_id 是 0 的老行只核对文件名
+ */
+export function pathCacheRowMatches(info: FileInfo115, row: { parentId: string; name: string; path: string }): boolean {
+  if (info.area !== 1) return false;
+  const name = row.name || row.path.split("/").pop() || "";
+  if (name && info.name !== name) return false;
+  if (row.parentId && row.parentId !== "0" && info.parentId !== row.parentId) return false;
+  return true;
+}
+
 /**
  * 盘内路径 → pickcode；找不到回 null。三条路按代价排：
  * 1. 内存里记过（一小时内解析过同一路径）：0 个请求；
- * 2. 库里的路径缓存（同步 / 生活事件写的，账号 + 路径 → file_id）：1 个请求（file_id → pickcode，客户端还有半小时缓存）；
- *    file_id 失效（文件删了、库里是旧的）就当没命中，别让一条陈旧记录把播放卡死；
+ * 2. 库里的路径缓存（转存 / 整理解析路径时写的，账号 + 路径 → file_id）：1 个请求（按 file_id 取档案，
+ *    顺便核对文件名和父目录，对不上就当没命中——别让一条陈旧记录播错文件或把播放卡死）；
  * 3. 逐级列目录：冷的 1～3 个请求。
+ * fresh = true 跳过前两条（取链失败后重找用）。
  * getIdToPath 找不到文件 / 目录时抛 PermanentError（网盘明确说没有），这里翻译成 null；
  * 网络 / 接口错误是别的类型，继续往上抛。按类型认、不按文案猜：接口报错的文案里也可能带着路径
  */
@@ -223,26 +239,30 @@ export async function findPickcode(
   account: Account115,
   panPath: string,
   userAgent: string | undefined,
+  opts: { fresh?: boolean } = {},
 ): Promise<{ pickcode: string; via: PathVia } | null> {
-  const key = `${account.name}:${panPath}`;
-  const cached = pickcodeByPath.get(key);
-  if (cached) return { pickcode: cached, via: "memo" };
+  const key = memoKey(account, panPath);
+  if (!opts.fresh) {
+    const cached = pickcodeByPath.get(key);
+    if (cached) return { pickcode: cached, via: "memo" };
 
-  let row: ReturnType<typeof findPathCacheFile>;
-  try {
-    row = pan.pathCacheFile(account.name, panPath);
-  } catch {
-    row = undefined; // 库读不了（代理进程库还没建好）就走列目录
-  }
-  if (row) {
+    let row: ReturnType<typeof findPathCacheFile>;
     try {
-      const pickcode = String(await pan.pickcodeById(row.fileId, { userAgent, accountInfo: account }));
-      if (pickcode) {
-        pickcodeByPath.set(key, pickcode);
-        return { pickcode, via: "db" };
-      }
+      row = pan.pathCacheFile(account.name, panPath);
     } catch {
-      /* file_id 陈旧或接口报错：退回逐级列目录，那一步自己会判断文件还在不在 */
+      row = undefined; // 库读不了（代理进程库还没建好）就走列目录
+    }
+    if (row) {
+      try {
+        const info = await pan.fileInfoById(row.fileId, { userAgent, accountInfo: account });
+        if (info?.pickcode && pathCacheRowMatches(info, row)) {
+          pickcodeByPath.set(key, info.pickcode);
+          return { pickcode: info.pickcode, via: "db" };
+        }
+        /* 文件没了或不在原处：这一行是旧的，退回逐级列目录，那一步自己会判断路径上现在是谁 */
+      } catch {
+        /* 接口报错：退回逐级列目录 */
+      }
     }
   }
 
@@ -258,26 +278,54 @@ export async function findPickcode(
   return { pickcode: String(pickcode), via: "list" };
 }
 
+/**
+ * 按 pickcode 取链。缓存来的 pickcode 取不到链可能只是它过期了（文件换了），回 null 交给调用方重找；
+ * 现找的 pickcode 取不到链就是真失败，照常往上抛
+ */
+async function tryLink(found: { pickcode: string; via: PathVia }, account: Account115, userAgent: string | undefined): Promise<string | null> {
+  try {
+    const url = await pan.downloadUrl(found.pickcode, { userAgent, accountInfo: account });
+    return url || null;
+  } catch (err) {
+    if (found.via === "list") throw err;
+    return null;
+  }
+}
+
 async function toDirectUrl(
   account: Account115,
   panPath: string,
   userAgent: string | undefined,
 ): Promise<ResolveResult> {
-  const t0 = performance.now();
-  const found = await findPickcode(account, panPath, userAgent);
+  let pathMs = 0;
+  let linkMs = 0;
+  let t = performance.now();
+  let found = await findPickcode(account, panPath, userAgent);
+  pathMs += performance.now() - t;
   if (!found) return { ok: false, reason: "not-found" };
-  const t1 = performance.now();
 
-  const url = await pan.downloadUrl(found.pickcode, { userAgent, accountInfo: account });
+  t = performance.now();
+  let url = await tryLink(found, account, userAgent);
+  linkMs += performance.now() - t;
+  if (url === null && found.via !== "list") {
+    // 内存 / 库里记的 pickcode 可能已经失效（同路径换了文件）：清掉，现找一次再取，别让它卡一小时
+    pickcodeByPath.delete(memoKey(account, panPath));
+    t = performance.now();
+    found = await findPickcode(account, panPath, userAgent, { fresh: true });
+    pathMs += performance.now() - t;
+    if (!found) return { ok: false, reason: "not-found" };
+    t = performance.now();
+    url = await tryLink(found, account, userAgent);
+    linkMs += performance.now() - t;
+  }
   if (!url) return { ok: false, reason: "no-url" };
-  const t2 = performance.now();
 
   return {
     ok: true,
     url,
     accountName: account.name,
     panPath,
-    timings: { pathMs: Math.round(t1 - t0), linkMs: Math.round(t2 - t1), pathVia: found.via },
+    timings: { pathMs: Math.round(pathMs), linkMs: Math.round(linkMs), pathVia: found.via },
   };
 }
 
