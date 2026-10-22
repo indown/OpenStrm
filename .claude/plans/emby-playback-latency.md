@@ -191,3 +191,6 @@ strm 指向容器里一个 ffmpeg 生成的 5 秒 mp4（像 Emby 主机挂着网
 
 a08f5c0 = rc.1 + 第 0～3 步 + 路径缓存风险修补 + 评审 15 条全修 + 版本号；没有迁移。Release #114 四作业和 CI@v2 #135 全绿，Docker Hub rc 镜像 8649ce43052b（amd64 / arm64），GitHub Release 是预发布，latest 仍是 v2.18.0，main 未动。正式版说明要写：设置页 Emby 一节新增「入库后预热媒体流」（默认开）和「起播诊断」；302 响应带 Server-Timing；代理只给 Emby 认过的令牌用缓存（令牌第一次来要先过一次 Emby）。
 
+### 发布：v2.19.0（2026-10-22，用户「发个正式版」）
+
+4163124 = rc.2 + 53e433a 设置页跳过目录行对齐 / 可选网盘目录 + 18c1c83 CI 凭据形状检查 + a465777 CONTRIBUTING / CLAUDE.md / PR 模板 / plans 模板 / drive-notes + a1ace37 pre-commit 钩子 + 054608f rc.2 发布记录 + 版本号；含迁移 0028（rc.1 带的）。Release #115 四作业、CI@v2 #137、CI@main #138 全绿。Docker Hub `v2.19.0` 与 `latest` 同为 8bc505cef31e（amd64 / arm64）。GitHub Release 非预发布、是仓库最新，body 只有自动生成的对比链接，升级说明交用户手动贴。main 从 88b4f21 快进到 4163124，main == v2 == v2.19.0。
