@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# 提交前扫暂存区里像凭据的内容，有命中就拒绝提交。
+# 装法：根目录 pnpm install 会自动执行 git config core.hooksPath .githooks；没跑过就手动执行一次。
+exec bash "$(git rev-parse --show-toplevel)/scripts/check-hygiene.sh" --staged

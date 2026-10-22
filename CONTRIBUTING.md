@@ -69,7 +69,7 @@ pnpm dev        # backend(4000) + Emby 代理(8091) + next dev(3000)
 
 - TypeScript `strict` 全开，前后端都是；`packages/shared` 是纯类型包，没有构建步骤。
 - 注释和界面文案用中文。注释解释「为什么这么做」和「不这么做会怎样」，不复述代码在做什么（`.github/workflows/ci.yml` 里的注释是范本）。
-- 任何凭据（cookie、令牌、口令、api key）不进代码、测试夹具、方案文件、截图、提交信息。`scripts/check-hygiene.sh` 会扫常见形状，CI 也跑它；扫不到不等于可以写。
+- 任何凭据（cookie、令牌、口令、api key）不进代码、测试夹具、方案文件、截图、提交信息。`scripts/check-hygiene.sh` 会扫常见形状：根目录 `pnpm install` 会把 `.githooks/` 装成本地 git 钩子，提交时先扫暂存区，有命中就拒绝提交（没跑过 pnpm install 就手动 `git config core.hooksPath .githooks`）；CI 再对整个仓库扫一遍。扫不到不等于可以写。
 - 新建文件前先 `git ls-files <path>` 或 `ls` 确认不存在，再决定是新建还是追加。已有文件被整个覆盖掉时测试不一定会报错，只会少几条用例。
 - 源码里不放不可见字符（零宽空格、方向控制符、BOM 之类）。要在代码里表示它们用 `String.fromCharCode` 或反斜杠加 u 的字面转义；提交前用脚本扫一遍改过的文件。
 

@@ -5,6 +5,7 @@
   "description": "OpenStrm - Strm Management Platform",
   "license": "MIT",
   "scripts": {
+    "prepare": "node -e \"try{require('fs').statSync('.git');require('child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch{}\"",
     "dev": "concurrently -n backend,proxy,frontend -c blue,magenta,green \"pnpm --filter @openstrm/backend dev\" \"pnpm --filter @openstrm/backend dev:proxy\" \"pnpm --filter @openstrm/frontend dev\"",
     "build": "pnpm --filter @openstrm/backend build && pnpm --filter @openstrm/frontend build",
     "build:backend": "pnpm --filter @openstrm/backend build",
