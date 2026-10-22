@@ -543,7 +543,7 @@ docker logs -f openstrm 2>&1 | grep -E "直链|直连|回源|凭据"
 
 ## 🤝 贡献
 
-欢迎提交 Issue 和 Pull Request 来改进这个项目。
+欢迎提交 Issue 和 Pull Request。开发流程、测试分层、方案文件、评审和真机测试的规范在 [CONTRIBUTING.md](CONTRIBUTING.md)；用 AI 助手写代码的话，它会先读 [CLAUDE.md](CLAUDE.md)。
 
 ## ⚠️ 免责声明
 
