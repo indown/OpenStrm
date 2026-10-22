@@ -38,6 +38,10 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # 以前靠人记住的一条 grep：凭据的常见形状（JWT、网盘 cookie、bot token、api_key）不能进源码、方案和测试夹具
+      - name: Hygiene
+        run: bash scripts/check-hygiene.sh
+
       # 用例会改写 settings 表、在 DATA_DIR 里建删目录，必须指到临时目录——
       # src/test/setup.ts 见不到这两个变量会直接拒绝运行
       - name: Unit and integration tests
