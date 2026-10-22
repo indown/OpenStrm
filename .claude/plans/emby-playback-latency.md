@@ -187,3 +187,7 @@ strm 指向容器里一个 ffmpeg 生成的 5 秒 mp4（像 Emby 主机挂着网
 
 顺手的三处清理（评审「超出条数」里的）：pending 里探过了但只有音频流的条目拿掉（以前没有视频流就一直挂着、每轮按 id 问到 30 天）；diagnose.ts 用 lib/errors 的 `messageOf`，不再自带一份；115 客户端按 id 取 pickcode 的缓存键收成 `pickcodeKey()`（files/file 和 get_info 两条路喂同一份缓存，键必须一个算法）。全量后端 1672 过。
 
+### 发布：v2.19.0-rc.2（2026-10-21，用户「发个 rc」）
+
+a08f5c0 = rc.1 + 第 0～3 步 + 路径缓存风险修补 + 评审 15 条全修 + 版本号；没有迁移。Release #114 四作业和 CI@v2 #135 全绿，Docker Hub rc 镜像 8649ce43052b（amd64 / arm64），GitHub Release 是预发布，latest 仍是 v2.18.0，main 未动。正式版说明要写：设置页 Emby 一节新增「入库后预热媒体流」（默认开）和「起播诊断」；302 响应带 Server-Timing；代理只给 Emby 认过的令牌用缓存（令牌第一次来要先过一次 Emby）。
+
