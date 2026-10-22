@@ -815,9 +815,11 @@ test("copy_after：按记录 id 事后归档源文件（目标里不全的不动
     },
     notify: async () => {},
   });
+  // addedAt 明确错开：队列按 addedAt 新的在前，两条都用 record() 默认的 Date.now() 时，跨了一毫秒顺序就翻（CI 上偶发）
+  const now = Date.now();
   saveCopies([
-    record({ id: "k1", status: "done", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Show", name: "E01.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", doneAt: Date.now(), detail: "复制完成" }),
-    record({ id: "k2", status: "done", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Show", name: "E02.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", doneAt: Date.now(), detail: "复制完成" }),
+    record({ id: "k1", status: "done", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Show", name: "E01.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", addedAt: now - 2000, doneAt: now - 1000, detail: "复制完成" }),
+    record({ id: "k2", status: "done", taskId: "c-tv", rootPath: "/tv", srcDir: "/tv/Show", name: "E02.mkv", isDir: false, dstDir: "/local/media/Show", dstBase: "/local/media", addedAt: now - 1000, doneAt: now, detail: "复制完成" }),
   ]);
   const daily = await connect(dailyToken);
   const read = await connect(readToken);
@@ -827,7 +829,7 @@ test("copy_after：按记录 id 事后归档源文件（目标里不全的不动
     assert.match(tool.description ?? "", /得到同意再调用/);
 
     const list = await call(daily, "copy_list", { status: "done" });
-    assert.deepEqual(list.data.items.map((i: Record<string, unknown>) => [i.id, i.canAfterCopy]), [["k1", true], ["k2", true]]);
+    assert.deepEqual(list.data.items.map((i: Record<string, unknown>) => [i.id, i.canAfterCopy]), [["k2", true], ["k1", true]], "新的在前");
     assert.match(list.data.next, /copy_after/);
 
     // 目标里还什么都没有：核对不过，不动
