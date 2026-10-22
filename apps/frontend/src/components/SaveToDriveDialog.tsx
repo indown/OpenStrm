@@ -337,7 +337,7 @@ export function SaveToDriveDialog({
                 <div className="flex items-center gap-2 pl-6">
                   <span className="text-xs text-muted-foreground">检查间隔</span>
                   <Select value={followInterval} onValueChange={setFollowInterval}>
-                    <SelectTrigger className="h-8 w-36">
+                    <SelectTrigger size="sm" className="w-36">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>

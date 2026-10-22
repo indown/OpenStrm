@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Trash2 } from "lucide-react";
+import { FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { AccountInfo, OrganizeSkip } from "@openstrm/shared";
 import { api } from "@/lib/api";
@@ -10,8 +10,10 @@ import { accountLabel } from "@/lib/drive";
 import { fmtTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { InputGroup, InputGroupButton, InputGroupInput } from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { TreeSelectDialog } from "@/components/TreeSelectDialog";
 
 /** 不整理的目录清单：改了立刻生效（不走设置页的保存条）；整理页作品卡片「…」里加的也在这里 */
 export function SkipDirs() {
@@ -21,6 +23,7 @@ export function SkipDirs() {
   const [path, setPath] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [browseOpen, setBrowseOpen] = useState(false);
 
   const load = useCallback(
     () =>
@@ -70,6 +73,8 @@ export function SkipDirs() {
     const a = accounts.find((x) => x.name === name);
     return a ? accountLabel(a.name, a.accountType) : name;
   };
+  // TreeSelectDialog 打开时按 load 拉根目录：要稳定，不然每次渲染都重拉
+  const browse = useCallback((p: string) => api.directory.remote(account, p), [account]);
 
   return (
     <div className="space-y-2">
@@ -102,8 +107,10 @@ export function SkipDirs() {
       <div className="flex flex-wrap items-end gap-2">
         <div className="flex w-full flex-col gap-1 sm:w-44">
           <Label className="text-xs font-medium text-muted-foreground">账号</Label>
-          <Select value={account} onValueChange={setAccount} disabled={accounts.length === 0}>
-            <SelectTrigger className="h-8 w-full text-xs">
+          {/* 空值不收：账号列表和选中值同一批写进去时，Radix 隐藏的原生 select 还没有这个 option，会先回一次 ""，把自动选中的第一个账号冲掉 */}
+          <Select value={account} onValueChange={(v) => v && setAccount(v)} disabled={accounts.length === 0}>
+            {/* size="sm" 才是 32px：className 里的 h-8 压不过 data-[size=default]:h-9，三个控件会差一截 */}
+            <SelectTrigger size="sm" className="w-full text-xs">
               <SelectValue placeholder={accounts.length === 0 ? "还没有账号" : "选账号"} />
             </SelectTrigger>
             <SelectContent>
@@ -117,16 +124,31 @@ export function SkipDirs() {
         </div>
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <Label className="text-xs font-medium text-muted-foreground">网盘目录（绝对路径）</Label>
-          <Input className="h-8 font-mono text-xs" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/tv/旧剧" onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && void add()} />
+          <InputGroup className="h-8">
+            <InputGroupInput className="font-mono text-xs md:text-xs" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/tv/旧剧" onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && void add()} />
+            <InputGroupButton onClick={() => setBrowseOpen(true)} disabled={!account} title={account ? "从网盘里选目录" : "先选账号"} aria-label="从网盘里选目录">
+              <FolderOpen />
+            </InputGroupButton>
+          </InputGroup>
         </div>
         <div className="flex w-full flex-col gap-1 sm:w-48">
           <Label className="text-xs font-medium text-muted-foreground">备注（可不填）</Label>
-          <Input className="h-8 text-xs" value={note} onChange={(e) => setNote(e.target.value)} placeholder="手工整理过" />
+          <Input className="h-8 text-xs md:text-xs" value={note} onChange={(e) => setNote(e.target.value)} placeholder="手工整理过" />
         </div>
         <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => void add()} disabled={busy || !account || !path.trim()}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : "添加"}
         </Button>
       </div>
+      {account && (
+        <TreeSelectDialog
+          open={browseOpen}
+          onOpenChange={setBrowseOpen}
+          title="选不整理的目录"
+          description={<>从 {label(account)} 的根目录起选一个目录；选中的填成绝对路径</>}
+          load={browse}
+          onConfirm={(p) => setPath(`/${p}`)}
+        />
+      )}
     </div>
   );
 }

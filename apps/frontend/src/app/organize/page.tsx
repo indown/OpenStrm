@@ -339,7 +339,7 @@ function OrganizeContent() {
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
           <span className="font-medium">命名来源</span>
           <Select value={naming} onValueChange={(v) => setNaming(v as OrganizeNaming)} disabled={!task || creating}>
-            <SelectTrigger className="h-8 w-60 text-xs" aria-label="命名来源">
+            <SelectTrigger size="sm" className="w-60 text-xs" aria-label="命名来源">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

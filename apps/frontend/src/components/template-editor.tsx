@@ -146,7 +146,7 @@ export function TemplateEditor({
       <div className="flex flex-wrap items-center gap-2">
         <Label htmlFor={`${id}-preset`}>预设</Label>
         <Select value={selectValue} onValueChange={pick} disabled={disabled}>
-          <SelectTrigger id={`${id}-preset`} className="h-8 w-full text-xs sm:w-72">
+          <SelectTrigger id={`${id}-preset`} size="sm" className="w-full text-xs sm:w-72">
             <SelectValue />
           </SelectTrigger>
           <SelectContent className="z-[60]">
