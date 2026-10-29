@@ -818,3 +818,92 @@ copyToOpenlist?: { enabled?: boolean; dstDir?: string };   // dstDir 不填用�
 
 **发布**：功能合成一个提交 b31af05（前面的 c0de163 只是把 rc.1 的发布记录补进 302-proxy-migration.md），`chore(release): v2.16.0-rc.2` = 09e4b1e，tag 已推（2026-10-08，main 未动）。
 Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）与 CI@v2 两作业全绿，GitHub Release 是 prerelease，Docker Hub `v2.16.0-rc.2` 镜像 c1583e206da7（amd64 / arm64），latest 仍是 v2.15.0 的 b06e1e4dba65。
+
+## 清理归档：drive_archive_clean（2026-10-28）
+
+起因：用户「加一下清理归档的功能」。现状：任务目录下的「归档」（暂存区）只进不出——复制后归档、copy_after、drive_archive 三条路往里挪，腾空间只能到网盘里手动删；界面、REST、智能体都没有入口，也看不到归档里有什么（drive_browse 只列子目录和文件个数，归档里一层的单个文件看不到）。
+
+### 方案
+
+**服务层** `services/copy/archive-clean.ts`，两个入口：
+
+- `listArchive(task)` → `{ archiveDir, exists, items[] }`：只列归档目录的**一层**（名字、目录还是文件、大小、修改时间）。归档里原来的层级就是作品 / 目录名，一层正好是用户认得的粒度；要删更深的用 paths 指。115 的列表没有修改时间，夸克 / OpenList 有（夸克挪动会刷新 updated_at，差不多就是归档时间）。目录不存在当空的，不报错。
+- `cleanArchive({ task, paths? | all?, signal?, onProgress? })` → `{ done, archiveDir, items[] }`，每条 `outcome` = deleted / missing / failed / skipped。
+  - paths 相对归档目录（`uniqueArchivePaths`：不收空、`..`、重复，父目录在就不单列子路径；写成「归档/xxx」也认——drive_browse 给的是相对任务目录的路径，归档里不可能再套一层「归档」，剥掉没有歧义）；`all: true` 是归档目录现在这一层的全部条目；两个都给、都不给都是 VALIDATION。
+  - 两阶段同 archive.ts：先按父目录绕开缓存找节点（after.ts 的 `Lookups`；all 模式直接用 `listArchive` 的 fresh 列表），再逐条 `provider.write.remove`（115 / 夸克进回收站，OpenList 看存储后端），用列出来的节点 id 删；碰上网络问题停手、后面的 skipped；单条被网盘拒的不影响别的；不进自动重试，再调一次即可。
+  - 删完 `resetArchiveDirCache()`：同一轮复制里刚确认 / 建过的归档目录链可能已经被删掉了，让下一次归档重新到网盘确认。
+  - 不删「归档」目录本身（空壳留着，下次归档直接用）；不看复制队列（复制记录只是历史，`afterCopy = archive` 的记录照旧）；不拒整理中（整理不碰暂存区）；网盘不支持写 400 UNSUPPORTED。
+  - 本地没有对应的 strm（暂存区不镜像），不用动本地；监控看到的删除事件落在暂存区，照旧「不处理」。
+
+**REST**（`routes/drive/archive.ts` 追加）：`GET /api/drive/archive?taskId=`（read + transfer）列；`POST /api/drive/archive/clean`（danger + transfer，body `{ taskId, paths?, all? }`）删。
+
+**工具** `drive_archive_clean`（transfer 组、danger 档；注解 destructive、idempotent）：task + paths? + all?。都不给就只列（看归档里有什么，不删）；要删的先 `confirmFirst`（确认框里只说哪个任务、几条、进回收站，不放网盘里的名字），40 秒内直接回否则交作业用 job_status 等。结果逐条 outcomeText + note + next。描述写明：先列、把要删的告诉用户、同意后再传 paths / all。instructions 概念句 + USAGE_NOTES 各加一句。工具 44 → 45。
+
+**界面**：`components/CleanArchiveDialog.tsx`：选任务 → 自动列归档一层（目录 / 文件、大小、时间）→ 勾选（有「全选」，默认一个不勾）→ 红字确认（进回收站 / 不可逆 / 本地 strm 和 Emby 不受影响）→ 结果按 outcome 标色，能「回到列表」接着清。strm 管理页「工具」多一项「清理归档」。README 三处（strm 管理一节、权限档、智能体一节）。
+
+### 不做
+
+- 按天数自动清理（定时删网盘文件要产品决策；115 又没有时间可依据）。
+- 目录大小统计（115 要导出整树才知道，夸克要递归列）。
+- 清理「重复文件」目录（整理的撤销要把它们挪回去，删了撤销就退不回）。
+- 「从归档恢复」仍是到网盘里手动挪回。
+
+### 测试
+
+- `services/copy/archive-clean.itest.ts`：列（不存在 / 空 / 一层的目录和文件带大小时间）；按 paths 删文件和目录、「归档/」前缀、重复和父子路径；all；missing；拒绝（空、太多、`..`、归档目录本身、paths + all）；不支持写；网络问题停手、修好再来；单条被拒不影响别的；进度回调。
+- `routes/drive/archive.itest.ts` +1：GET 只读令牌能看、POST 写令牌 403、完全令牌能删、参数不对 400。
+- `routes/mcp/mcp-copy.itest.ts` +1：日常令牌看不到；完全令牌先列再删、all、paths + all 被拒。
+- 工具快照更新。
+- 真机：本机用 FakeDrive 预加载的 scratch 后端做浏览器冒烟；115 / 夸克上的真删要用户批准后再做。
+
+### 进度
+
+- [x] 服务层 + 用例
+- [x] REST + 用例
+- [x] 工具 + instructions + 快照 + 用例
+- [x] 界面 + README
+- [x] typecheck / lint / 全量测试 / 浏览器冒烟
+- [x] 115 / 夸克真机（2026-10-28，用户批准后做的，见下）
+- [ ] 评审
+
+### 实施记录（2026-10-28）
+
+按方案做完，未提交。
+
+- `services/copy/archive-clean.ts`（新）：`listArchive`（内部 `listArchiveEntries` 带节点 id，目录在前再按名字）、`uniqueArchivePaths`（剥「归档/」前缀、拒归档目录本身 / `..` / 超 `CLEAN_MAX`）、`cleanArchive`（paths / all 二选一；第一阶段 paths 用 `Lookups` 按父目录 fresh 找节点、all 直接用 fresh 列表；第二阶段逐条 `provider.write.remove`，网络问题停手、单条被拒不影响别的；删成了 `resetArchiveDirCache()`）。
+- `routes/drive/archive.ts`（追加）：`GET /api/drive/archive?taskId=`（read + transfer）、`POST /api/drive/archive/clean`（danger + transfer，body `{ taskId, paths?, all? }`）。
+- `services/agent/tools/transfer.ts`：`drive_archive_clean`（danger 档、transfer 组、destructive；不传 paths / all 回 `state: "listed"` 的清单，最多列 200 条；要删的先 `uniqueArchivePaths` 算出条数再 `confirmFirst`，all 先列、空的直接回；40 秒内直接回否则交作业）；`tools/index.ts` 登记；`instructions.ts` 概念句 + USAGE_NOTES 各一句；快照 44 → 45。
+- 前端：`lib/api.ts`（`DriveArchiveListItem / ListResult / CleanInput / CleanOutcome / CleanResult`、`api.drive.archiveList / archiveClean`）；`components/CleanArchiveDialog.tsx`（新：选任务 → 自动列一层 → 勾选 / 全选（默认不勾）→ 红字确认 → 结果按 outcome 标色 → 「回到列表」重列；按勾选的 paths 删，不用 all——列出来之后又进了新东西的用户没看过）；`app/strm/page.tsx` 「工具」多一项「清理归档」（ArchiveX 图标）。
+- README 三处：strm 管理一节、权限档「完全」、智能体一节。
+- 测试：`services/copy/archive-clean.itest.ts` 7 条（列 / 路径归一 / 按 paths 删 + 进度 / all + 目录本身留着 / 拒绝 + 不支持写 / 网络问题停手再来 / 单条被拒）；`routes/drive/archive.itest.ts` +1（GET 只读令牌能看、POST 读 / 写令牌 403、完全令牌能删、400 / 404 / 401）；`routes/mcp/mcp-copy.itest.ts` +1（日常令牌看不到、完全令牌先列再按「归档/」前缀删、all 留着目录本身、paths + all / `..` 被拒；新增 fullToken）；工具快照更新（`UPDATE_SNAPSHOTS=1`）。tsc / eslint 前后端都过；后端全量 1682 条全过（4 分 52 秒），前端单测 11 条过，`check-hygiene.sh` 过。
+- 浏览器冒烟（2026-10-28，不碰真网盘）：scratch 后端 4100 用 `node --import tsx --import <preload>` 预加载 `setDriveProviderFactory` 接进程内的 FakeDrive（115 / 夸克各一个账号，树里预置 `归档/东京三十岁左右`、`归档/lone-sample.mkv`、`归档/空目录`），新库口令换成临时随机的、建两个 lab 任务跑一次同步；前端 dev 3223。
+  - 深色宽屏：strm 页「工具」→「清理归档」，任务预选、列出 3 项（目录在前，文件带大小，有时间的带「今天 15:26」这类短写法，title 是完整时间）；勾两项 → 「删除（2）」→ 红字确认框 →「已删除」×2 + toast「从网盘上删掉 2 项」→「回到列表」只剩「空目录」；后端日志一行 `清理归档（fake115 /tv/归档）：东京三十岁左右=deleted，lone-sample.mkv=deleted`，没有告警。
+  - REST：`POST /api/drive/archive`（怒呛人生/S02）→ `GET` 列出「空目录」「怒呛人生」→ `POST …/clean {all:true}` 删 2 条、目录本身留着、再列是空的；paths + all 一起给 / 都不给都是 400 带中文原因。
+  - 浅色 + 窄屏（390px iframe）：弹框一列排版，时间列收起，按钮上下排；空归档显示「归档目录是空的」，再归档两项后点「刷新」列出来。
+  - 收尾：两个 scratch 进程已停，lab 库、临时口令、令牌文件已删；没碰任何真网盘。
+- 冒烟后又改了两处小的：列表里目录不给大小（夸克的目录 size 是 0，不是真的大小；archive-clean.itest 的列用例加了 `size: 0` 的目录）；`drive_archive_clean` 传 all 碰上空归档直接回 `state: "done"`（和删完一个形状）。tsc / eslint / 三个相关用例文件复跑过。
+
+### 真机验证（2026-10-28）
+
+用户「真机测试一下」，批准「两个网盘都做」。
+
+**环境**：lab 库从 `config/openstrm.db` 只读 `.backup` 到 scratchpad 的 lab2（迁移跑到 0028）；prep 脚本把口令换成临时随机的、Telegram / 网盘监控 / Emby / TMDB / HDHive / openlistCopy 清空、生产任务删掉、建 lab 任务 `lab115`（115 `/lab20261028`）和 `labqk`（夸克 `/lab20261028`）、建一个完全档的 MCP 令牌；media_library / share_follows / life_events / drive_snapshots 清空。后端 4100（`BACKEND_HOST=127.0.0.1`）、前端 dev 3223；OpenList 容器 `openlist-lab2` 只绑 127.0.0.1:5246（`-e PUID=0 -e PGID=0`，data 目录 777），挂 `115 Cloud` + `Quark`（cookie 取自 lab 库，写进 600 权限文件再读）。测试文件是 ffmpeg 造的 184 KB mkv，经 `fs/put` 传成 `/lab20261028/剧A/S01/E01.mkv`、`E02.mkv`、`/lab20261028/电影B/movie.mkv`。浏览器登录那一步鼠标点密码框会撞上密码管理器扩展（「Cannot access a chrome-extension:// URL」），改用 JS 的原生 setter 填表单再点登录。
+
+| 场景 | 结果 |
+|---|---|
+| 夸克 全量同步 | 3 个 strm 生成 |
+| 115 全量同步 | 刚建的目录 `files/getid` 回 0，报「远端目录树里找不到源目录」，17:04～17:09 每 30 秒重试都失败，17:09:58 才成（那时文件已归档，回「no files to download」）；`resolvePath` 走列目录一直找得到。记进 drive-notes.md |
+| 夸克 `POST /api/drive/archive`（剧A、电影B/movie.mkv） | 2 条 archived，`剧A` → `/lab20261028/归档`、movie.mkv → `/lab20261028/归档/电影B`，本地 strm 删了；OpenList refresh 列 `/quark/lab20261028/归档` = [剧A, 电影B] |
+| 夸克 界面「清理归档」 | 弹框预选 labqk，列出 电影B、剧A（夸克挪动刷新 updated_at，时间列「今天 17:05」）；勾 剧A → 「删除（1）」→ 红字确认 →「已删除」+ toast「从网盘上删掉 1 项」→「回到列表」只剩 电影B；OpenList 列 `/quark/lab20261028/归档` = [电影B] |
+| 夸克 MCP `drive_archive_clean`（官方 SDK 客户端，完全档令牌，31 个工具里有它） | `{}` → listed 1 项（带 modifiedAtText）；`paths: ["归档/电影B"]` → 2.3 秒 done、deleted；再 `{}` → 空；`all: true` → done 0「归档里没有东西」 |
+| 115 `POST /api/drive/archive`（剧A、电影B/movie.mkv） | 2 条 archived；列归档 = [电影B, 剧A]，没有时间（115 不给） |
+| 115 MCP `{}` | listed 2 项，items 里没有 size / modifiedAt |
+| 115 界面「清理归档」 | 列出 电影B、剧A，时间列「-」；勾 剧A → 确认 → 约 8 秒内「已删除」；「回到列表」后只剩 电影B（截图里是删完 all 之后「归档目录是空的」） |
+| 115 `POST /api/drive/archive/clean {all:true}` | done 1（电影B）；再列 `exists: true, items: []`；OpenList refresh 列 `/115/lab20261028/归档` = [] |
+| 收尾 | OpenList `fs/remove` 把 `/115/lab20261028`、`/quark/lab20261028` 删进回收站，两边根目录都没有它了 |
+
+**真机发现的问题**：没有和这次改动相关的。115 新建目录 getid 滞后是 115 自己的（同步才用 getid），记进 drive-notes.md「115」一节。
+
+日志：lab 后端日志里除了「仍在使用默认密码」（改口令前的那一条）没有告警和报错；`copy-archive` / `copy-archive-clean` 各一行 info 记每条的结果。
+
+收尾：lab 后端 / 前端进程已停；容器 `docker rm -f`，带 cookie 的 ol-data、lab 库拷贝、口令 / 令牌文件、测试视频全部删掉，Docker Desktop 停掉；`apps/backend/.lab-mcp.mts` 删掉。网盘上留下的东西：两个回收站里各一个 `lab20261028`（三个 184 KB 的测试视频 + 空目录），不清也没关系。

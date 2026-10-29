@@ -194,3 +194,58 @@ a08f5c0 = rc.1 + 第 0～3 步 + 路径缓存风险修补 + 评审 15 条全修 
 ### 发布：v2.19.0（2026-10-22，用户「发个正式版」）
 
 4163124 = rc.2 + 53e433a 设置页跳过目录行对齐 / 可选网盘目录 + 18c1c83 CI 凭据形状检查 + a465777 CONTRIBUTING / CLAUDE.md / PR 模板 / plans 模板 / drive-notes + a1ace37 pre-commit 钩子 + 054608f rc.2 发布记录 + 版本号；含迁移 0028（rc.1 带的）。Release #115 四作业、CI@v2 #137、CI@main #138 全绿。Docker Hub `v2.19.0` 与 `latest` 同为 8bc505cef31e（amd64 / arm64）。GitHub Release 非预发布、是仓库最新，body 只有自动生成的对比链接，升级说明交用户手动贴。main 从 88b4f21 快进到 4163124，main == v2 == v2.19.0。
+
+## 起播诊断：按片名挑条目（2026-10-22，方案）
+
+### 起因
+
+v2.19.0 设置页 Emby 一节的「起播诊断」用一个「条目 id（可留空）」输入框指定条目。用户反馈：「感觉是不可用的状态，因为没人知道 ID 是多少」，而且「有时候需要主动去触发某些影片的探测」。留空时自动挑最近入库、没探测过的那条，这条路是通的；要对某一部具体的片子触发探测，现在只能去 Emby 网页地址栏抄 id，等于没有这个功能。
+
+### 方案
+
+把 id 框换成按片名挑条目的选择器。挑到的条目仍然走现有的 `POST /api/emby/playback-diagnose { itemId }`，诊断本身不改（PlaybackInfo 会让 Emby 真探测一次，这正是「主动触发探测」要的效果）。
+
+**后端：一个新接口 `GET /api/emby/items`**（`routes/emby/diagnose.ts` 旁边，`services/emby/items.ts`，要登录）
+
+三种用法，都是转发 Emby 的 `/Items`，字段 `Path,MediaSources,SeriesName,ParentIndexNumber,IndexNumber,ProductionYear`：
+
+| 参数 | Emby 查询 | 用途 |
+|---|---|---|
+| `q=关键字` | `SearchTerm=q&IncludeItemTypes=Movie,Series,Episode&Recursive=true&Limit=20` | 按名字搜。Emby 的 SearchTerm 只匹配条目自己的 Name：剧按剧名命中的是 Series，单集只有按集标题才命中，所以 Series 要能展开 |
+| `parent=<SeriesId>` | `ParentId=&Recursive=true&IncludeItemTypes=Episode&SortBy=ParentIndexNumber,IndexNumber&Limit=500` | 展开一部剧的全部集 |
+| 都不给 | `IncludeItemTypes=Movie,Episode&SortBy=DateCreated&SortOrder=Descending&Limit=50`，取前 20 条 strm | 打开选择器还没打字时就有东西可点：最近入库的 |
+
+返回 `EmbyItemHit[]`（shared 新类型）：`{ id, type: "Movie" | "Series" | "Episode", name, year?, series?, season?, episode?, strm: boolean, probed: boolean | null }`。`strm` = Path 以 .strm 结尾；`probed` = `countMediaStreams(MediaSources) > 0`，Series 没有媒体源，两项为 null / false 由前端按类型处理。`limit` 上限 50。Emby 没配地址或 key 回 400（文案同诊断接口），Emby 出错走 `upstreamError`。
+
+**前端：`PlaybackDiagnoseButton.tsx` 里的输入框换成「选择条目…」按钮 + 弹框**（新文件 `EmbyItemPickerDialog.tsx`，中档宽度）
+
+- 弹框：顶部搜索框（300 ms 防抖），下面列表。没打字时列「最近入库」；打了字列搜索结果。
+- 每行：名字、类型小标、年份；Episode 显示「剧名 · S01E02 · 集标题」；strm 条目带「已探测 / 未探测」标记（未探测的正是要主动触发的那些），非 strm 的行置灰并标「本地文件」不可选。
+- 点 Series 行：列表换成这部剧的集，顶部一行「← 返回搜索」；点 Movie / Episode 行：选中并关弹框。
+- 诊断块显示「条目：名字 · S01E02 · 未探测」和一个清除按钮；不选就照旧自动挑，说明文字改成「不选就自动挑最近入库、还没探测过的 strm 条目」。
+- 弹框是 portal 渲染但 React 事件会冒泡回设置页的 `<form>`：搜索框的 Enter 要 `preventDefault`，否则会提交整页设置（现有 id 框就是为此截的 Enter）。选中状态是组件本地状态，不进 react-hook-form，不会把保存条点亮。
+- 加载态骨架、空态文案：「没有匹配的电影 / 剧集」「最近入库里没有 strm 条目」。
+- `lib/api.ts` 加 `emby.items({ q?, parent?, limit? })`。
+
+**README**：设置页 / Emby 一节里提到起播诊断的地方，把「填条目 id」改成「按片名挑」。
+
+### 不做
+
+- 整部剧「一键探测全部未探测的集」：那是个后台批处理（要排队、要能停、要报进度），入库预热轮询已经在慢慢做同样的事；先看单条触发够不够用，不够再加。
+- 不给智能体加搜索 / 诊断工具。
+- 自动挑条目的规则不改。
+
+### 测试
+
+- 后端 `services/emby/items.test.ts`：注入 fetch，核对三种用法拼出的 Emby 查询参数；Movie（strm、有流 → probed true）、Episode（series / season / episode 映射）、Series（无路径）、非 strm 电影（strm false）的映射；`limit` 夹到 50；`q` 去首尾空白。路由：没配 Emby 回 400。
+- 前端 `src/lib/emby-items.test.ts`：行标签格式化的纯函数（电影带年份、单集 SxxEyy 补零、集标题缺失时只剩剧名和集号）。
+- 浏览器冒烟：临时库 + mock XHR，打开弹框、搜索、展开剧、选集、清除、Enter 不提交设置页；窄屏看列表。
+- 真机（必须：Emby 代理这一类）：`scripts/emby-lab.sh up`（`EMBY_PORT=8097`）里的 strm 媒体库，搜「测试剧集」→ 展开 → 选 S01E02 → 诊断，核对 Emby 回答一段的媒体流 0 → n、选择器里这一集从「未探测」变「已探测」；再选本地电影那行应是置灰不可选。换直链一段要 115 账号拷贝，只读。
+
+### 进度
+
+- [ ] 后端接口 + 单测
+- [ ] 前端弹框 + 纯函数单测
+- [ ] README
+- [ ] 冒烟 + 真机
+
