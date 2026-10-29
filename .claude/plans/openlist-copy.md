@@ -907,3 +907,9 @@ Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merg
 日志：lab 后端日志里除了「仍在使用默认密码」（改口令前的那一条）没有告警和报错；`copy-archive` / `copy-archive-clean` 各一行 info 记每条的结果。
 
 收尾：lab 后端 / 前端进程已停；容器 `docker rm -f`，带 cookie 的 ol-data、lab 库拷贝、口令 / 令牌文件、测试视频全部删掉，Docker Desktop 停掉；`apps/backend/.lab-mcp.mts` 删掉。网盘上留下的东西：两个回收站里各一个 `lab20261028`（三个 184 KB 的测试视频 + 空目录），不清也没关系。
+
+**发布：v2.20.0-rc.1（2026-10-29，用户「不用 review 了，直接发个 rc」）**
+
+功能合成一个提交 afb0c65，方案记录 04f6b6d（连同工作区里压着的起播诊断选条目方案一起带上），`chore(release): v2.20.0-rc.1` = df13b8c，tag 已推，main 未动（仍在 4163124 = v2.19.0）。没有迁移。没评审（用户跳过）。
+Release #116 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）与 CI #143 全绿；GitHub Release 是 prerelease；Docker Hub `v2.20.0-rc.1` 镜像 ee1dfc93cb11（amd64 652e900251aa / arm64 c53fbf560c16），latest 仍是 v2.19.0 的 8bc505cef31e。
+正式版说明要写的：strm 管理页「工具」多了「清理归档」；新接口 `GET /api/drive/archive`、`POST /api/drive/archive/clean`；智能体工具 `drive_archive_clean`（删除档，工具 44 → 45，选「全部」工具集的老令牌不用改，它在转存那一组里）。
