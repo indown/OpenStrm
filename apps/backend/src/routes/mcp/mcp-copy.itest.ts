@@ -9,6 +9,7 @@
  *   - follow_check 带回 copy；没开转存那一组的令牌不叫它调 copy_list
  *   - copy_list / copy_retry：条数、过滤、配置、能不能重试、各种状态；只读令牌看不到 copy_retry
  *   - drive_archive：不管复制、把网盘上的目录 / 文件收进任务目录下的「归档」；正在复制的不动；只读令牌看不到
+ *   - drive_archive_clean：先列归档里有什么、再从网盘上删掉（paths / all）；日常令牌看不到
  *   - overview / tasks_list 的复制字段
  *
  *   CONFIG_DIR=... DATA_DIR=... pnpm test:file src/routes/mcp/mcp-copy.itest.ts
@@ -114,6 +115,8 @@ let app: FastifyInstance;
 let url: string;
 let readToken: string;
 let dailyToken: string;
+/** 完全档：清理归档要「删除」档 */
+let fullToken: string;
 /** 只开了追更那一组：追更检查的结果里不能叫它去调 copy_list */
 let followOnlyToken: string;
 let baseline: { tasks: TaskDefinition[]; accounts: AccountInfo[]; settings: AppSettings };
@@ -151,6 +154,7 @@ before(async () => {
   readToken = createApiToken({ name: "只读", scopes: ["read"], toolsets: [...all], expiresAt: null }).token;
   dailyToken = createApiToken({ name: "日常", scopes: ["read", "run", "write"], toolsets: [...all], expiresAt: null }).token;
   followOnlyToken = createApiToken({ name: "只追更", scopes: ["read", "run", "write"], toolsets: ["follow"], expiresAt: null }).token;
+  fullToken = createApiToken({ name: "完全", scopes: ["read", "run", "write", "danger"], toolsets: [...all], expiresAt: null }).token;
 
   app = Fastify();
   registerErrorHandling(app);
@@ -929,6 +933,68 @@ test("drive_archive：不管复制过没有，把网盘上的目录 / 文件收�
   } finally {
     await daily.close();
     await read.close();
+  }
+});
+
+test("drive_archive_clean：不传 paths / all 只列归档一层（带大小）；传 paths 删指定的、all 清空一层但留着目录本身；paths + all 一起给被拒；日常令牌看不到", async () => {
+  d115.tree.addFile("/tv/归档/Show/E01.mkv", { size: 9 });
+  d115.tree.addFile("/tv/归档/lone.mkv", { size: 7 });
+  d115.tree.addFile("/tv/Show/E02.mkv", { size: 9 });
+  const daily = await connect(dailyToken);
+  const full = await connect(fullToken);
+  try {
+    assert.ok(!(await daily.listTools()).tools.some((t) => t.name === "drive_archive_clean"), "日常令牌没有 drive_archive_clean");
+    const tool = (await full.listTools()).tools.find((t) => t.name === "drive_archive_clean")!;
+    assert.match(tool.description ?? "", /得到同意再传/);
+    assert.equal(tool.annotations?.destructiveHint, true);
+
+    const listed = await call(full, "drive_archive_clean", { task: "tv" });
+    assert.equal(listed.isError, false, JSON.stringify(listed.data));
+    assert.equal(listed.data.state, "listed");
+    assert.equal(listed.data.archiveDir, "/tv/归档");
+    assert.deepEqual(
+      listed.data.items.map((i: Record<string, unknown>) => [i.path, i.isDir, i.size]),
+      [
+        ["Show", true, undefined],
+        ["lone.mkv", false, 7],
+      ],
+    );
+    assert.match(listed.data.note, /归档里有 2 项/);
+    assert.match(listed.data.next, /得到同意/);
+    assert.ok(d115.tree.get("/tv/归档/lone.mkv"), "只列不删");
+
+    const both = await call(full, "drive_archive_clean", { task: "tv", paths: ["lone.mkv"], all: true });
+    assert.equal(both.isError, true);
+    assert.equal(both.data.code, "VALIDATION");
+    const bad = await call(full, "drive_archive_clean", { task: "tv", paths: ["../x"] });
+    assert.equal(bad.data.code, "VALIDATION");
+    assert.match(bad.data.hint, /先不传 paths/);
+
+    const some = await call(full, "drive_archive_clean", { task: "tv", paths: ["归档/Show", "没有的.mkv"] });
+    assert.equal(some.isError, false, JSON.stringify(some.data));
+    assert.equal(some.data.state, "done");
+    assert.equal(some.data.done, 1);
+    assert.deepEqual(
+      some.data.items.map((i: Record<string, unknown>) => [i.path, i.outcome, i.outcomeText]),
+      [
+        ["Show", "deleted", "已删除"],
+        ["没有的.mkv", "missing", "归档里没有这条路径"],
+      ],
+    );
+    assert.match(some.data.note, /删掉 1 条.*1 条归档里本来就没有/);
+    assert.equal(d115.tree.get("/tv/归档/Show"), undefined);
+    assert.ok(d115.tree.get("/tv/Show/E02.mkv"), "任务目录里同名的作品不受影响");
+
+    const all = await call(full, "drive_archive_clean", { task: "tv", all: true });
+    assert.equal(all.isError, false, JSON.stringify(all.data));
+    assert.deepEqual(all.data.items.map((i: Record<string, unknown>) => [i.path, i.outcome]), [["lone.mkv", "deleted"]]);
+    assert.ok(d115.tree.get("/tv/归档"), "归档目录本身留着");
+    const empty = await call(full, "drive_archive_clean", { task: "tv", all: true });
+    assert.equal(empty.data.done, 0);
+    assert.match(empty.data.note, /没有东西/);
+  } finally {
+    await daily.close();
+    await full.close();
   }
 });
 

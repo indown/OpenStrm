@@ -7,7 +7,7 @@ import { hasToolset } from "../access.js";
 import type { ToolDef } from "../define.js";
 import { jobStatusTool, overviewTool, tasksListTool } from "./core.js";
 import { syncCancelTool, syncHistoryTool, syncStartTool, syncStatusTool } from "./sync.js";
-import { driveArchiveTool, driveBrowseTool, offlineAddTool, offlineListTool, shareInspectTool, shareSaveTool } from "./transfer.js";
+import { driveArchiveCleanTool, driveArchiveTool, driveBrowseTool, offlineAddTool, offlineListTool, shareInspectTool, shareSaveTool } from "./transfer.js";
 import {
   organizeAdjustTool,
   organizeApplyTool,
@@ -37,6 +37,7 @@ export const AGENT_TOOLS: readonly ToolDef[] = [
   syncHistoryTool,
   driveBrowseTool,
   driveArchiveTool,
+  driveArchiveCleanTool,
   shareInspectTool,
   shareSaveTool,
   offlineAddTool,

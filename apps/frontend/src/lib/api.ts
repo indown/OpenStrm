@@ -405,6 +405,38 @@ export interface DriveArchiveResult {
   items: Array<{ path: string; name: string; isDir?: boolean; outcome: DriveArchiveOutcome; detail?: string; to?: string }>;
 }
 
+/** GET /api/drive/archive?taskId=：任务的归档目录（暂存区）里一层有什么 */
+export interface DriveArchiveListItem {
+  /** 相对归档目录（一层就是名字本身） */
+  path: string;
+  name: string;
+  isDir: boolean;
+  size?: number;
+  /** 网盘报的修改时间（毫秒）；115 没有 */
+  modifiedAt?: number;
+}
+export interface DriveArchiveListResult {
+  archiveDir: string;
+  /** 网盘上有没有这个目录；没有就当空的 */
+  exists: boolean;
+  items: DriveArchiveListItem[];
+}
+
+/** POST /api/drive/archive/clean：把归档目录里的条目从网盘上删掉（paths 相对归档目录；all 是这一层全部） */
+export interface DriveArchiveCleanInput {
+  taskId: string;
+  paths?: string[];
+  all?: boolean;
+}
+/** 每条的下场：删了 / 归档里没有 / 没成 / 前一条碰上网络问题没试 */
+export type DriveArchiveCleanOutcome = "deleted" | "missing" | "failed" | "skipped";
+export interface DriveArchiveCleanResult {
+  /** 删掉了几条 */
+  done: number;
+  archiveDir: string;
+  items: Array<{ path: string; name: string; isDir?: boolean; size?: number; outcome: DriveArchiveCleanOutcome; detail?: string }>;
+}
+
 export interface CopyQueue {
   /** 能重试的在前、再是还在跑的，各自新的在前 */
   items: CopyItem[];
@@ -899,6 +931,10 @@ export const api = {
   drive: {
     /** 归档到暂存区：逐条到网盘找节点再挪，一条一两秒，给宽一点 */
     archive: (input: DriveArchiveInput) => data(axiosInstance.post<DriveArchiveResult>("/api/drive/archive", input, { timeout: 330_000 })),
+    /** 归档目录里一层有什么 */
+    archiveList: (taskId: string) => data(axiosInstance.get<DriveArchiveListResult>("/api/drive/archive", { params: { taskId } })),
+    /** 清理归档：逐条删，和归档一样给宽一点 */
+    archiveClean: (input: DriveArchiveCleanInput) => data(axiosInstance.post<DriveArchiveCleanResult>("/api/drive/archive/clean", input, { timeout: 330_000 })),
   },
 
   tmdb: {

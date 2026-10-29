@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import {
   Archive,
+  ArchiveX,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -65,6 +66,7 @@ import { RegenerateDialog } from "./components/RegenerateDialog";
 import { RewriteDialog } from "./components/RewriteDialog";
 import { AddCopyDialog, type CopyPreset } from "@/components/AddCopyDialog";
 import { ArchiveDialog, type ArchivePreset } from "@/components/ArchiveDialog";
+import { CleanArchiveDialog, type CleanArchivePreset } from "@/components/CleanArchiveDialog";
 import { api } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/axios";
 import { toast } from "sonner";
@@ -135,6 +137,8 @@ function StrmContent() {
   const [copyOpen, setCopyOpen] = useState(false);
   const [archivePreset, setArchivePreset] = useState<ArchivePreset | null>(null);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [cleanPreset, setCleanPreset] = useState<CleanArchivePreset | null>(null);
+  const [cleanOpen, setCleanOpen] = useState(false);
 
   const openScan = (p: string) => {
     setScanPath(p);
@@ -428,6 +432,17 @@ function StrmContent() {
                   <Archive />
                   归档当前目录到暂存区
                 </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    afterMenuClosed(() => {
+                      setCleanPreset({ taskId: b.taskId });
+                      setCleanOpen(true);
+                    })
+                  }
+                >
+                  <ArchiveX />
+                  清理归档
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </>
@@ -613,6 +628,7 @@ function StrmContent() {
       <RewriteDialog target={rewritePath} onOpenChange={(open) => !open && setRewritePath(null)} taskId={b.taskId} onDone={() => void b.refresh()} />
       <AddCopyDialog open={copyOpen} onOpenChange={setCopyOpen} preset={copyPreset} />
       <ArchiveDialog open={archiveOpen} onOpenChange={setArchiveOpen} preset={archivePreset} onDone={() => void b.refresh()} />
+      <CleanArchiveDialog open={cleanOpen} onOpenChange={setCleanOpen} preset={cleanPreset} />
     </div>
   );
 }

@@ -93,3 +93,46 @@ test("POST /api/drive/archive：会话收一个文件进归档；参数不对 40
   assert.ok(fake.tree.get("/tv/归档/Show/E02.mkv"));
   assert.equal((await app.inject({ method: "POST", url: "/api/drive/archive", payload: { taskId: "t1", paths: ["Show"] } })).statusCode, 401, "没有 token 一律 401");
 });
+
+test("GET /api/drive/archive 列归档一层（只读令牌也能看）；POST /api/drive/archive/clean 删：会话和完全令牌能用，写令牌 403；参数不对 400、任务不存在 404", async () => {
+  const get = (taskId: string, headers: Record<string, string> = auth) => app.inject({ method: "GET", url: `/api/drive/archive?taskId=${encodeURIComponent(taskId)}`, headers });
+  const clean = (body: Record<string, unknown>, headers: Record<string, string> = auth) => app.inject({ method: "POST", url: "/api/drive/archive/clean", headers, payload: body });
+  fake.tree.addFile("/tv/归档/Show/E03.mkv", { size: 5 });
+  fake.tree.addFile("/tv/归档/lone.mkv", { size: 9 });
+
+  const readOnly = createApiToken({ name: "只读 2", scopes: ["read"], toolsets: ["transfer"], expiresAt: null }).token;
+  const listed = await get("t1", { authorization: `Bearer ${readOnly}` });
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.deepEqual(listed.json(), {
+    archiveDir: "/tv/归档",
+    exists: true,
+    items: [
+      { path: "Show", name: "Show", isDir: true },
+      { path: "lone.mkv", name: "lone.mkv", isDir: false, size: 9 },
+    ],
+  });
+  assert.equal((await get("没有")).statusCode, 404);
+  assert.equal((await app.inject({ method: "GET", url: "/api/drive/archive", headers: auth })).statusCode, 400, "没给 taskId");
+
+  assert.equal((await clean({ taskId: "t1", paths: ["lone.mkv"] }, { authorization: `Bearer ${readOnly}` })).statusCode, 403);
+  const write = createApiToken({ name: "写 2", scopes: ["read", "run", "write"], toolsets: ["transfer"], expiresAt: null }).token;
+  assert.equal((await clean({ taskId: "t1", paths: ["lone.mkv"] }, { authorization: `Bearer ${write}` })).statusCode, 403, "删除要完全档");
+  assert.ok(fake.tree.get("/tv/归档/lone.mkv"), "被拒的没动");
+  assert.equal((await clean({ taskId: "t1" })).statusCode, 400, "paths 和 all 都没给");
+  assert.equal((await clean({ taskId: "t1", paths: ["lone.mkv"], all: true })).statusCode, 400, "paths 和 all 一起给");
+  assert.equal((await clean({ taskId: "没有", all: true })).statusCode, 404);
+
+  const res = await clean({ taskId: "t1", paths: ["lone.mkv", "没有的.mkv"] });
+  assert.equal(res.statusCode, 200, res.body);
+  const body = res.json() as { done: number; archiveDir: string; items: Array<{ path: string; outcome: string }> };
+  assert.equal(body.done, 1);
+  assert.deepEqual(body.items.map((i) => [i.path, i.outcome]), [["lone.mkv", "deleted"], ["没有的.mkv", "missing"]]);
+  assert.equal(fake.tree.get("/tv/归档/lone.mkv"), undefined);
+
+  const full = createApiToken({ name: "完全", scopes: ["read", "run", "write", "danger"], toolsets: ["transfer"], expiresAt: null }).token;
+  const viaToken = await clean({ taskId: "t1", all: true }, { authorization: `Bearer ${full}` });
+  assert.equal(viaToken.statusCode, 200, viaToken.body);
+  assert.deepEqual(viaToken.json().items.map((i: { path: string; outcome: string }) => [i.path, i.outcome]), [["Show", "deleted"]]);
+  assert.ok(fake.tree.get("/tv/归档"), "归档目录本身留着");
+  assert.equal((await app.inject({ method: "POST", url: "/api/drive/archive/clean", payload: { taskId: "t1", all: true } })).statusCode, 401, "没有 token 一律 401");
+});

@@ -1,5 +1,5 @@
 /**
- * 转存与云下载工具集：看网盘目录、归档到暂存区、看分享、转存分享、加 115 云下载、看云下载列表。
+ * 转存与云下载工具集：看网盘目录、归档到暂存区、清理归档、看分享、转存分享、加 115 云下载、看云下载列表。
  *
  * 分享里的文件名、标题是第三方内容：只放在数据字段里，不拼进 next / hint 这类提示句。
  */
@@ -31,12 +31,13 @@ import {
 } from "../../share/receive.js";
 import { withAfterCopy, type CopyOutcome } from "../../copy/service.js";
 import { ARCHIVE_MAX, archiveToStaging, type ArchiveItem, type ArchiveItemOutcome, type ArchiveSummary } from "../../copy/archive.js";
+import { CLEAN_MAX, cleanArchive, listArchive, uniqueArchivePaths, type ArchiveListing, type CleanItem, type CleanItemOutcome, type CleanSummary } from "../../copy/archive-clean.js";
 import { HttpError } from "../../../lib/http-error.js";
 import { copyBlockerFor, copyDstProblem, copyOptionsFor, normConfigDir } from "../../copy/paths.js";
 import { isSafeItemName } from "../../strm/share-strm.js";
 import { normalizeSubPath } from "../../strm/naming.js";
 import { hasToolset } from "../access.js";
-import { REMOTE_READ, ToolError, defineTool } from "../define.js";
+import { REMOTE_READ, ToolError, confirmFirst, defineTool } from "../define.js";
 import { fmtTime, openInUi, page } from "../format.js";
 import { JOB_RETENTION_MS, latestJob, startJob, viewJob, waitForJob, type Job, type JobView } from "../jobs.js";
 import { resolveTask, taskBrief } from "../resolve.js";
@@ -231,6 +232,132 @@ export const driveArchiveTool = defineTool({
       throw new ToolError(code, error, hint, { ...extra, jobId: job.id });
     }
     return { state: "done", jobId: job.id, ...archiveView(view.result as ArchiveSummary, task) };
+  },
+});
+
+/* ------------------------------- 清理归档 ------------------------------- */
+
+/** 归档一层最多列多少条给模型看 */
+const CLEAN_LIST_LIMIT = 200;
+
+const CLEAN_OUTCOME_TEXT: Record<CleanItemOutcome, string> = {
+  deleted: "已删除",
+  missing: "归档里没有这条路径",
+  failed: "删除没成",
+  skipped: "前面一条碰上网络问题，这条没试",
+};
+
+/** 只列：归档里有什么、要删怎么传 */
+function archiveListView(r: ArchiveListing, task: TaskDefinition): Record<string, unknown> {
+  const { items, total, truncated } = page(r.items, CLEAN_LIST_LIMIT, "要删的用 paths 指；要清空整个归档传 all: true。");
+  const note = !r.exists ? "这个任务还没有归档目录（没归档过东西）。" : r.items.length === 0 ? "归档目录是空的。" : `归档里有 ${r.items.length} 项（只列一层，就是原来的作品 / 目录名）。`;
+  return {
+    state: "listed",
+    task: taskBrief(task),
+    archiveDir: r.archiveDir,
+    exists: r.exists,
+    items: items.map((i) => ({ ...i, ...(i.modifiedAt ? { modifiedAtText: fmtTime(i.modifiedAt) } : {}) })),
+    total,
+    ...(truncated ? { truncated } : {}),
+    note,
+    ...(r.items.length > 0 ? { next: "把清单给用户看；要删的话得到同意后再调一次，传 paths（items 里的 path）或 all: true。删掉的进回收站，不可逆。" } : {}),
+  };
+}
+
+/** drive_archive_clean 删完的结果：逐条说下场，外加一句总结和下一步 */
+function cleanView(r: CleanSummary, task: TaskDefinition): Record<string, unknown> {
+  const count = (o: CleanItemOutcome) => r.items.filter((i) => i.outcome === o).length;
+  const parts = [
+    r.done > 0 ? `从网盘上删掉 ${r.done} 条（115 / 夸克进回收站，OpenList 看存储后端）` : "",
+    count("missing") > 0 ? `${count("missing")} 条归档里本来就没有` : "",
+    count("failed") + count("skipped") > 0 ? `${count("failed") + count("skipped")} 条没成，原因见 items` : "",
+  ].filter(Boolean);
+  return {
+    task: taskBrief(task),
+    archiveDir: r.archiveDir,
+    done: r.done,
+    items: r.items.map((i: CleanItem) => ({ ...i, outcomeText: CLEAN_OUTCOME_TEXT[i.outcome] })),
+    note: parts.length ? `${parts.join("；")}。` : "归档里没有东西，没删任何一条。",
+    ...(count("failed") + count("skipped") > 0 ? { next: "没成的稍后再调一次（已经删掉的会记成归档里没有，不会重复）。" } : {}),
+  };
+}
+
+/** 服务层的 HttpError 换成给模型看的说法 */
+function cleanError(err: unknown): unknown {
+  if (!(err instanceof HttpError)) return err;
+  const code = typeof err.extra.code === "string" ? err.extra.code : undefined;
+  if (code === "VALIDATION") return new ToolError(code, err.message, "先不传 paths / all 调一次看归档里有什么，paths 用结果里 items 的 path（相对归档目录）；要清空整个归档传 all: true。");
+  if (code === "UNSUPPORTED") return new ToolError(code, err.message);
+  return err;
+}
+
+export const driveArchiveCleanTool = defineTool({
+  name: "drive_archive_clean",
+  title: "清理归档",
+  description: `看一个任务的归档目录（暂存区，任务目录下的「归档」）里有什么，把不要了的从网盘上删掉。不给 paths 也不给 all 时只列、不删：归档目录一层的条目（名字、目录还是文件、大小、修改时间；115 没有时间），一层就是原来的作品 / 目录名。给 paths（相对归档目录，用列出来的 items 里的 path，最多 ${CLEAN_MAX} 条）或 all: true 就把它们从网盘上删掉：115 / 夸克进回收站、过期清空，OpenList 看存储后端；**不可逆。先不传 paths / all 列一遍，把要删哪些告诉用户，得到同意再传 paths / all 删。** 归档里的东西没有本地 strm，Emby 不受影响；用户想留的，让他先到网盘里挪回原处。不删「归档」目录本身。${ARCHIVE_INLINE_WAIT_MS / 1000} 秒内做完直接返回结果，做不完返回 jobId，用 job_status 等（结果保留 ${JOB_RETENTION_MS / 60000} 分钟）。`,
+  scope: "danger",
+  toolset: "transfer",
+  annotations: { readOnly: false, destructive: true, idempotent: true, openWorld: true },
+  input: z.object({
+    task: z.string().min(1).max(500).describe("哪个任务（任务 id，或网盘路径 / 本地路径 / 它们的最后一段）"),
+    paths: z.array(z.string().min(1).max(1000)).min(1).max(CLEAN_MAX).optional().describe(`要删的条目，相对归档目录（列出来的 items 里的 path），最多 ${CLEAN_MAX} 条；和 all 二选一`),
+    all: z.boolean().optional().describe("true 就删掉归档目录这一层的全部条目（清空归档）；和 paths 二选一"),
+  }),
+  async run(args, ctx) {
+    const task = resolveTask(args.task);
+    if (args.paths && args.all) throw new ToolError("VALIDATION", "paths 和 all 二选一：要清空整个归档目录就只传 all", "要删指定的几条就只传 paths。");
+    if (!args.paths && !args.all) {
+      try {
+        return archiveListView(await listArchive(task, ctx.signal), task);
+      } catch (err) {
+        throw cleanError(err);
+      }
+    }
+    // 确认框里只说几条、进回收站，不放网盘里的名字（常常来自别人的分享）；paths 先归一，重复的、父目录带着的不多算
+    let paths: string[] | undefined;
+    let count: number;
+    try {
+      if (args.paths) {
+        paths = uniqueArchivePaths(args.paths);
+        count = paths.length;
+      } else {
+        const listing = await listArchive(task, ctx.signal);
+        // 空的不用问、也不用开作业：和删完的结果一个形状
+        if (listing.items.length === 0) return { state: "done", ...cleanView({ done: 0, archiveDir: listing.archiveDir, items: [] }, task) };
+        count = listing.items.length;
+      }
+    } catch (err) {
+      throw cleanError(err);
+    }
+    confirmFirst(ctx, `从网盘上删掉「${taskBrief(task).label}」归档目录里的 ${count} 项${args.all ? "（清空整个归档）" : ""}：115 / 夸克进回收站，不可逆。`);
+    const job = startJob("drive_archive_clean", `清理 ${task.account} · ${task.originPath} 的归档，${count} 条`, async (report) => {
+      try {
+        // 不传请求的 signal：客户端断开只是不等了，删到哪算哪，再调一次会说哪些已经不在
+        return await cleanArchive({
+          task,
+          paths,
+          all: args.all,
+          onProgress: (done, total) => report({ done, total, message: `删除中 ${done}/${total}` }),
+        });
+      } catch (err) {
+        throw cleanError(err);
+      }
+    });
+    await waitForJob(job, ARCHIVE_INLINE_WAIT_MS, ctx.signal);
+    const view = viewJob(job);
+    if (view.status === "running") {
+      return {
+        state: "running",
+        jobId: job.id,
+        message: "还在逐条删（网盘接口一条一两秒）",
+        next: `用 job_status(jobId: "${job.id}", waitSeconds: 60) 等结果`,
+      };
+    }
+    if (view.status === "failed") {
+      const { error, code, hint, ...extra } = view.failure ?? { error: "清理归档失败", code: "CLEAN_FAILED" };
+      throw new ToolError(code, error, hint, { ...extra, jobId: job.id });
+    }
+    return { state: "done", jobId: job.id, ...cleanView(view.result as CleanSummary, task) };
   },
 });
 
