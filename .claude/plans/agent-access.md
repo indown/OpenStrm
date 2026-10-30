@@ -2228,6 +2228,14 @@ P3 做完（HDHive 两个工具除外，见上面的范围），没提交。工�
 
 收尾：lab 后端已停（4100 没有监听）、lab 目录（库拷贝、口令、两个令牌、脚本）已删；网盘上没有新增内容（取消不产生文件，那条任务下到 48% 就撤了）。副作用：这条任务如果是用户在生产 OpenStrm 里加的，生产库里有它的回执，生产的回执循环会在连续 3 轮找不到后记成「任务已不在 115 的云下载列表里」并发一条云下载失败的通知。
 
+### 发布（2026-10-30）
+
+- 用户「提交发版吧」。提交：`252881b` feat(agent): add offline_cancel tool for 115 cloud downloads；`1611c55` docs(plans)；`c988b74` chore(release): v2.21.0-rc.1（只动三个 package.json）。没评审（用户没要）。
+- tag `v2.21.0-rc.1` = c988b74，推到 origin 的 v2 和 tag；main 没动（a3a6377 = v2.20.0）。rc 而不是正式版：CONTRIBUTING 要求正式版前至少跑过一轮 rc，用户没指定。
+- Release #118 四个作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）和 CI@v2 #148 全绿；Docker Hub `v2.21.0-rc.1` digest f33a83b044d4（amd64 + arm64），`latest` 仍是 v2.20.0 的 2a5e52970214；GitHub Release 标 prerelease。盯梢用的是本会话 scratchpad 的 `poll_release.py`（先拿 v2.20.0 验过命中分支）。
+- 没有迁移。
+- 正式版说明要写的「智能体工具变更」：新工具 `offline_cancel`（取消 115 云下载，`deleteFiles` 要完全档并当面确认）；`offline_list` 的 tasks / strmPending / copyPending 多了 `infoHash`；REST `POST /api/115/offline/delete` 对令牌开放（deleteFiles 要删除档），响应多了 `account`、`followupsDropped`；ChatGPT 缓存工具列表，要在它的设置里手动刷新。
+
 ## 核实记录
 
 2026-09-18 查的官方来源：
