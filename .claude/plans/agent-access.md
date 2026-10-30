@@ -2236,6 +2236,8 @@ P3 做完（HDHive 两个工具除外，见上面的范围），没提交。工�
 - 没有迁移。
 - 正式版说明要写的「智能体工具变更」：新工具 `offline_cancel`（取消 115 云下载，`deleteFiles` 要完全档并当面确认）；`offline_list` 的 tasks / strmPending / copyPending 多了 `infoHash`；REST `POST /api/115/offline/delete` 对令牌开放（deleteFiles 要删除档），响应多了 `account`、`followupsDropped`；ChatGPT 缓存工具列表，要在它的设置里手动刷新。
 
+**v2.21.0 正式版（2026-10-30，同日）**：用户「发正式版吧」。`2b28506` chore(release): v2.21.0 = rc.1 + 发布记录 a845a82 + 版本号；tag `v2.21.0`，推到 v2 和 tag，`main` 从 a3a6377 快进到 2b28506（纯 fast-forward）。Release #119 四个作业 + CI@v2 #150 + CI@main #151 全绿；Docker Hub `v2.21.0` 与 `latest` 同为 2456e921409c（amd64 + arm64）；GitHub Release 非 prerelease 且是仓库最新。没有迁移。升级说明（上面那段「智能体工具变更」）交用户手动贴到 Release 页。
+
 ## 核实记录
 
 2026-09-18 查的官方来源：
