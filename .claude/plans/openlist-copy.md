@@ -913,3 +913,9 @@ Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merg
 功能合成一个提交 afb0c65，方案记录 04f6b6d（连同工作区里压着的起播诊断选条目方案一起带上），`chore(release): v2.20.0-rc.1` = df13b8c，tag 已推，main 未动（仍在 4163124 = v2.19.0）。没有迁移。没评审（用户跳过）。
 Release #116 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）与 CI #143 全绿；GitHub Release 是 prerelease；Docker Hub `v2.20.0-rc.1` 镜像 ee1dfc93cb11（amd64 652e900251aa / arm64 c53fbf560c16），latest 仍是 v2.19.0 的 8bc505cef31e。
 正式版说明要写的：strm 管理页「工具」多了「清理归档」；新接口 `GET /api/drive/archive`、`POST /api/drive/archive/clean`；智能体工具 `drive_archive_clean`（删除档，工具 44 → 45，选「全部」工具集的老令牌不用改，它在转存那一组里）。
+
+**发布：v2.20.0（2026-10-30，用户「发一个正式版吧」）**
+
+发布提交 a3a6377（`chore(release): v2.20.0`），tag `v2.20.0`，范围 `v2.19.0..v2.20.0`：f5713df 测试、afb0c65 清理归档（rc.1 之后没动）、1039472 ChatGPT 接入说明（README + 设置页一句文案，发版途中用户提的，记录在 agent-access.md「核实记录」）和方案记录。没有迁移。没评审（rc.1 时用户跳过，正式版没补）；真机是 2026-10-28 做的，见上节「真机验证」，rc.1 之后的改动只有文档和那一句文案。
+本地：tsc / eslint、后端 1682 条、前端 11 条全过（版本号改完后跑的）；之后改了设置页文案，复跑前端 tsc / eslint，并用全新 scratch 库 + 真 Chrome 冒烟（浅色 / 深色 / 宽屏 / 390px 窄屏，正常折行、无横向溢出、控制台无错），实验环境已删。
+Release #117 四作业 + CI@v2 #145 + CI@main #146 全绿；Docker Hub `v2.20.0` 与 `latest` 同为 2a5e52970214（amd64 665164e9d869 / arm64 84abc709a208）；GitHub Release 非 prerelease、是仓库最新。main 从 f5713df 快进到 a3a6377，main == v2 == v2.20.0。更正：上面 rc.1 记录写的 main「仍在 4163124」不对，当时 main 已在 f5713df（比 v2.19.0 多 665d461 方案记录和 f5713df 测试，都不带功能代码），这次仍是纯快进。升级说明交用户手动贴。
