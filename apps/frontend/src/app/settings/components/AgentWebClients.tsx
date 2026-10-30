@@ -641,7 +641,7 @@ export function AgentWebClients({
           </div>
           <ul className="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
             <li>claude.ai：设置 → 连接器（Connectors）→ 添加自定义连接器，填上面的地址，点「连接」会打开授权页。</li>
-            <li>ChatGPT：设置里打开开发者模式（Developer mode），到 chatgpt.com/plugins 点「+」，填上面的地址，鉴权选 OAuth。</li>
+            <li>ChatGPT：设置里打开开发者模式（Developer mode），到 chatgpt.com/plugins 点「+」，填上面的地址，鉴权选 OAuth。只能在网页版上添加（手机 App 目前没有入口），加好之后手机 App 上也能用。</li>
             <li>
               {passwordApproval && sharedDomain
                 ? "授权页上：选档位、输入这个界面的登录密码，批准后自动跳回客户端。在别的设备上批准的话，到下面「待批准」输入授权页上的配对码。"
