@@ -5,7 +5,7 @@
 想让 AI agent 直接操作 OpenStrm，而且三类地方都要能用（2026-09-18 用户确认）：
 
 - **局域网里的本地客户端**：Claude Code、Codex（命令行 / IDE）；
-- **网页**：claude.ai、ChatGPT。ChatGPT 的 MCP 应用只在网页上能用，手机 App 用不了（2026-09-18 核实）；Claude 手机 App 能不能用网页上加的连接器，落地时实测；
+- **网页**：claude.ai、ChatGPT。~~ChatGPT 的 MCP 应用只在网页上能用，手机 App 用不了（2026-09-18 核实）~~：只能在网页上添加，手机 App 目前没有入口，加好之后手机 App 上也能用（2026-10-30 用户确认）；Claude 手机 App 能不能用网页上加的连接器，落地时实测；
 - **自己写的 agent**：通过 Claude API / OpenAI API 调用。
 
 典型的话是这样的：
@@ -564,7 +564,7 @@ claude mcp add --transport http openstrm http://<nas>:3000/mcp --header "Authori
   2. 到 chatgpt.com/plugins 点「+」，填名称、说明和 `<公网地址>/mcp`，选 OAuth；
   3. 在对话框的「Developer mode」工具里选它用；工具有变动时点 Refresh 重新拉。
 - 自己用不用提交应用目录；提交目录只是为了公开上架。
-- **只能在网页上用**：官方问答明说 MCP 应用在手机上不可用。
+- ~~**只能在网页上用**：官方问答明说 MCP 应用在手机上不可用。~~ **只能在网页上添加**（2026-10-30 用户确认）：手机 App 目前没有添加入口，但网页上加好之后手机 App 上也能用。
 - **套餐说法不一致，要实测**：
   - 开发文档说 Pro、Plus、Business、Enterprise、Edu 的网页端都能用。
   - 帮助中心说带写操作的完整 MCP 目前只对 Business / Enterprise / Edu 灰度，Pro 在 developer mode 下只能读，Plus 没提。
@@ -840,7 +840,7 @@ apps/frontend/src/app/settings/components/AgentSection.tsx
 - README 加一节公网部署：单独子域名；反代（Caddy、nginx）和 Cloudflare Tunnel 的按路径放行；Cloudflare 的 Access、WAF、Bot Fight Mode 注意事项。
 - 真机验收：
   - 反代和 Cloudflare Tunnel 各搭一遍；
-  - claude.ai 网页跑通上面两条流程；ChatGPT 网页按探针结果验（能写就跑两条流程，只读就验查询和「在 OpenStrm 里打开」）；Claude 手机 App 调一次（ChatGPT 手机端不支持 MCP 应用）；Codex 走公网地址连一次；
+  - claude.ai 网页跑通上面两条流程；ChatGPT 网页按探针结果验（能写就跑两条流程，只读就验查询和「在 OpenStrm 里打开」）；Claude 手机 App 调一次（~~ChatGPT 手机端不支持 MCP 应用~~：手机端不能添加，网页上加好后能用，2026-10-30 更正）；Codex 走公网地址连一次；
   - Open WebUI 再用 OAuth 连一次；其它开源项目按需补：Dify（请求头）、n8n（OAuth + DCR）、Cherry Studio（默认先试 SSE 的回退）、Home Assistant（预注册客户端）。结果记进 README 的「已验证的客户端」表。
 
 **P3 补齐工具**
@@ -2175,6 +2175,8 @@ P3 做完（HDHive 两个工具除外，见上面的范围），没提交。工�
 2026-09-21 查的非 443 端口：claude.ai 自定义连接器的官方文档（claude.com/docs/connectors/custom/remote-mcp）没写端口限制；anthropics/claude-ai-mcp 的 issue #85（:5050）、#373（:44366）都是带非 443 端口的地址连不上、服务器日志里看不到 Anthropic 的请求；Brendan Long 2026-07-04 的排障文章直说 Claude 的后端只从 443 往外连。ChatGPT 没查到明确说法。
 
 2026-09-21 为「共用域名」查的：Home Assistant 的 MCP Server 集成文档（home-assistant.io/integrations/mcp_server，`/api/mcp`、OAuth、只做 CIMD）和 HTTP 集成文档（`use_x_forwarded_for`、`trusted_proxies`）；Cloudflare One 的 Application paths 文档（按路径建应用、更具体的优先）和 Bypass 放行 webhook 的做法；Gitea 的 `REVERSE_PROXY_TRUSTED_PROXIES` 默认值与 CVE-2026-20896（GHSA-f75j-4cw6-rmx4）。
+
+2026-10-30 用户确认 ChatGPT 的 MCP 应用：只能在网页端添加，手机 App 目前没有添加入口；网页上加好之后手机 App 上就能用。更正了上面 2026-09-18 根据官方问答写的「只在网页上能用」；README 和设置页「网页客户端」的接入说明同日改了。
 
 还没核实的：
 
