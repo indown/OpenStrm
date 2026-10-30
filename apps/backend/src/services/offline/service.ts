@@ -159,11 +159,13 @@ function addFollowups(items: OfflineFollowup[]): void {
   saveFollowups([...items, ...rows]);
 }
 
-function dropFollowups(account: string, infoHashes: string[]): void {
+/** 撤掉这些任务的回执（不管兑现没兑现），回撤了几条 */
+function dropFollowups(account: string, infoHashes: string[]): number {
   const drop = new Set(infoHashes);
   const rows = listFollowups();
   const kept = rows.filter((f) => !(f.account === account && drop.has(f.infoHash)));
   if (kept.length !== rows.length) saveFollowups(kept);
+  return rows.length - kept.length;
 }
 
 const hasPending = (): boolean => listFollowups().some((f) => f.status === "pending");
@@ -475,19 +477,23 @@ export async function listOfflineTasks(accountName: string | undefined, page = 1
   };
 }
 
+/**
+ * 从 115 的云下载列表里删掉任务（正在下的就停下）；deleteFiles 连下载到网盘里的文件一起删。
+ * 这些任务的回执一并撤掉，回撤了几条：智能体要告诉用户「下完生成 strm / 复制」也跟着没了
+ */
 export async function removeOfflineTasks(
   accountName: string | undefined,
   infoHashes: string[],
   deleteFiles: boolean,
-): Promise<{ removed: number }> {
+): Promise<{ account: string; removed: number; followupsDropped: number }> {
   const account = resolveAccount115(accountName);
   try {
     await offlineRemove(account, infoHashes, deleteFiles);
   } catch (err) {
     throw upstream(err, "删除云下载任务失败");
   }
-  dropFollowups(account.name, infoHashes);
-  return { removed: infoHashes.length };
+  const followupsDropped = dropFollowups(account.name, infoHashes);
+  return { account: account.name, removed: infoHashes.length, followupsDropped };
 }
 
 export async function clearOfflineTasks(accountName: string | undefined, flag: OfflineClearFlag): Promise<void> {

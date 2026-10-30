@@ -1,5 +1,5 @@
 /**
- * 转存与云下载工具集：看网盘目录、归档到暂存区、清理归档、看分享、转存分享、加 115 云下载、看云下载列表。
+ * 转存与云下载工具集：看网盘目录、归档到暂存区、清理归档、看分享、转存分享、加 115 云下载、看云下载列表、取消云下载。
  *
  * 分享里的文件名、标题是第三方内容：只放在数据字段里，不拼进 next / hint 这类提示句。
  */
@@ -17,7 +17,7 @@ import { listWholeShareDir } from "../../drive/share-walk.js";
 import { splitPath, type DriveProvider, type ShareEntry, type ShareRef } from "../../drive/types.js";
 import { scopeFromSelection } from "../../follow/diff.js";
 import { createFollowAfterSave } from "../../follow/service.js";
-import { addOfflineTasks, listOfflineTasks, type AddOfflineResponse } from "../../offline/service.js";
+import { addOfflineTasks, listOfflineTasks, removeOfflineTasks, type AddOfflineResponse } from "../../offline/service.js";
 import { events } from "../../events.js";
 import { autoOrganizeBusy, autoOrganizeFor, effectiveAutoMode } from "../../organize/auto.js";
 import {
@@ -36,7 +36,7 @@ import { HttpError } from "../../../lib/http-error.js";
 import { copyBlockerFor, copyDstProblem, copyOptionsFor, normConfigDir } from "../../copy/paths.js";
 import { isSafeItemName } from "../../strm/share-strm.js";
 import { normalizeSubPath } from "../../strm/naming.js";
-import { hasToolset } from "../access.js";
+import { hasScope, hasToolset } from "../access.js";
 import { REMOTE_READ, ToolError, confirmFirst, defineTool } from "../define.js";
 import { fmtTime, openInUi, page } from "../format.js";
 import { JOB_RETENTION_MS, latestJob, startJob, viewJob, waitForJob, type Job, type JobView } from "../jobs.js";
@@ -1091,7 +1091,7 @@ export const offlineListTool = defineTool({
   name: "offline_list",
   title: "115 云下载列表",
   description:
-    "看 115 云下载的列表（按页，新的在前）和剩余配额，以及下完要做的事的回执：「下完生成 strm」的（strmPending / strmRecent，带 copyTo 的生成完还会复制到 OpenList）和「下完只复制到 OpenList」的（copyPending / copyRecent）。复制本身的进度用 copy_list 看。",
+    "看 115 云下载的列表（按页，新的在前）和剩余配额，以及下完要做的事的回执：「下完生成 strm」的（strmPending / strmRecent，带 copyTo 的生成完还会复制到 OpenList）和「下完只复制到 OpenList」的（copyPending / copyRecent）。复制本身的进度用 copy_list 看。要取消 / 删掉任务用 offline_cancel，传这里给的 infoHash。",
   scope: "read",
   toolset: "transfer",
   annotations: REMOTE_READ,
@@ -1111,7 +1111,9 @@ export const offlineListTool = defineTool({
       pageCount: res.pageCount,
       count: res.count,
       quota: res.quota,
+      // infoHash 是任务的身份：offline_cancel 按它取消
       tasks: res.tasks.map((t) => ({
+        infoHash: t.infoHash,
         name: t.name,
         state: t.state,
         status: t.statusText,
@@ -1119,20 +1121,66 @@ export const offlineListTool = defineTool({
         size: humanSize(t.size),
         addedAt: fmtTime(t.addTime * 1000),
       })),
-      strmPending: followups.filter((f) => f.status === "pending").map((f) => ({ name: f.name, addedAt: fmtTime(f.addedAt), ...copyTo(f) })),
+      strmPending: followups.filter((f) => f.status === "pending").map((f) => ({ infoHash: f.infoHash, name: f.name, addedAt: fmtTime(f.addedAt), ...copyTo(f) })),
       strmRecent: followups
         .filter((f) => f.status !== "pending")
         .slice(0, 10)
         .map((f) => ({ name: f.name, status: f.status, detail: f.detail, at: fmtTime(f.doneAt ?? f.addedAt), ...copyTo(f) })),
       ...(copyOnly.length
         ? {
-            copyPending: copyOnly.filter((f) => f.status === "pending").map((f) => ({ name: f.name, addedAt: fmtTime(f.addedAt), ...copyTo(f) })),
+            copyPending: copyOnly.filter((f) => f.status === "pending").map((f) => ({ infoHash: f.infoHash, name: f.name, addedAt: fmtTime(f.addedAt), ...copyTo(f) })),
             copyRecent: copyOnly
               .filter((f) => f.status !== "pending")
               .slice(0, 10)
               .map((f) => ({ name: f.name, status: f.status, detail: f.detail, at: fmtTime(f.doneAt ?? f.addedAt), ...copyTo(f) })),
           }
         : {}),
+      ...openInUi("/offline"),
+    };
+  },
+});
+
+/* ------------------------------- 取消云下载 ------------------------------- */
+
+const CANCEL_MAX = 100;
+
+export const offlineCancelTool = defineTool({
+  name: "offline_cancel",
+  title: "取消 115 云下载",
+  description: `取消 115 云下载任务：从云下载列表里去掉，正在下的就停下；已经下完的只是从列表里去掉，下载到网盘里的文件留着。deleteFiles 为 true 时连下载到网盘里的文件 / 目录一起删掉（令牌要有「删除」档）。登记过的「下完生成 strm」「下完复制到 OpenList」回执一并撤掉。**这会改 115 的云下载列表，deleteFiles 时还会删网盘上的文件：调用前先把要取消哪几个、删不删文件告诉用户，得到同意再调用。** infoHash 从 offline_list（tasks / strmPending / copyPending 里的 infoHash）或 offline_add 的结果里拿，一次最多 ${CANCEL_MAX} 个。只支持 115 账号。`,
+  scope: "write",
+  toolset: "transfer",
+  annotations: { readOnly: false, destructive: true, idempotent: true, openWorld: true },
+  input: z.object({
+    infoHashes: z.array(z.string().min(1).max(200)).min(1).max(CANCEL_MAX).describe(`要取消的任务的 infoHash（offline_list / offline_add 给的），最多 ${CANCEL_MAX} 个`),
+    account: z.string().max(200).optional().describe("115 账号名；不填用第一个 115 账号"),
+    deleteFiles: z.boolean().optional().describe("true 连下载到网盘里的文件 / 目录一起删掉（要「删除」档）；不填或 false 只取消任务，文件留着"),
+  }),
+  async run(args, ctx) {
+    const hashes = [...new Set(args.infoHashes.map((h) => h.trim()).filter(Boolean))];
+    if (hashes.length === 0) throw new ToolError("VALIDATION", "infoHashes 里没有有效的 infoHash", "用 offline_list 看列表，传 tasks 里的 infoHash。");
+    const deleteFiles = args.deleteFiles === true;
+    // 删网盘上的文件是删东西：和 copy_add / copy_after 的删源一样，按参数提到「删除」档
+    if (deleteFiles && !hasScope(ctx.token, "danger")) {
+      throw new ToolError(
+        "INSUFFICIENT_SCOPE",
+        "连下载到网盘里的文件一起删要「删除与花费」档，这个令牌没有",
+        "不传 deleteFiles 只取消任务、文件留着；要删文件请用户在 OpenStrm 的云下载页删，或者在设置页把这个令牌 / 客户端的权限改成完全。",
+        { required: "danger" },
+      );
+    }
+    // 确认框里只说个数：任务名来自种子 / 链接，是第三方内容
+    if (deleteFiles) confirmFirst(ctx, `取消 ${hashes.length} 个 115 云下载任务，并删掉它们下载到网盘里的文件。`);
+    const res = await removeOfflineTasks(args.account?.trim() || undefined, hashes, deleteFiles);
+    const dropped = res.followupsDropped;
+    return {
+      account: res.account,
+      cancelled: hashes.length,
+      infoHashes: hashes,
+      deleteFiles,
+      followupsDropped: dropped,
+      note: `已让 115 取消 ${hashes.length} 个任务${deleteFiles ? "，并删掉下载到网盘里的文件" : "（已经下完的只是从列表里去掉，文件留着）"}${dropped ? `；${dropped} 条「下完生成 strm / 复制」的回执一并撤了` : ""}。`,
+      next: "用 offline_list 看列表。",
       ...openInUi("/offline"),
     };
   },

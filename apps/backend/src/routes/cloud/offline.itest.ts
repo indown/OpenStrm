@@ -234,7 +234,7 @@ test("POST /api/115/offline/delete：hash[i] + flag，顺带清掉这些任务�
 
   const res = await call("POST", "/api/115/offline/delete", { infoHashes: ["hash0"], deleteFiles: true });
   assert.equal(res.statusCode, 200, res.body);
-  assert.deepEqual(res.json(), { success: true, removed: 1 });
+  assert.deepEqual(res.json(), { success: true, account: "acc", removed: 1, followupsDropped: 1 });
   const del = calls.find((c) => c.ac === "task_del");
   assert.equal(del?.method, "POST");
   assert.deepEqual(del?.params, { flag: 1, "hash[0]": "hash0" });

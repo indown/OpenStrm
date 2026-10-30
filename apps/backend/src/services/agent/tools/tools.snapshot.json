@@ -457,6 +457,43 @@
     }
   },
   {
+    "name": "offline_cancel",
+    "scope": "write",
+    "toolset": "transfer",
+    "annotations": {
+      "readOnly": false,
+      "destructive": true,
+      "idempotent": true,
+      "openWorld": true
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "infoHashes": {
+          "minItems": 1,
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "account": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "deleteFiles": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "infoHashes"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "organize_list",
     "scope": "read",
     "toolset": "organize",

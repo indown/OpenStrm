@@ -33,7 +33,7 @@ import { DATA_DIR } from "../../paths.js";
 import { setDriveProviderFactory } from "../../services/drive/registry.js";
 import { __test_resetFollows, listFollows, setFollowServiceDeps } from "../../services/follow/service.js";
 import { setOfflineTransport, type OfflineTransport } from "../../services/cloud-115/offline.js";
-import { __test_resetOffline, setOfflineServiceDeps } from "../../services/offline/service.js";
+import { __test_resetOffline, listFollowups, setOfflineServiceDeps } from "../../services/offline/service.js";
 import { __test_resetAgentQuota, takeAgentQuota } from "../../services/agent/rate-limit.js";
 import { __test_resetJobs } from "../../services/agent/jobs.js";
 import { __test_resetTransferCaches } from "../../services/agent/tools/transfer.js";
@@ -48,12 +48,17 @@ const empty: TaskDefinition = {
   id: "m-empty", account: "a", accountType: "115", originPath: "empty", targetPath: "mcp-itest/empty", strmPrefix: "/mnt/pan", removeExtraFiles: true,
 };
 
-/** 115 云下载接口的桩：链接里带 bad 的回失败；offlineWebFail 设了就让列表接口回这个（模拟登录超时） */
+/** 115 云下载接口的桩：链接里带 bad 的回失败；offlineWebFail 设了就让 web 接口回这个（模拟登录超时） */
 let offlineWebFail: Record<string, unknown> | null = null;
+/** 列表桩回的任务；取消的用例塞一条进去看 offline_list 带不带 infoHash */
+let offlineTasks: Record<string, unknown>[] = [];
+/** web 接口收到的调用：取消要看 task_del 带的 hash 和 flag */
+const offlineWebCalls: Array<{ ac: string; params: Record<string, unknown>; method: string }> = [];
 const offlineTransport: OfflineTransport = {
-  async web(_acc, ac) {
+  async web(_acc, ac, params, method) {
+    offlineWebCalls.push({ ac, params: { ...params }, method });
     if (offlineWebFail) return offlineWebFail;
-    if (ac === "task_lists") return { page: 1, page_count: 1, page_size: 30, count: 0, quota: 5, total: 10, tasks: [] };
+    if (ac === "task_lists") return { page: 1, page_count: 1, page_size: 30, count: offlineTasks.length, quota: 5, total: 10, tasks: offlineTasks };
     if (ac === "get_quota_info") return { state: true, quota: 5, total: 10 };
     return { state: true };
   },
@@ -145,8 +150,24 @@ beforeEach(() => {
   __test_resetAgentQuota();
 });
 
-async function connect(token: string, modern = false): Promise<Client> {
-  const client = new Client({ name: "mcp-itest", version: "1.0.0" }, modern ? { versionNegotiation: { mode: { pin: "2026-07-28" } } } : {});
+interface ConnectOpts {
+  modern?: boolean;
+  /** 声明 elicitation 并按这个答复确认框；不给就不声明 */
+  elicit?: (message: string) => { action: "accept" | "decline" | "cancel"; content?: Record<string, string | number | boolean | string[]> };
+}
+
+async function connect(token: string, opts: ConnectOpts = {}): Promise<Client> {
+  const client = new Client(
+    { name: "mcp-itest", version: "1.0.0" },
+    {
+      ...(opts.modern ? { versionNegotiation: { mode: { pin: "2026-07-28" } } } : {}),
+      ...(opts.elicit ? { capabilities: { elicitation: {} } } : {}),
+    },
+  );
+  if (opts.elicit) {
+    const answer = opts.elicit;
+    client.setRequestHandler("elicitation/create", async (request) => answer((request.params as { message: string }).message));
+  }
   const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${token}` } } });
   await client.connect(transport);
   return client;
@@ -221,7 +242,7 @@ test("老协议：2025-06-18 和 2025-11-25 的 initialize 都原样接住", asy
 
 test("只读令牌只看到只读工具；新旧两版协议的客户端都连得上", async () => {
   const legacy = await connect(readToken);
-  const modern = await connect(readToken, true);
+  const modern = await connect(readToken, { modern: true });
   try {
     for (const client of [legacy, modern]) {
       const { tools } = await client.listTools();
@@ -239,7 +260,7 @@ test("只读令牌只看到只读工具；新旧两版协议的客户端都连�
 
 test("prompts：「找片入库」和收藏夹的三个流程按令牌展开（只读令牌不提 share_save）；用不上的令牌不声明 prompts 能力", async () => {
   const read = await connect(readToken);
-  const daily = await connect(dailyToken, true);
+  const daily = await connect(dailyToken, { modern: true });
   const syncOnly = await connect(createApiToken({ name: "只同步", scopes: ["read"], toolsets: ["sync"], expiresAt: null }).token);
   try {
     const { prompts } = await read.listPrompts();
@@ -598,6 +619,77 @@ test("云下载：重复和认不出的链接不占名额；每条结果带着�
   } finally {
     offlineWebFail = null;
     await client.close();
+  }
+});
+
+test("云下载：取消 → 115 收到 task_del、回执一并撤掉；列表带 infoHash；连文件一起删要删除档、新协议客户端先确认", async () => {
+  const fullToken = createApiToken({ name: "完全", scopes: ["read", "run", "write", "danger"], toolsets: ["sync", "transfer"], expiresAt: null }).token;
+  const asked: string[] = [];
+  const daily = await connect(dailyToken);
+  const declining = await connect(fullToken, { modern: true, elicit: (m) => (asked.push(m), { action: "decline" }) });
+  const accepting = await connect(fullToken, { modern: true, elicit: (m) => (asked.push(m), { action: "accept", content: { confirm: true } }) });
+  const pendingHashes = () => listFollowups().filter((f) => f.account === "a" && f.status === "pending").map((f) => f.infoHash);
+  try {
+    const added = await call(daily, "offline_add", { urls: "magnet:?xt=urn:btih:one\nmagnet:?xt=urn:btih:two", task: "tv" });
+    assert.equal(added.data.added, 2, JSON.stringify(added.data));
+    assert.deepEqual(added.data.results.map((r: { infoHash: string }) => r.infoHash), ["h0", "h1"]);
+    assert.ok(pendingHashes().includes("h0") && pendingHashes().includes("h1"), "两条都登记了回执");
+
+    // 列表里每条带 infoHash（取消要用它指任务）；没兑现的回执也带
+    offlineTasks = [{ info_hash: "h0", name: "n0", status: 1, percentDone: 40, size: 10, add_time: 1, url: "magnet:?xt=urn:btih:one", file_id: "999", wp_path_id: "999", delete_file_id: "r", del_path: "n0", file_category: "1" }];
+    const list = await call(daily, "offline_list", {});
+    assert.equal(list.isError, false, JSON.stringify(list.data));
+    assert.equal(list.data.tasks[0].infoHash, "h0");
+    assert.ok(list.data.strmPending.some((f: { infoHash: string }) => f.infoHash === "h1"));
+
+    // 只取消：task_del 带 flag 0 和 hash（重复、带空白的归一），回执撤掉
+    offlineWebCalls.length = 0;
+    const cancelled = await call(daily, "offline_cancel", { infoHashes: ["h1", " h1 "] });
+    assert.equal(cancelled.isError, false, JSON.stringify(cancelled.data));
+    assert.equal(cancelled.data.cancelled, 1);
+    assert.equal(cancelled.data.followupsDropped, 1);
+    assert.equal(cancelled.data.deleteFiles, false);
+    const del = offlineWebCalls.find((c) => c.ac === "task_del");
+    assert.equal(del?.method, "POST");
+    assert.deepEqual(del?.params, { flag: 0, "hash[0]": "h1" });
+    assert.ok(!pendingHashes().includes("h1") && pendingHashes().includes("h0"), "只撤掉取消的那条的回执");
+
+    // 连文件一起删：日常档被拒，115 没收到
+    offlineWebCalls.length = 0;
+    const refused = await call(daily, "offline_cancel", { infoHashes: ["h0"], deleteFiles: true });
+    assert.equal(refused.isError, true);
+    assert.equal(refused.data.code, "INSUFFICIENT_SCOPE");
+    assert.equal(refused.data.required, "danger");
+    assert.equal(offlineWebCalls.length, 0);
+
+    // 完全档：新协议客户端先弹确认框，拒绝就不动；同意才带 flag 1 发给 115
+    const no = await call(declining, "offline_cancel", { infoHashes: ["h0"], deleteFiles: true });
+    assert.equal(no.isError, true);
+    assert.equal(no.data.code, "DECLINED");
+    assert.equal(asked.length, 1);
+    assert.match(asked[0], /取消 1 个 115 云下载任务.*删掉/);
+    assert.equal(offlineWebCalls.length, 0);
+    assert.ok(pendingHashes().includes("h0"));
+
+    const yes = await call(accepting, "offline_cancel", { infoHashes: ["h0"], deleteFiles: true });
+    assert.equal(yes.isError, false, JSON.stringify(yes.data));
+    assert.equal(asked.length, 2);
+    assert.equal(yes.data.deleteFiles, true);
+    assert.deepEqual(offlineWebCalls.find((c) => c.ac === "task_del")?.params, { flag: 1, "hash[0]": "h0" });
+    assert.ok(!pendingHashes().includes("h0"));
+
+    // 115 说登录超时：原话带回来，提示别反复重试
+    offlineWebFail = { state: false, errno: 990001, error: "登录超时，请重新登录" };
+    const failed = await call(daily, "offline_cancel", { infoHashes: ["h0"] });
+    assert.equal(failed.isError, true);
+    assert.match(failed.data.error, /登录超时/);
+    assert.match(failed.data.hint ?? "", /不要反复重试/);
+  } finally {
+    offlineWebFail = null;
+    offlineTasks = [];
+    await daily.close();
+    await declining.close();
+    await accepting.close();
   }
 });
 

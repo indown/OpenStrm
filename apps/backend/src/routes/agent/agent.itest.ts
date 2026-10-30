@@ -26,6 +26,7 @@ import organizeRoute from "../organize/index.js";
 import followRoute from "../follow/index.js";
 import strmRoute from "../strm/index.js";
 import copyRoute from "../copy/index.js";
+import offlineRoute from "../cloud/offline.js";
 import passwordRoute from "../auth/password.js";
 import { DEFAULT_AUTH } from "../../db/defaults.js";
 import { writeAuthPassword } from "../../db/repositories/auth.js";
@@ -50,7 +51,7 @@ before(async () => {
   registerErrorHandling(app);
   await app.register(authPlugin);
   await app.register(cronPlugin);
-  for (const route of [agentRoute, accountRoute, settingsRoute, taskRoute, taskStartRoute, shareRoute, backupRoute, passwordRoute, organizeRoute, followRoute, strmRoute, copyRoute]) {
+  for (const route of [agentRoute, accountRoute, settingsRoute, taskRoute, taskStartRoute, shareRoute, backupRoute, passwordRoute, organizeRoute, followRoute, strmRoute, copyRoute, offlineRoute]) {
     await app.register(route);
   }
   await app.ready();
@@ -160,6 +161,29 @@ test("档位：只读能列任务、不能开跑；转存分享另要 write", as
   const recv = calls.find((c) => c.tokenName === "只读 REST" && c.tool === "POST /api/share")!;
   assert.match(recv.args, /"action":"receive"/);
   assert.ok(recv.ip);
+});
+
+test("云下载删除接口：改网盘档能调，连文件一起删另要删除档；只读 403；没勾转存那一组的 403", async () => {
+  const mk = (name: string, scopes: string[], toolsets: string[]) => createApiToken({ name, scopes: scopes as AgentToken["scopes"], toolsets: toolsets as AgentToken["toolsets"], expiresAt: null }).token;
+  const read = mk("云下载只读", ["read"], ["transfer"]);
+  const daily = mk("云下载日常", ["read", "run", "write"], ["transfer"]);
+  const full = mk("云下载完全", ["read", "run", "write", "danger"], ["transfer"]);
+  const syncOnly = mk("云下载只管同步", ["read", "run", "write"], ["sync"]);
+  const del = (token: string, payload: Record<string, unknown>) => app.inject({ method: "POST", url: "/api/115/offline/delete", headers: bearer(token), payload });
+
+  const r403 = await del(read, { infoHashes: ["h"] });
+  assert.equal(r403.statusCode, 403, r403.body);
+  assert.equal(r403.json().code, "INSUFFICIENT_SCOPE");
+  const files403 = await del(daily, { infoHashes: ["h"], deleteFiles: true });
+  assert.equal(files403.statusCode, 403, files403.body);
+  assert.equal(files403.json().code, "INSUFFICIENT_SCOPE");
+  assert.equal(files403.json().required, "danger");
+  // 过了档位这一关：库里没有 115 账号才 400
+  assert.equal((await del(daily, { infoHashes: ["h"] })).statusCode, 400);
+  assert.equal((await del(full, { infoHashes: ["h"], deleteFiles: true })).statusCode, 400);
+  const toolset = await del(syncOnly, { infoHashes: ["h"] });
+  assert.equal(toolset.statusCode, 403, toolset.body);
+  assert.equal(toolset.json().code, "TOOLSET_NOT_ALLOWED");
 });
 
 test("/api/share 按动作放行：download_url 不对令牌开放；只勾了「同步」的令牌碰不了转存那一组的接口", async () => {

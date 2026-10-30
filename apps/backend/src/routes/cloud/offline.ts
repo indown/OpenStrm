@@ -9,6 +9,7 @@ import {
   restartOfflineTask,
 } from "../../services/offline/service.js";
 import type { OfflineClearFlag } from "../../services/cloud-115/offline.js";
+import { requireAgentScope } from "../../services/agent/access.js";
 import { parse } from "../../lib/validate.js";
 import { cidSchema } from "../../schemas/entities.js";
 
@@ -53,8 +54,10 @@ export default async function (fastify: FastifyInstance) {
   });
 
   // 批量删除用 POST 而不是带 body 的 DELETE：一批 hash 放 query 里太长，也省得和代理/反代争论 DELETE 能不能带 body
-  fastify.post("/api/115/offline/delete", { preHandler: [fastify.authenticate] }, async (request) => {
+  fastify.post("/api/115/offline/delete", { preHandler: [fastify.authenticate], config: { agentScope: "write", agentToolset: "transfer" } }, async (request) => {
     const { account, infoHashes, deleteFiles } = parse(removeSchema, request.body);
+    // 连下载到网盘里的文件一起删是删东西：会话不受限，令牌得有「删除」档（同 /api/copy 的删源）
+    if (deleteFiles === true) requireAgentScope(request, "danger");
     const r = await removeOfflineTasks(account, infoHashes, deleteFiles === true);
     return { success: true, ...r };
   });

@@ -863,7 +863,7 @@ export const api = {
     /** 提交给 115 之前要解析目录，可能慢一点 */
     add: (input: OfflineAddInput) => data(axiosInstance.post<OfflineAddResponse>("/api/115/offline", input, { timeout: 60_000 })),
     remove: (body: { account?: string; infoHashes: string[]; deleteFiles?: boolean }) =>
-      data(axiosInstance.post<{ success: true; removed: number }>("/api/115/offline/delete", body)),
+      data(axiosInstance.post<{ success: true; account: string; removed: number; followupsDropped: number }>("/api/115/offline/delete", body)),
     /** flag：0 已完成 / 1 全部 / 2 已失败 / 3 进行中 / 4 已完成+删源文件 / 5 全部+删源文件 */
     clear: (body: { account?: string; flag: number }) =>
       data(axiosInstance.post<{ success: true }>("/api/115/offline/clear", body)),
