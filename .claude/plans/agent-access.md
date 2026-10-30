@@ -2153,6 +2153,81 @@ P3 做完（HDHive 两个工具除外，见上面的范围），没提交。工�
 
 用户转述智能体的话「当前这个 MCP 版本没有单独的『把已复制完成的源文件移到归档』接口」，查实后按推荐做了：服务层 `copy/after.ts` 的 `settleAfterCopy`、`POST /api/copy/after`、工具 `copy_after`（transfer 组、write 档，ids 或 task + paths 二选一，删除要 danger 档，40 秒内直接回否则交作业）、`copy_list` 每条带 `canAfterCopy`、界面队列面板「归档源文件」按钮。动手前核对源在原处、目标里齐了（目录逐层比名字、文件比大小）。工具 42 → 43。方案与实施记录在 openlist-copy.md「事后处理源文件：copy_after」。
 
+## 取消云下载接进智能体（2026-10-30）
+
+### 起因
+
+用户：「115离线下载 取消接口 支持一下mcp」。云下载页的「删除」（`POST /api/115/offline/delete` → 115 的 `task_del`，可勾「同时删除已下载到网盘的文件」）智能体调不到：没有对应的工具，REST 也没声明档位；`offline_list` 的结果里没有 infoHash，模型就算有工具也指不出是哪条任务。
+
+### 方案
+
+- 新工具 `offline_cancel`（transfer 组，write 档，注解 D, I, OW）：`infoHashes`（1 到 100 个，来自 `offline_list` / `offline_add`）、`account`、`deleteFiles`。
+  - 不给 `deleteFiles`：只从 115 的云下载列表里去掉（正在下的停下，下完的文件留着），和界面上不勾「同时删除文件」一样。
+  - `deleteFiles: true`：连下载到网盘里的文件 / 目录一起删，令牌要有删除档（`INSUFFICIENT_SCOPE`，`required: danger`），新协议客户端先弹确认框（`confirmFirst`，只说个数、不放任务名——名字来自种子 / 链接，是第三方内容）。和 `copy_add` / `copy_after` 的「删源要删除档」同一套做法：工具本身 write 档，按参数提档。
+  - 登记过的回执（下完生成 strm / 复制到 OpenList）一并撤掉，结果里 `followupsDropped` 说撤了几条；服务层 `removeOfflineTasks` 多回 `account`、`followupsDropped`，REST 响应跟着多这两个字段。
+  - 115 出错原样说，登录失效带「不要反复重试」（和 `offline_list` 走同一条 `upstream` → `toFailure` 的路）。
+- `offline_list` 的 tasks、strmPending、copyPending 每条多带 `infoHash`；描述里指到 `offline_cancel`。只加字段，入参不变。
+- REST `POST /api/115/offline/delete` 声明 `agentScope: "write"`、`agentToolset: "transfer"`；`deleteFiles` 为 true 时 `requireAgentScope(request, "danger")`（会话不受限，同 `/api/copy` 的删源）。
+- README 的智能体一段和权限档说明加上取消云下载。
+
+### 不做
+
+- 不按名字找任务：名字是第三方内容、还会重复，模型先 `offline_list` 拿 infoHash 再取消，两步。
+- 不先翻列表核对 hash 在不在：115 对不存在的 hash 怎么回没验过，核对还要翻好几页列表；和界面一样直接交给 115，它报错就原样说。
+- `restart`（重试失败的）、`clear`（按状态清空）先不开给智能体：用户只要了取消，要再加是同一套写法。
+- 删掉的文件进不进 115 的回收站没验过，工具描述和确认框都不说。
+- Telegram 不动。
+
+### 测试
+
+- `tools.test.ts` 快照：加 `offline_cancel`。
+- `mcp.itest.ts`「云下载：取消 → 115 收到 task_del、回执一并撤掉；列表带 infoHash；连文件一起删要删除档、新协议客户端先确认」：桩收到 `task_del`（flag 0）+ 归一后的 hash、`followupsDropped: 1`、只撤取消的那条的回执；`offline_list` 的 tasks / strmPending 带 `infoHash`；`deleteFiles` 日常档 `INSUFFICIENT_SCOPE` 且 115 没收到；完全档新协议客户端先确认，拒绝不动、同意后 flag 1；115 登录超时原话带回、提示别反复重试。
+- `agent.itest.ts`「云下载删除接口：改网盘档能调，连文件一起删另要删除档；只读 403；没勾转存那一组的 403」：只读 403、日常不带 deleteFiles 过档位（库里没 115 账号才 400）、带 deleteFiles 403 `required: danger`、完全档过、只勾同步的 `TOOLSET_NOT_ALLOWED`。
+- `offline.itest.ts`：删除接口的响应多了 `account`、`followupsDropped`。
+- 真机：取消 / 删除改的是用户网盘上的云下载列表和文件，要用用户的 115 账号加一条测试磁力再取消，等用户批准；这次没做（见「实施记录」）。
+
+### 进度
+
+- [x] 工具 `offline_cancel`、`offline_list` 带 infoHash、REST 档位、README
+- [x] 冷测试：快照、mcp / agent / offline 三个 itest、全量
+- [x] 真机（2026-10-30 用户给了列表里一条正在下的真实任务，取消验过；`deleteFiles` 真删没批、没做）
+- [ ] 提交、发版（用户没叫就不动 git）
+
+### 实施记录（2026-10-30）
+
+- `services/agent/tools/transfer.ts`：新工具 `offlineCancelTool`（`offline_cancel`，transfer 组 write 档，注解 readOnly false / destructive true / idempotent true / openWorld true）；hash 去重、去空白；`deleteFiles` 时 `hasScope(token, "danger")` 不够回 `INSUFFICIENT_SCOPE`（`required: "danger"`，hint 说不传 deleteFiles 只取消、或请用户在云下载页删 / 设置页改权限），够就 `confirmFirst`（「取消 N 个 115 云下载任务，并删掉它们下载到网盘里的文件。」只说个数）；调 `removeOfflineTasks`，结果 `account / cancelled / infoHashes / deleteFiles / followupsDropped / note / next / openInUi("/offline")`。`offline_list` 的 tasks、strmPending、copyPending 多带 `infoHash`，描述指到 `offline_cancel`。
+- `services/offline/service.ts`：`dropFollowups` 回撤了几条；`removeOfflineTasks` 回 `{ account, removed, followupsDropped }`。
+- `routes/cloud/offline.ts`：`POST /api/115/offline/delete` 声明 `agentScope: "write"`、`agentToolset: "transfer"`，`deleteFiles` 为 true 时 `requireAgentScope(request, "danger")`。响应多了 `account`、`followupsDropped`（前端 `api.offline.remove` 的类型跟着改，页面不用）。
+- `tools/index.ts` 注册在 `offline_list` 后面；工具 46 → 47（快照条目数）。快照 `tools.snapshot.json` 用 `UPDATE_SNAPSHOTS=1` 重生成，diff 只多了 `offline_cancel` 一段（37 行），别的工具没动。
+- README：功能一览的智能体一句加「添加 / 取消云下载」，权限档说明日常加「添加 / 取消云下载」、完全加「取消云下载时连下载到网盘的文件一起删」。
+- 和方案一致，没有偏差。`restart` / `clear` 没开。
+- 测试：
+  - `mcp.itest.ts`：`connect` 改成和 mcp-p3 一样收 `{ modern, elicit }`（原来的两处 `connect(x, true)` 改成 `{ modern: true }`）；云下载桩记下 web 调用、列表桩可塞任务；新增「云下载：取消 → 115 收到 task_del、回执一并撤掉；列表带 infoHash；连文件一起删要删除档、新协议客户端先确认」（23 个用例全过）。
+  - `agent.itest.ts`：注册了云下载路由，新增「云下载删除接口：改网盘档能调，连文件一起删另要删除档；只读 403；没勾转存那一组的 403」（12 个全过）。
+  - `offline.itest.ts` 删除接口的断言补了 `account`、`followupsDropped`（12 个全过）；`followup.itest.ts` 32 个、`tools.test.ts` 9 个全过。
+  - `pnpm typecheck`、`pnpm lint` 干净，`scripts/check-hygiene.sh` ok；全量 `pnpm test`：后端 1684 全过、前端 11 全过。
+- 没提交、没发版。发版说明里「智能体工具变更」要写：新工具 `offline_cancel`，`offline_list` 结果多了 `infoHash`，REST 删除接口对令牌开放（deleteFiles 要删除档）；ChatGPT 缓存工具列表，加了工具要在它的设置里手动刷新。
+- 真机：先写的时候没做；同日用户说「真机测试一下，现在离线里面刚好有一条真实的数据给你测试取消」，按下一节做了。
+
+### 真机验证（2026-10-30）
+
+**环境**：lab 库从本机 `config/openstrm.db` 只读拷到 scratchpad 的 lab 目录（`file:…?mode=ro&immutable=1` + `.backup`）；消毒脚本（tsx，引仓库的 repositories）换了随机口令、关了 Telegram 轮询并清掉 bot、关了网盘监控、清空 Emby / HDHive / TMDB 配置、删了 3 个生产任务、清空旧回执，sqlite 直接清了追更和收藏夹；打开智能体、`uiBaseUrl` 指到 lab。后端 `BACKEND_PORT=4100 BACKEND_HOST=127.0.0.1 npx tsx src/index.ts`，建了日常档和完全档两个令牌（全部工具组）。客户端是官方 `@modelcontextprotocol/client`（脚本放 scratchpad，按绝对路径 import 包），拒绝路径用 2026-07-28 协议 + elicitation。用户事先说了列表里刚好有一条真实任务给测取消：115 列表 440 条 15 页，页首唯一一条正在下的是「空枪」4K 杜比视界版，36.4 GB，48.5%，当天 15:01 加的，其余都是 done。
+
+| 场景 | 结果 |
+|---|---|
+| `tools/list`（日常档） | 43 个工具，含 `offline_cancel`（47 减 4 个删除档） |
+| `offline_list` | 真 115 列表回来，每条带 `infoHash`；手工塞进 lab 库的一条 pending 回执（指向那条任务）出现在 `strmPending`，带 `infoHash` |
+| 日常档 `deleteFiles: true` | `INSUFFICIENT_SCOPE`，`required: danger`，hint 说不传 deleteFiles 只取消；没打 115 |
+| 完全档 `deleteFiles: true`，新协议 + elicitation，点拒绝 | 客户端收到确认框「取消 1 个 115 云下载任务，并删掉它们下载到网盘里的文件。」，回 `DECLINED`，115 没收到请求，回执还在 |
+| 日常档 `offline_cancel`（不带 deleteFiles） | `cancelled: 1`、`followupsDropped: 1`，note 说回执一并撤了；再 `offline_list`：count 440 → 439、那个 hash 不在页首、正在下的 0 条、`strmPending` 空；lab 库 `offline.followups` 变成 `[]` |
+| `deleteFiles: true` 真删（flag 1） | 没做：用户只批了取消；删掉的文件进不进回收站仍未验，工具描述照旧不提 |
+
+**真机发现的问题（已修）**：没有。
+
+日志：lab 后端 64 行日志里 0 条 warn / error。
+
+收尾：lab 后端已停（4100 没有监听）、lab 目录（库拷贝、口令、两个令牌、脚本）已删；网盘上没有新增内容（取消不产生文件，那条任务下到 48% 就撤了）。副作用：这条任务如果是用户在生产 OpenStrm 里加的，生产库里有它的回执，生产的回执循环会在连续 3 轮找不到后记成「任务已不在 115 的云下载列表里」并发一条云下载失败的通知。
+
 ## 核实记录
 
 2026-09-18 查的官方来源：
