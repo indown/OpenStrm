@@ -221,3 +221,4 @@
 
 ## 发布
 
+- 2026-11-02 **v2.22.0-rc.1**：`ef2ed87`（chore(release)，= `6d70bdc` feat(account) + `c9ebeeb` docs(plans) + 三个 package.json 版本号），tag `v2.22.0-rc.1`，推了 v2 和 tag，main 没动。Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）和 CI@v2 全绿（15:10 → 15:18）。Docker Hub `v2.22.0-rc.1` digest `sha256:d2f04083bc793c2eb58b68d0c6b6c6737d925f1a344183873ae797ba119f320c`（amd64 + arm64），`latest` 仍是 v2.21.0 的 2456e921409c。GitHub Release 是 prerelease。没有迁移、没有新设置项。升级说明要点交用户手动贴：账户弹框新增「扫码登录 / 重新扫码」（默认支付宝小程序端，每个端同时只能登一个会话）；保存 115 账号时网页版 cookie（UID 中段 A1）会被拒并指向扫码，已经存进去的不受影响。

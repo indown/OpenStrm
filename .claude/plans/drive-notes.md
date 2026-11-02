@@ -10,6 +10,13 @@
 - 浏览目录走 `webapi.115.com`，网页 cookie 能用；运行任务的导出目录树和取直链走 `proapi.115.com/android/2.0/...`，网页 cookie 会回 `{"state":false,"error":"请重新登录","errno":99}`。症状就是「添加任务能看到目录，运行任务报请重新登录」。
 - 判断：看用户 cookie 的 UID 中段是不是 A1。解决：用 App 端扫码拿 cookie，选不常用的端，常用端会被顶下线。
 - 要兼容网页 cookie 的话：导出改 `webapi.115.com/files/export_dir`，直链改 `proapi.115.com/app/chrome/downurl`（后者 2024 年底被风控过）。
+- 2026-11-02 起有扫码登录（`.claude/plans/115-qrcode-login.md`）：账户弹框里选端扫码，保存时 A1 cookie 会被拒。
+
+### 扫码登录（2026-11-02 真机）
+
+- 四步接口（qrcodeapi 的 token / qrcode 图 / get/status，passportapi 的 login/qrcode）都认 alipaymini、wechatmini 这类小程序端；换到的 cookie（UID 中段 R2 / R1）能过 `android/2.0` 的导出目录树和取直链，不同端互不顶线。
+- `get/status/` 是长轮询：第一次立刻回 0，之后没变化会挂 30 秒以上才回。超时要当「没变化」处理、别当错误：前后端都按 30 秒放弃时面板就卡死在「查不到扫码状态」。
+- 换 cookie 回「IP登录异常」会封到第二天零点（p115client 的提醒），一次登录把要验的都验掉，别反复登。
 
 ### 导出目录树的根从父目录开始（2026-09-08）
 
