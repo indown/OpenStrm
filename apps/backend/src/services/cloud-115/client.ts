@@ -898,7 +898,7 @@ export function sleep(ms: number, signal?: AbortSignal) {
   return setTimeoutPromise(ms, undefined, { signal });
 }
 
-function defaultUA() {
+export function defaultUA() {
   // 从配置文件读取user-agent
   const settings = readAppSettings();
   if (settings['user-agent']) {

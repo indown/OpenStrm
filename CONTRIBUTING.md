@@ -79,7 +79,7 @@ pnpm dev        # backend(4000) + Emby 代理(8091) + next dev(3000)
 - 错误只有一种壳 `{ message, ...extra }`：路由里 `throw new HttpError(status, message, extra)`（`lib/http-error.ts`）。成功响应直接返回 payload，没有 `{ code, data }` 包装。
 - 上游（115、夸克、OpenList、TMDB、Telegram、Emby、HDHive）出错用 `upstreamError(message, extra)`，状态固定 500、上游状态码放 `extra.upstreamStatus`。不要回 502 / 504：Cloudflare 会把源站的 502 / 504 换成它自己的错误页，`message` 到不了浏览器。
 - 设置按顶层 key 合并写（`patchAppSettings`）；`replaceAppSettings` / `replaceTasks` / `replaceAccounts` 只给测试恢复快照用。
-- 网盘只经 `services/drive/` 的 `DriveProvider` / `ShareProvider` / `ChangeSource` 接口访问。路由和业务服务里不写 `accountType === "115"` 这类分叉，不直接 import `cloud-115/*`、`quark/*` 客户端（它们只被 `drive/providers/*` 用）。新增一种网盘 = 再写一个 Provider。
+- 网盘只经 `services/drive/` 的 `DriveProvider` / `ShareProvider` / `ChangeSource` 接口访问。路由和业务服务里不写 `accountType === "115"` 这类分叉，不直接 import `cloud-115/*`、`quark/*` 客户端（它们只被 `drive/providers/*` 用）。新增一种网盘 = 再写一个 Provider。登录、扫码这类不是网盘操作的流程没有 Provider，路由可以直接用对应的客户端模块（如 `routes/account/qrcode.ts` 用 `cloud-115/qrcode`），但同样不按账号类型分叉；保存账号时按网盘查凭据形状的规则放 `services/drive/credentials.ts`。
 - 日志用 `lib/logger.ts` 的 pino 实例，service 里 `moduleLogger("<模块名>")`；不用 `console.*`。错误 extra 里的 `data` 不进日志。
 - 后台循环（巡检、监控、Telegram 轮询）用 `lib/polling.ts` 的 `createPollingLoop`，失败走指数退避、停机时能退出；通知统一走 `services/notify.ts`。
 - 数据库：改 `db/schema.ts` 后 `pnpm db:generate` 生成顺序编号的迁移（`src/db/migrations/00NN_<name>.sql`，当前到 0028）。迁移只增不改：已经发出去的迁移文件不能回头改，要改就再加一个。迁移文件会被 `build` 拷进 `dist`，CI 的冒烟会检查镜像里有没有。

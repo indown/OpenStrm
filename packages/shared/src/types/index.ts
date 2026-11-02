@@ -24,7 +24,7 @@ export type {
   ResourceSource,
   ResourceStatus,
 } from "./resource.js";
-export type { AccountInfo, Account115, AccountOpenlist, AccountQuark } from "./account.js";
+export type { AccountInfo, Account115, AccountOpenlist, AccountQuark, Qrcode115App, Qrcode115Start, Qrcode115Status } from "./account.js";
 export type {
   CopyAfterCopy,
   FileFailureAction,

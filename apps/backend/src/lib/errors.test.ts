@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { AxiosError, CanceledError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
-import { isAbortError, networkErrorText, PermanentError } from "./errors.js";
+import axios from "axios";
+import { isAbortError, isTimeoutError, networkErrorText, PermanentError } from "./errors.js";
 
 test("throwIfAborted 的 DOMException、timers/promises 的 AbortError、axios 的 CanceledError 都算中止", async () => {
   const ac = new AbortController();
@@ -40,4 +41,15 @@ test("networkErrorText：超时说几秒没回应、连不上说连不上，原�
   assert.equal(networkErrorText(new AxiosError("Request failed with status code 500", "ERR_BAD_RESPONSE", config, null, res)), null, "接口回了话：不是网络层的事");
   assert.equal(networkErrorText(new CanceledError("canceled")), null, "自己掐的不算");
   assert.equal(networkErrorText(new Error("timeout")), null, "不是 axios 的错误不猜");
+});
+
+test("isTimeoutError：超时码、只在文案里说 timeout 的都算；回了话的、被取消的、连不上的不算", () => {
+  const mk = (over: Record<string, unknown>) => Object.assign(new axios.AxiosError("x"), over);
+  assert.equal(isTimeoutError(mk({ code: "ECONNABORTED", message: "timeout of 30000ms exceeded" })), true);
+  assert.equal(isTimeoutError(mk({ code: "ETIMEDOUT" })), true);
+  assert.equal(isTimeoutError(mk({ code: "ERR_BAD_RESPONSE", message: "request timeout" })), true);
+  assert.equal(isTimeoutError(mk({ code: "ECONNREFUSED" })), false);
+  assert.equal(isTimeoutError(mk({ code: "ECONNABORTED", response: { status: 500 } })), false);
+  assert.equal(isTimeoutError(new axios.CanceledError("canceled")), false);
+  assert.equal(isTimeoutError(new Error("timeout")), false);
 });

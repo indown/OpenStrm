@@ -38,6 +38,7 @@ import authPasswordRoute from "./routes/auth/password.js";
 
 // CRUD routes
 import accountRoute from "./routes/account/index.js";
+import accountQrcodeRoute from "./routes/account/qrcode.js";
 import settingsRoute from "./routes/settings/index.js";
 import taskRoute from "./routes/task/index.js";
 import taskHistoryRoute from "./routes/task-history/index.js";
@@ -155,6 +156,7 @@ await app.register(authPasswordRoute);
 
 // CRUD routes
 await app.register(accountRoute);
+await app.register(accountQrcodeRoute);
 await app.register(settingsRoute);
 await app.register(taskRoute);
 await app.register(taskHistoryRoute);

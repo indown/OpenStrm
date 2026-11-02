@@ -38,6 +38,7 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Info } from "lucide-react";
 import { toast } from "sonner";
+import { Qrcode115Panel } from "./Qrcode115Panel";
 
 // 表单验证规则
 export const accountFormSchema = z.object({
@@ -213,7 +214,7 @@ export function AddAccountDialog({ account, trigger, onSuccess, open: openProp, 
                       <FormLabel>Cookie</FormLabel>
                       <FormControl>
                         <SecretInput
-                          placeholder="输入 115 网盘的 Cookie"
+                          placeholder="填 115 App 端的 Cookie，或用下面的扫码登录"
                           value={field.value ?? ""}
                           onChange={field.onChange}
                           onBlur={field.onBlur}
@@ -224,6 +225,11 @@ export function AddAccountDialog({ account, trigger, onSuccess, open: openProp, 
                       <FormMessage />
                     </FormItem>
                   )}
+                />
+                {/* 扫码拿到的 cookie 填进上面的字段，仍由用户点保存 */}
+                <Qrcode115Panel
+                  hasSaved={Boolean(account?.cookie)}
+                  onCookie={(cookie) => form.setValue("cookie", cookie, { shouldDirty: true, shouldValidate: true })}
                 />
                 <Alert>
                   <Info className="h-4 w-4" />

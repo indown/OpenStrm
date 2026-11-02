@@ -48,6 +48,9 @@ import type {
   OrganizeUnit,
   OrganizeUnitPatch,
   PlaybackDiagnosis,
+  Qrcode115App,
+  Qrcode115Start,
+  Qrcode115Status,
   ResourceCheckResult,
   ResourceSearchResult,
   ResourceStatus,
@@ -660,6 +663,13 @@ export const api = {
     create: (input: Record<string, unknown>) => data(axiosInstance.post<AccountInfo>("/api/account", input)),
     update: (input: Record<string, unknown> & { name: string }) => data(axiosInstance.put<AccountInfo>("/api/account", input)),
     remove: (name: string) => data(axiosInstance.delete<{ message: string }>(`/api/account?name=${encodeURIComponent(name)}`)),
+    /** 115 扫码登录：先拿二维码，再轮询状态；confirmed 那一次带 cookie，只给一次 */
+    qrcode115: {
+      start: (app: Qrcode115App) => data(axiosInstance.post<Qrcode115Start>("/api/account/115/qrcode", { app })),
+      // 后端那头是 115 的长轮询（最长 40 秒）加换 cookie（最长 30 秒）；这一次请求的超时要盖过两步，不然前端先放弃
+      status: (uid: string, signal?: AbortSignal) =>
+        data(axiosInstance.get<Qrcode115Status>(`/api/account/115/qrcode/${encodeURIComponent(uid)}`, { timeout: 90_000, signal })),
+    },
   },
 
   history: {

@@ -23,10 +23,17 @@ const CONNECT_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_A
  * 超时说几秒没回应，连不上说连不上；接口回了话的（有响应）、不是 axios 的错误回 null，调用方照旧用 messageOf。
  * 默认带「稍后再试」、原话放括号里留底（给要人自己重试的报错用）；brief 只要原因本身（系统自己会再试的地方，比如复制后的去向）
  */
+/** 等到超时都没回话：不是连不上、不是回了错误码、不是被取消。axios 的超时码，或者只在文案里说了 timeout 的那种 */
+export function isTimeoutError(err: unknown): boolean {
+  if (!axios.isAxiosError(err) || err.response || axios.isCancel(err)) return false;
+  const code = err.code ?? "";
+  return code === "ECONNABORTED" || code === "ETIMEDOUT" || /timeout/i.test(err.message);
+}
+
 export function networkErrorText(err: unknown, opts: { brief?: boolean } = {}): string | null {
   if (!axios.isAxiosError(err) || err.response || axios.isCancel(err)) return null;
   const code = err.code ?? "";
-  if (code === "ECONNABORTED" || code === "ETIMEDOUT" || /timeout/i.test(err.message)) {
+  if (isTimeoutError(err)) {
     const ms = err.config?.timeout;
     const secs = typeof ms === "number" && ms > 0 ? ` ${Math.round(ms / 1000)} 秒` : "";
     return opts.brief ? `网盘接口${secs}没有回应` : `网盘接口${secs}没有回应，稍后再试（${err.message}）`;

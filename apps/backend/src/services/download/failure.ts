@@ -89,8 +89,8 @@ const INVALID_NAME = {
   advice: "data 目录挂在 SMB / NTFS / exFAT 上就会这样：用「整理」改名会替换这些字符，或者把 data 换到 ext4 / btrfs 上",
 };
 const GONE = { message: "网盘上已经没有这个文件", advice: "不用处理：下次全量同步会把本地多余的清掉" };
-const AUTH = { message: "账号登录失效", advice: "到「账号」页更新 cookie 或密码，再重新同步" };
-const BLOCKED = { message: "账号被网盘风控", advice: "停一会再跑，短时间内别再触发；看「账号」页的状态" };
+const AUTH = { message: "账号登录失效", advice: "到「账户」页更新 cookie 或密码（115 可以直接重新扫码），再重新同步" };
+const BLOCKED = { message: "账号被网盘风控", advice: "停一会再跑，短时间内别再触发；看「账户」页的状态" };
 
 export function classifyFileFailure(err: unknown, ctx: FileFailureContext): FileFailure {
   const detail = messageOf(err);

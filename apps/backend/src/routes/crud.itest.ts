@@ -535,3 +535,33 @@ test("任务自己的命名模板：合法的存得进去、空串不算；坏�
   assert.equal(bad.statusCode, 400);
   assert.match(bad.json().message, /剧集模板.*不认识的变量/);
 });
+
+// ---- 115 网页版 cookie ----
+
+test("115 账号：网页版 cookie（UID 中段 A1）新建 / 改都被拒并指向扫码；App 端的照常存", async () => {
+  // 夹具用短 UID：check-hygiene 把 UID=<3 位以上>_X1_<6 位以上> 当真凭据
+  const web = await call("POST", "/api/account", { accountType: "115", name: "web-cookie", cookie: "UID=12_A1_123; CID=c; SEID=s" });
+  assert.equal(web.statusCode, 400);
+  assert.equal(web.json().code, "WEB_COOKIE");
+  assert.match(web.json().message, /扫码/);
+  assert.equal(listAccounts().some((a) => a.name === "web-cookie"), false);
+
+  const ok = await call("POST", "/api/account", { accountType: "115", name: "app-cookie", cookie: "UID=12_D1_123; CID=c; SEID=s" });
+  assert.equal(ok.statusCode, 201, ok.body);
+
+  // 编辑表单只换 cookie、不带 accountType：按库里的类型算
+  const swap = await call("PUT", "/api/account", { name: "app-cookie", cookie: "UID=12_A1_123; CID=c; SEID=s" });
+  assert.equal(swap.statusCode, 400);
+  assert.equal(swap.json().code, "WEB_COOKIE");
+  const withType = await call("PUT", "/api/account", { name: "app-cookie", accountType: "115", cookie: "UID=12_A1_123; CID=c; SEID=s" });
+  assert.equal(withType.statusCode, 400);
+  assert.equal((listAccounts().find((a) => a.name === "app-cookie") as AccountInfo & { cookie?: string }).cookie, "UID=12_D1_123; CID=c; SEID=s", "没被盖掉");
+
+  // 掩码值沿用库里的，不查；换成小程序端的也行
+  const listed = (await call("GET", "/api/account")).json().find((a: { name: string }) => a.name === "app-cookie");
+  assert.equal((await call("PUT", "/api/account", { name: "app-cookie", accountType: "115", cookie: listed.cookie })).statusCode, 200);
+  assert.equal((await call("PUT", "/api/account", { name: "app-cookie", cookie: "UID=12_R2_123; CID=c; SEID=s" })).statusCode, 200);
+
+  // 夸克不看 UID：它的 cookie 没有这回事
+  assert.equal((await call("POST", "/api/account", { accountType: "quark", name: "qk-a1", cookie: "UID=12_A1_123; __puus=x" })).statusCode, 201);
+});

@@ -51,7 +51,7 @@ function throttled(key: string, now = Date.now()): boolean {
 function accountAlertText(account: string, issue: AccountIssue, source: string, reason: string): string {
   const head =
     issue === "cookie"
-      ? `⚠️ <b>网盘账号需要处理</b>\n账号 <b>${esc(account)}</b> 的 cookie 已失效，同步和监控都会失败，请到「账户」页更新。`
+      ? `⚠️ <b>网盘账号需要处理</b>\n账号 <b>${esc(account)}</b> 的 cookie 已失效，同步和监控都会失败，请到「账户」页更新（115 可以直接重新扫码）。`
       : `⚠️ <b>网盘账号被封控</b>\n账号 <b>${esc(account)}</b> 的访问被阻断，请稍后再试或检查账号状态。`;
   return `${head}\n来源：${esc(source)}\n<code>${esc(cutText(reason, 200))}</code>`;
 }
