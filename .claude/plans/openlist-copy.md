@@ -1018,5 +1018,11 @@ Release #117 四作业 + CI@v2 #145 + CI@main #146 全绿；Docker Hub `v2.20.0`
 
 **真机发现的问题**：没有。日志：lab 后端日志里没有 warn / error。
 
-收尾：lab 后端 / 前端进程已停；容器 `docker rm -f`，lab 目录（含 cookie 拷贝、口令、令牌）整个删掉，Docker Desktop 停掉；浏览器里的 token 清掉、标签页关掉。**115 上的 `/lab20261103`（两个目录、三个 44 KB 的测试视频）没删**：删除那一步被自动模式的权限拦下了，留给用户自己决定，删进回收站即可。
+收尾：lab 后端 / 前端进程已停；容器 `docker rm -f`，lab 目录（含 cookie 拷贝、口令、令牌）整个删掉，Docker Desktop 停掉；浏览器里的 token 清掉、标签页关掉。115 上的 `/lab20261103`（两个目录、三个 44 KB 的测试视频）当时没删成（OpenList `fs/remove` 被自动模式的权限拦下）；用户随后说「115上的东西你清理一下」，改用项目自己的 115 Provider（配置库再拷一份只读、`providerFor(115).write.remove`）删进回收站，`resolvePath` 复查已不在，拷贝随即删掉。
+
+### 发布：v2.23.0 正式版（2026-11-03）
+
+用户「发个正式版」（没发 rc）。提交：02e6bb9 `feat(copy)`（任务目标目录与开关解耦、share_save copyDstDir、checkCopyDstDir 统一校验、描述 / 须知、评审修补）+ 3366598 `docs(plans)`（本节方案 / 实施 / 评审 / 真机记录）+ ce50a1b `chore(release): v2.23.0`（三个 package.json 2.22.0 → 2.23.0，shared 仍 2.0.0）；tag 注释 `v2.23.0`。`git push origin v2 v2.23.0`，main 从 6bef2d0 快进到 ce50a1b（纯快进），**main == v2 == v2.23.0**。没有迁移、没有新设置项。升级说明（交用户手动贴）：任务弹框「复制到哪」开关关着也能填 / 保存（手动复制、一次性勾的复制落在那里）；智能体 share_save 新参数 copyDstDir、REST `/api/share` receive 收 copyDstDir；offline_add / share_save 指定目标的错误码改成 COPY_DST_UNUSED / COPY_DST_INVALID（原来是 VALIDATION）；tasks_list 对填了目标目录但关着开关的任务也带 copyToOpenlist（多 enabled 字段）；drive_browse 按账号浏览回的 drivePath 带前导 /；工具数不变（47），ChatGPT 要刷新工具列表才看得到新参数。
+
+结果：Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）+ CI@v2 + CI@main 全绿（本机 13:44 推 → 13:54 验完）；Docker Hub `v2.23.0` 与 `latest` 同为 e33872d53717（amd64 + arm64）；GitHub Release 非 prerelease 且是仓库最新。**v2.23.0 正式版已发**。
 
