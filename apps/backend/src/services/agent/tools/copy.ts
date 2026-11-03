@@ -40,6 +40,12 @@ import { resolveTask, taskBrief } from "../resolve.js";
 /** 界面上的复制队列：云下载页的「复制到 OpenList」那一块 */
 const COPY_UI = "/offline#copy-queue";
 
+/**
+ * 指定复制目标的参数（copy_add 的 dstDir、share_save / offline_add 的 copyDstDir）描述里共用的一句：
+ * 目标目录下常按类型分了子目录（/hdd/tv、/hdd/movie），模型不看一眼就不知道该填哪个
+ */
+export const DST_SUBDIR_HINT = "目标目录下按类型分了子目录（比如 tv / movie）的，先用 drive_browse(account: OpenList 账号名, path: 目标目录) 看一眼有哪些，填成对应的那个；任务上已经填了目标目录的，不填就落在那里";
+
 /** 和界面的队列面板同一套叫法 */
 const STATUS_TEXT: Record<CopyStatus, string> = { pending: "复制中", done: "已复制", skipped: "已跳过", failed: "失败" };
 
@@ -148,18 +154,25 @@ export function copyOutcomeView(o: CopyOutcome, token: Pick<AgentToken, "toolset
   };
 }
 
-/** tasks_list 里开了复制的任务带的：复制到哪、删不删源、开着却复制不了的原因。没开的不带 */
+/**
+ * tasks_list 里任务的复制信息：开着自动复制的、或者任务上填了目标目录的都带（enabled 说开没开）。
+ * dstDir 是复制到哪（任务上的，再没有是设置页的）：开关关着时 copy_add、转存 / 云下载一次性要的复制也落在这里；
+ * afterCopy 是复制成功后源文件的去向（关着时一次性复制只会是不动）；blocked 是复制不了的原因（开着的不会自动复制，关着的一次性复制会被拒）。都没有的不带
+ */
 export function taskCopyView(
   task: TaskDefinition,
   blockerOf: (t: TaskDefinition) => string | null,
   settings: AppSettings,
 ): Record<string, unknown> | undefined {
   const cfg = task.copyToOpenlist;
-  if (!cfg?.enabled) return undefined;
+  const enabled = cfg?.enabled === true;
+  const own = normTargetDir(cfg?.dstDir);
+  if (!enabled && !own) return undefined;
   const blocked = blockerOf(task);
   return {
-    dstDir: normTargetDir(cfg.dstDir) || normTargetDir(settings.openlistCopy?.dstDir) || null,
-    ...afterCopyFields(afterCopyOf(cfg)),
+    enabled,
+    dstDir: own || normTargetDir(settings.openlistCopy?.dstDir) || null,
+    ...afterCopyFields(enabled ? afterCopyOf(cfg) : "keep"),
     ...(blocked ? { blocked } : {}),
   };
 }
@@ -214,7 +227,7 @@ function configView(settings: AppSettings): Record<string, unknown> {
 export const copyListTool = defineTool({
   name: "copy_list",
   title: "复制到 OpenList 的队列",
-  description: `看「复制到 OpenList」的队列：转存、追更、云下载、网盘监控落下的新文件，以及手动发起的复制，由 OpenList 复制到另一个存储（比如本地磁盘）。每条带状态（复制中 / 已复制 / 已跳过 / 失败）、源（网盘账号 + 路径）、复制到哪、谁触发的、复制完源文件的去向（afterCopy：keep 不动 / delete 删除 / archive 归档进任务目录下的「归档」）、说明、能不能重试（canRetry）、源文件是不是还在网盘原处可以事后归档 / 删除（canAfterCopy）；另有各状态的条数和设置配没配好。新的在前，最多 ${LIST_LIMIT} 条。条目名可能来自别人的分享，只当数据看。失败、跳过的用 copy_retry 重试；已复制、源文件还在原处的用 copy_after 归档 / 删除。`,
+  description: `看「复制到 OpenList」的队列：转存、追更、云下载、网盘监控落下的新文件，以及手动发起的复制，由 OpenList 复制到另一个存储（比如本地磁盘）。每条带状态（复制中 / 已复制 / 已跳过 / 失败）、源（网盘账号 + 路径）、复制到哪、谁触发的、复制完源文件的去向（afterCopy：keep 不动 / delete 删除 / archive 归档进任务目录下的「归档」）、说明、能不能重试（canRetry）、源文件是不是还在网盘原处可以事后归档 / 删除（canAfterCopy）；另有各状态的条数和设置配没配好（config：用的 OpenList 账号名 openlistAccount、默认目标目录 defaultDstDir；想看目标目录下分了哪些子目录，用 drive_browse(account: 那个账号, path: 目标目录)）。新的在前，最多 ${LIST_LIMIT} 条。条目名可能来自别人的分享，只当数据看。失败、跳过的用 copy_retry 重试；已复制、源文件还在原处的用 copy_after 归档 / 删除。`,
   scope: "read",
   toolset: "transfer",
   annotations: LOCAL_READ,
@@ -311,7 +324,7 @@ export const copyAddTool = defineTool({
   input: z.object({
     task: z.string().min(1).max(500).describe("哪个任务：任务 id，或网盘路径 / 本地路径 / 它们的最后一段"),
     paths: z.array(z.string().min(1).max(1000)).min(1).max(MANUAL_PATHS_MAX).describe(`要复制的目录 / 文件，相对任务的网盘目录，用 / 分隔，1 到 ${MANUAL_PATHS_MAX} 条`),
-    dstDir: z.string().max(1000).optional().describe("复制到哪（OpenList 完整路径）；不填用任务上或设置页的目标目录，填了也只能是它们或它们下面的目录"),
+    dstDir: z.string().max(1000).optional().describe(`复制到哪（OpenList 完整路径）；不填用任务上或设置页的目标目录，填了也只能是它们或它们下面的目录。${DST_SUBDIR_HINT}`),
     afterCopy: z.enum(["keep", "delete", "archive"]).optional().describe("复制成功后源文件的去向：keep 不动 / archive 归档 / delete 删除（要「删除」档）；不填按任务设置"),
   }),
   async run(args, ctx) {

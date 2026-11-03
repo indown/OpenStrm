@@ -81,8 +81,8 @@ export const taskFormSchema = z.object({
   orgIdTag: z.enum(["", "emby", "jellyfin", "plex", "none"]).optional(),
   orgEpisodeTitle: z.enum(["", "on", "off"]).optional(),
 })
-  // 「复制到哪」不收 OpenList 根；复制关着时这一栏不显示、也不提交，不拦
-  .refine((v) => !v.copyEnabled || !isOpenlistRootInput(v.copyDstDir), { message: OPENLIST_ROOT_TARGET, path: ["copyDstDir"] });
+  // 「复制到哪」不收 OpenList 根（开关关着时这一栏也在、也保存：手动复制 / 一次性勾的复制落在这里）
+  .refine((v) => !isOpenlistRootInput(v.copyDstDir), { message: OPENLIST_ROOT_TARGET, path: ["copyDstDir"] });
 
 export type TaskFormValues = z.infer<typeof taskFormSchema>;
 
@@ -506,8 +506,9 @@ export function AddTaskDialog({
   const copyEnabled = useWatch({ control: form.control, name: "copyEnabled" }) ?? false;
   const copyDstDir = useWatch({ control: form.control, name: "copyDstDir" }) ?? "";
 
+  // 弹框一打开就读设置页的「复制到 OpenList」：「复制到哪」一栏开关关着也显示，占位里的默认目标目录和「从 OpenList 里选」都靠它
   React.useEffect(() => {
-    if (!open || !copyEnabled) return;
+    if (!open) return;
     let cancelled = false;
     api.settings
       .get()
@@ -520,7 +521,7 @@ export function AddTaskDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, copyEnabled]);
+  }, [open]);
   const olAccount = copySettings?.account ?? "";
   // 设置页填成 / 的算没填，占位里就不提它
   const copyDefaultDst = normTargetDir(copySettings?.dstDir);
@@ -550,11 +551,12 @@ export function AddTaskDialog({
     }
   }, [encoding.allowed, form]);
 
-  // 复制开关同理：选了 OpenList 账号就关掉（带着 open：重新打开时表单被重置成任务上存的值，要再看一遍）
+  // 复制开关同理：选了 OpenList 账号就关掉（带着 open：重新打开时表单被重置成任务上存的值，要再看一遍）。
+  // 「复制到哪」也清掉：这一栏对 OpenList 账号的任务不显示，留着个填成 / 的值会让保存卡在一个看不见的校验上
   React.useEffect(() => {
-    if (open && isOpenlistTask && form.getValues("copyEnabled")) {
-      form.setValue("copyEnabled", false);
-    }
+    if (!open || !isOpenlistTask) return;
+    if (form.getValues("copyEnabled")) form.setValue("copyEnabled", false);
+    if (form.getValues("copyDstDir")) form.setValue("copyDstDir", "");
   }, [open, isOpenlistTask, form]);
 
   const setOpen = (next: boolean) => {
@@ -608,15 +610,13 @@ export function AddTaskDialog({
           ...(orgIdTag ? { idTag: orgIdTag } : {}),
           ...(orgEpisodeTitle ? { episodeTitle: orgEpisodeTitle === "on" } : {}),
         },
-        // 开关关着就整块记成关：留着「删除 / 归档」的话，
-        // 以后在转存弹框里勾一次「转存后复制」会连带把网盘上的源文件删了或挪走
-        copyToOpenlist: copyEnabled
-          ? {
-              enabled: true,
-              ...(copyDstDir?.trim() ? { dstDir: copyDstDir.trim() } : {}),
-              afterCopy: copyAfterCopy ?? "keep",
-            }
-          : { enabled: false },
+        // 「复制到哪」开关关着也保存：手动复制、转存 / 云下载时一次性勾的复制都落在这里（OpenList 账号的任务用不着，不存）。
+        // 去向只在开着时存：关着还留着「删除 / 归档」的话，以后一次性勾的复制会连带把网盘上的源文件删了或挪走
+        copyToOpenlist: {
+          enabled: copyEnabled === true,
+          ...(copyDstDir?.trim() && !isOpenlistTask ? { dstDir: copyDstDir.trim() } : {}),
+          ...(copyEnabled ? { afterCopy: copyAfterCopy ?? "keep" } : {}),
+        },
       };
 
       if (task?.id) {
@@ -915,7 +915,7 @@ export function AddTaskDialog({
                 }
                 disabled={isOpenlistTask}
               />
-              {copyEnabled && (
+              {!isOpenlistTask && (
                 <div className="space-y-3 rounded-md border p-3">
                   {copyGap && <p className="text-xs text-warning">{copyGap}。</p>}
                   <FormField
@@ -941,37 +941,41 @@ export function AddTaskDialog({
                           </InputGroupButton>
                         </InputGroup>
                         <FormDescription className="text-xs">
-                          OpenList 里的完整路径；任务目录里的层级会原样带到这个目录下面，还不存在的目录复制时会自动建。
+                          {copyEnabled
+                            ? "OpenList 里的完整路径；任务目录里的层级会原样带到这个目录下面，还不存在的目录复制时会自动建。"
+                            : "开关关着也用得上：手动复制、转存 / 云下载时一次性勾的复制都落在这里（目标目录按类型分了子目录的话，比如 tv 任务填 /hdd/tv）；任务目录里的层级会原样带到这个目录下面。"}
                         </FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
                   />
-                  <FormField
-                    control={form.control}
-                    name="copyAfterCopy"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>复制成功后，网盘上的源文件</FormLabel>
-                        <Select onValueChange={field.onChange} value={field.value ?? "keep"}>
-                          <FormControl>
-                            <SelectTrigger className="w-full">
-                              <SelectValue />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent className="z-[60]">
-                            <SelectItem value="keep">不动</SelectItem>
-                            <SelectItem value="archive">归档：挪进任务目录下的「归档」</SelectItem>
-                            <SelectItem value="delete">删除（进回收站，不可逆）</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <FormDescription className="text-xs">
-                          都只在复制成功、目标目录里确认看得见之后才动。归档：原来的层级留着，不进媒体库，想恢复挪回去就行；删除等于搬运，备份类任务别选。
-                          不动的话 Emby 里同一集会有云上的 strm 和本地那份两个。
-                        </FormDescription>
-                      </FormItem>
-                    )}
-                  />
+                  {copyEnabled && (
+                    <FormField
+                      control={form.control}
+                      name="copyAfterCopy"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>复制成功后，网盘上的源文件</FormLabel>
+                          <Select onValueChange={field.onChange} value={field.value ?? "keep"}>
+                            <FormControl>
+                              <SelectTrigger className="w-full">
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent className="z-[60]">
+                              <SelectItem value="keep">不动</SelectItem>
+                              <SelectItem value="archive">归档：挪进任务目录下的「归档」</SelectItem>
+                              <SelectItem value="delete">删除（进回收站，不可逆）</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <FormDescription className="text-xs">
+                            都只在复制成功、目标目录里确认看得见之后才动。归档：原来的层级留着，不进媒体库，想恢复挪回去就行；删除等于搬运，备份类任务别选。
+                            不动的话 Emby 里同一集会有云上的 strm 和本地那份两个。
+                          </FormDescription>
+                        </FormItem>
+                      )}
+                    />
+                  )}
                 </div>
               )}
             </div>

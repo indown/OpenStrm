@@ -483,6 +483,7 @@ test("看目录：同一个目录从账号根和从任务进来，结果里的�
     const byAccount = await call(client, "drive_browse", { account: "a", path: "tv/Show" });
     assert.equal(byAccount.data.task, undefined);
     assert.equal(byAccount.data.path, "tv/Show");
+    assert.equal(byAccount.data.drivePath, "/tv/Show", "从账号根算的带前导 /：OpenList 账号的拿来就是复制目标");
     const byTask = await call(client, "drive_browse", { task: "tv", path: "Show" });
     assert.equal(byTask.data.task.id, "m-tv");
     assert.equal(byTask.data.path, "Show", "缓存只存列表，不能把上一个调用方的口径带过来");

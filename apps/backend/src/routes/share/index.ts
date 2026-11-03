@@ -51,6 +51,8 @@ const bodySchema = z.looseObject({
   /** 转存完顺手整理（sync 模式才有意义） */
   organize: z.boolean().optional(),
   copy: z.boolean().optional(),
+  /** 这次复制到 OpenList 里的哪个目录：只能是任务上 / 设置页的目标目录或它们下面的；给了却不复制会被拒 */
+  copyDstDir: z.string().optional(),
 });
 
 /**
@@ -115,6 +117,7 @@ export default async function (fastify: FastifyInstance) {
               settings: readAppSettings(),
               organize: body.organize,
               copy: body.copy,
+              copyDstDir: body.copyDstDir,
             });
             // async 模式下引擎拒绝启动时仍是 200：转存已经成功，只是没排上后台同步
             const strmGenerated = !("error" in result);

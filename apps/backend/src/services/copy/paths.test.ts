@@ -6,7 +6,33 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AppSettings } from "@openstrm/shared";
-import { baseName, copyDstProblem, copyOptionsFor, copySettingsGap, dstDirFor, isOpenlistRootInput, joinPath, normDir, normTargetDir, parentDir, relativeTo, toOpenlistPath } from "./paths.js";
+import { HttpError } from "../../lib/http-error.js";
+import { baseName, checkCopyDstDir, copyDstProblem, copyOptionsFor, copySettingsGap, dstDirFor, isOpenlistRootInput, joinPath, normDir, normTargetDir, parentDir, relativeTo, toOpenlistPath } from "./paths.js";
+
+test("checkCopyDstDir：这次指定的复制目标——没给回 undefined；这次不会复制、任务开着却说不复制、越界、不是路径各有各的 code", () => {
+  const s = { openlistCopy: { account: "ol", dstDir: "/local/media", mounts: { a: "/115" } } } as unknown as AppSettings;
+  const off = { copyToOpenlist: { enabled: false, dstDir: "/local/media/tv" } };
+  const on = { copyToOpenlist: { enabled: true, dstDir: "/local/movies" } };
+  assert.equal(checkCopyDstDir(off, true, undefined, s), undefined);
+  assert.equal(checkCopyDstDir(off, true, "  ", s), undefined, "空串当没给");
+  assert.equal(checkCopyDstDir(off, true, "/local/media/movie/", s), "/local/media/movie", "归一");
+  assert.equal(checkCopyDstDir(on, undefined, "/local/movies/4K", s), "/local/movies/4K", "任务开着不传 copy 也算会复制");
+  assert.equal(checkCopyDstDir(null, true, "/local/media/x", s), "/local/media/x", "没任务只看设置页的目标目录");
+  const code = (fn: () => unknown): unknown => {
+    try {
+      fn();
+    } catch (err) {
+      return (err as HttpError).extra.code;
+    }
+    return null;
+  };
+  assert.equal(code(() => checkCopyDstDir(off, undefined, "/local/media/tv", s)), "COPY_DST_UNUSED");
+  assert.equal(code(() => checkCopyDstDir(null, undefined, "/local/media/tv", s)), "COPY_DST_UNUSED");
+  assert.equal(code(() => checkCopyDstDir(on, false, "/local/movies/4K", s)), "COPY_ALWAYS_ON", "任务开着复制：copy: false 兑现不了，不能说成「这次不会复制」");
+  assert.equal(code(() => checkCopyDstDir(off, true, "/elsewhere", s)), "COPY_DST_INVALID");
+  assert.equal(code(() => checkCopyDstDir(off, true, "/", s)), "COPY_DST_INVALID", "OpenList 根不行");
+  assert.equal(code(() => checkCopyDstDir(off, true, "//", s)), "VALIDATION");
+});
 
 test("normDir：补头斜杠、去尾斜杠、收起连着的斜杠", () => {
   assert.equal(normDir("/115"), "/115");

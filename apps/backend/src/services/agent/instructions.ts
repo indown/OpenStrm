@@ -24,6 +24,7 @@ export const USAGE_NOTES = [
   "执行整理前把 confirmText 原样给用户看，同意后带 planVersion 调 organize_apply；清单变了会被拒，要重新给用户看。",
   "转存、云下载、追更检查之前看一眼任务的 copyToOpenlist（tasks_list）：开着的会把新文件复制到 OpenList，afterCopy 是 delete 的复制完还会删掉网盘上的源文件和本地 strm，archive 的会把源文件挪进任务目录下的「归档」，要一并告诉用户；share_save / offline_add 传 copy: true 能让这一次也复制；任务开着复制的没法这一次不复制。",
   "用户想把网盘上已经有的某部片放到本地磁盘（比如看片卡顿）：先用 strm_search 按片名找到它在任务里的位置，把复制到哪、复制完源文件怎么办说给用户，同意后再调 copy_add。",
+  "复制到 OpenList 的目标目录（任务上填的，再没有是设置页的；tasks_list 的 copyToOpenlist.dstDir、copy_list 的 config 里能看到）下面如果按类型分了子目录（比如 tv / movie）：copy_add 的 dstDir、share_save / offline_add 的 copyDstDir 填之前，先用 drive_browse(account: OpenList 账号名, path: 目标目录) 看有哪些子目录，填成对应的那个；任务上已经填了目标目录的，不填就落在那里。",
   "已经复制到 OpenList 的，用户想把网盘上那份收起来：copy_after 归档（挪进任务目录下的「归档」，可逆）或删除（要「删除」档）；会先核对目标里那份齐了才动，本地对应的 strm 跟着删。调用前先告诉用户。",
   "用户想把网盘上某部片 / 某个目录收起来、不在库里出现但先别删：drive_archive 挪进任务目录下的「归档」（暂存区，可逆，本地对应的 strm 跟着删）；它不管有没有复制过、不核对副本。要先复制到本地再收的，用 copy_add（afterCopy: archive）或 copy_after。调用前先告诉用户。",
   "用户想清理归档、腾网盘空间：drive_archive_clean 不传 paths / all 先列归档里有什么，把清单给用户看，同意后再传 paths 或 all: true 删（进回收站，不可逆，要「删除」档）。令牌没有这个工具的，让用户到 strm 管理页「工具」里点「清理归档」。",

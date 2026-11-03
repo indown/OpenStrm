@@ -756,6 +756,8 @@ export const api = {
       name?: string;
       organize?: boolean;
       copy?: boolean;
+      /** 这次复制到 OpenList 里的哪个目录：只能是任务上 / 设置页的目标目录或它们下面的（界面上没有入口，REST / 智能体用） */
+      copyDstDir?: string;
     }) => data(axiosInstance.post<ShareReceiveResult>("/api/share", { action: "receive", ...body }, { timeout: 180_000 })),
   },
 

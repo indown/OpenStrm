@@ -356,6 +356,87 @@ test("转存：明说要复制却没配好，转存前就报 COPY_NOT_READY、�
   }
 });
 
+test("转存：copyDstDir 指定复制到目标目录下的子目录（落点进记录和结果）；越界、没复制却给了都在转存前被拒；任务上关着开关填的目标目录，copy_add / 一次性复制都落在那里、tasks_list 也带", async () => {
+  // tv 任务：没开自动复制，但任务上填了目标目录（任务弹框里开关关着也能填）
+  replaceTasks([{ ...tv, copyToOpenlist: { enabled: false, dstDir: "/local/media/tv" } }, movies, anime]);
+  const client = await connect(dailyToken);
+  try {
+    const before = d115.share!.calls.receive;
+    // 越界：转存前就拒
+    const outside = await call(client, "share_save", { link: defineShare("cpd1", ["/A.mkv"]), task: "tv", copy: true, copyDstDir: "/elsewhere" });
+    assert.equal(outside.isError, true);
+    assert.equal(outside.data.code, "COPY_DST_INVALID");
+    assert.match(outside.data.error, /只能是 \/local\/media\/tv 或 \/local\/media/);
+    assert.match(outside.data.hint, /drive_browse/);
+    // 没复制却给了
+    const unused = await call(client, "share_save", { link: defineShare("cpd2", ["/B.mkv"]), task: "tv", copyDstDir: "/local/media/movie" });
+    assert.equal(unused.isError, true);
+    assert.equal(unused.data.code, "COPY_DST_UNUSED");
+    assert.match(unused.data.error, /这次不会复制/);
+    assert.equal(d115.share!.calls.receive, before, "两次都没转存");
+    assert.equal(listCopies().length, 0);
+
+    // 指定子目录：记录和结果都落在那里（尾斜杠归一）
+    const link3 = defineShare("cpd3", ["/C.mkv"]);
+    const picked = await call(client, "share_save", { link: link3, task: "tv", copy: true, copyDstDir: "/local/media/movie/" });
+    assert.equal(picked.data.state, "done", JSON.stringify(picked.data));
+    assert.equal(picked.data.copy.queued, 1);
+    assert.equal(picked.data.copy.dstDir, "/local/media/movie");
+    assert.match(picked.data.copy.note, /复制到 \/local\/media\/movie 下/);
+    const c = listCopies().find((r) => r.name === "C.mkv")!;
+    assert.equal(c.dstDir, "/local/media/movie");
+    assert.equal(c.afterCopy, "keep");
+
+    // 不指定：落在任务上填的目标目录（开关关着也算数）
+    const own = await call(client, "share_save", { link: defineShare("cpd4", ["/D.mkv"]), task: "tv", copy: true });
+    assert.equal(own.data.copy.dstDir, "/local/media/tv", JSON.stringify(own.data));
+    assert.equal(listCopies().find((r) => r.name === "D.mkv")!.dstDir, "/local/media/tv");
+
+    // 任务开着复制的（movies）：不传 copy 也能指定，去向照旧只看任务设置
+    const onTask = await call(client, "share_save", { link: defineShare("cpd5", ["/E.mkv"]), task: "movies", copyDstDir: "/local/movies/4K" });
+    assert.equal(onTask.data.copy.queued, 1, JSON.stringify(onTask.data));
+    assert.equal(onTask.data.copy.dstDir, "/local/movies/4K");
+    assert.equal(onTask.data.copy.deleteSource, true);
+    assert.equal(listCopies().find((r) => r.name === "E.mkv")!.dstDir, "/local/movies/4K");
+
+    // copy_add 不给 dstDir：也落在任务上填的目标目录
+    d115.tree.addFile("/tv/Show/E01.mkv");
+    const manual = await call(client, "copy_add", { task: "tv", paths: ["Show"] });
+    assert.equal(manual.isError, false, JSON.stringify(manual.data));
+    assert.equal(manual.data.dstDir, "/local/media/tv");
+    assert.equal(listCopies().find((r) => r.name === "Show")!.dstDir, "/local/media/tv");
+
+    // tasks_list：关着开关但填了目标目录的也带 copyToOpenlist（enabled: false，一次性复制的去向只会是不动）
+    const tasks = await call(client, "tasks_list", {});
+    const byId = new Map(tasks.data.tasks.map((t: Record<string, any>) => [t.id, t]));
+    assert.deepEqual((byId.get("c-tv") as Record<string, any>).copyToOpenlist, { enabled: false, dstDir: "/local/media/tv", afterCopy: "keep", afterCopyText: "不动", deleteSource: false });
+    assert.equal((byId.get("c-anime") as Record<string, any>).copyToOpenlist, undefined, "没开、也没填目标目录的不带");
+
+    // 同样的内容刚转存过、这次换了 copyDstDir：上次那次复制到哪已经定了，如实说、不再排
+    const again = await call(client, "share_save", { link: link3, task: "tv", copy: true, copyDstDir: "/local/media/tv" });
+    assert.equal(again.data.duplicate, true, JSON.stringify(again.data));
+    assert.match(again.data.copyDstDirNote, /没用上/);
+    assert.equal(listCopies().filter((r) => r.name === "C.mkv").length, 1, "没再排一份");
+
+    // 带 follow 的一次性复制：追更不沿用，结果里说清楚
+    const followed = await call(client, "share_save", { link: defineShare("cpd6", ["/F.mkv"]), task: "tv", copy: true, copyDstDir: "/local/media/tv", follow: true });
+    assert.equal(followed.data.state, "done", JSON.stringify(followed.data));
+    assert.ok(followed.data.follow?.id, JSON.stringify(followed.data));
+    assert.match(followed.data.copyFollowNote, /只管这一次/);
+
+    // 关着开关但填了目标目录的任务：设置没配齐时也带 blocked（一次性复制会被拒，别让模型以为能复制）
+    patchAppSettings({ openlistCopy: { ...COPY_SETTINGS, mounts: {} } });
+    const blockedList = await call(client, "tasks_list", {});
+    const tvBlocked = blockedList.data.tasks.find((t: { id: string }) => t.id === "c-tv");
+    assert.match(tvBlocked.copyToOpenlist.blocked, /挂载根/);
+    patchAppSettings({ openlistCopy: COPY_SETTINGS });
+  } finally {
+    await stopCopyWatcher();
+    await client.close();
+    replaceTasks([tv, movies, anime]);
+  }
+});
+
 test("转存去重：多要 copy 只补上次真正转存的条目、不再转存；不在原处的（被挪走、换成同名的另一份）不补；再要一次不会排两份", async () => {
   const client = await connect(dailyToken);
   try {
@@ -570,13 +651,13 @@ test("云下载：任务开着复制时 copy: false 被拒；给了 copyDstDir �
     for (const args of [{ copyDstDir: "/local/media/x" }, { task: "tv", copyDstDir: "/local/media/x" }, { task: "tv", copy: false, copyDstDir: "/local/media/x" }]) {
       const res = await call(client, "offline_add", { urls: MAGNET, ...args });
       assert.equal(res.isError, true, JSON.stringify(args));
-      assert.equal(res.data.code, "VALIDATION");
+      assert.equal(res.data.code, "COPY_DST_UNUSED");
       assert.match(res.data.error, /copyDstDir/);
     }
     // 复制目标只能在任务上、设置页的目标目录下面：别的网盘的挂载根不行
     const outside = await call(client, "offline_add", { urls: MAGNET, task: "movies", copyDstDir: "/quark/x" });
     assert.equal(outside.isError, true);
-    assert.equal(outside.data.code, "VALIDATION");
+    assert.equal(outside.data.code, "COPY_DST_INVALID");
     assert.match(outside.data.error, /\/local\/movies 或 \/local\/media/);
     assert.equal(listFollowups().length, 0);
     // 任务开着复制：不传 copy 也算会复制，copyDstDir 有用（在任务的目标目录下面）
@@ -1054,8 +1135,8 @@ test("总览和任务列表：复制配没配好、队列里在跑的 / 失败�
 
     const tasks = await call(client, "tasks_list", {});
     const byId = new Map(tasks.data.tasks.map((t: Record<string, any>) => [t.id, t]));
-    assert.deepEqual((byId.get("c-movies") as Record<string, any>).copyToOpenlist, { dstDir: "/local/movies", afterCopy: "delete", afterCopyText: "删除", deleteSource: true });
-    assert.equal((byId.get("c-tv") as Record<string, any>).copyToOpenlist, undefined, "没开复制的不带");
+    assert.deepEqual((byId.get("c-movies") as Record<string, any>).copyToOpenlist, { enabled: true, dstDir: "/local/movies", afterCopy: "delete", afterCopyText: "删除", deleteSource: true });
+    assert.equal((byId.get("c-tv") as Record<string, any>).copyToOpenlist, undefined, "没开复制、也没填目标目录的不带");
 
     patchAppSettings({ openlistCopy: { ...COPY_SETTINGS, mounts: {} } });
     const blocked = await call(client, "tasks_list", {});

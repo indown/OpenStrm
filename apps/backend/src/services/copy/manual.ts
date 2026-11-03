@@ -24,7 +24,7 @@ import type { DriveProvider, SubtreeEntry } from "../drive/types.js";
 import { autoOrganizeBusy } from "../organize/auto.js";
 import { isStagingDir } from "../strm/staging.js";
 import { normalizeRel } from "../strm/manage.js";
-import { baseName, copyBlockerFor, copyDstProblem, copyOptionsFor, dstDirFor, joinPath, normConfigDir, normDir, normTargetDir, parentDir, resolveCopyConfig, type CopyConfig } from "./paths.js";
+import { baseName, checkCopyDstDir, copyBlockerFor, copyOptionsFor, dstDirFor, joinPath, normDir, normTargetDir, parentDir, resolveCopyConfig, type CopyConfig } from "./paths.js";
 import { enqueueCopy, findCoveringRecord, isMissingDir, listOpenlistEntries, lookupFresh, withAfterCopy, type CopyOutcome, type CopySource, type OpenlistTargetEntry } from "./service.js";
 
 const log = moduleLogger("copy-manual");
@@ -88,12 +88,8 @@ export async function enqueueManualCopy(input: ManualCopyInput): Promise<ManualC
   const settings = readAppSettings();
   const blocked = copyBlockerFor(settings)(task);
   if (blocked) throw http(400, `没法复制到 OpenList：${blocked}`, "COPY_NOT_READY");
-  const dst = normConfigDir(input.dstDir);
-  if (input.dstDir !== undefined && input.dstDir.trim() !== "" && !dst) throw http(400, "dstDir 不是一个有效的路径", "VALIDATION");
-  if (dst) {
-    const why = copyDstProblem(dst, task, settings);
-    if (why) throw http(400, why, "COPY_DST_INVALID");
-  }
+  // 这次指定的目标：和转存 / 云下载同一道校验（手动复制一定复制，所以只剩路径有效、不越界两条）
+  const dst = checkCopyDstDir(task, true, input.dstDir, settings);
   const rels = uniquePaths(input.paths);
   assertNotOrganizing(task);
   const opts = copyOptionsFor(task, true, settings, dst);

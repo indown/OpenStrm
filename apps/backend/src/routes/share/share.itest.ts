@@ -268,6 +268,38 @@ test("这次明确勾了复制、这个账号却没填挂载根：转存前就 4
   }
 });
 
+test("receive 带 copyDstDir：复制落在指定的子目录；越界、不复制却给了都是 400，网盘不碰", async () => {
+  const ol: AccountInfo = { accountType: "openlist", name: "ol", account: "u", password: "p", url: "http://ol.local" };
+  replaceAccounts([a115, aQuark, ol]);
+  patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/local/media", mounts: { a: "/115" } } });
+  const receivedBefore = d115.share!.calls.receive;
+  try {
+    const list = await post({ action: "list", url: LINK_115 });
+    const readme = (list.json().entries as Array<{ id: string; name: string; isDir: boolean }>).find((e) => e.name === "readme.txt")!;
+    const outside = await post({ action: "receive", url: LINK_115, taskId: "s-115", mode: "sync", items: [readme], copy: true, copyDstDir: "/elsewhere" });
+    assert.equal(outside.statusCode, 400, outside.body);
+    assert.equal(outside.json().code, "COPY_DST_INVALID");
+    assert.match(outside.json().message, /只能是 \/local\/media/);
+    const unused = await post({ action: "receive", url: LINK_115, taskId: "s-115", mode: "sync", items: [readme], copyDstDir: "/local/media/tv" });
+    assert.equal(unused.statusCode, 400, unused.body);
+    assert.equal(unused.json().code, "COPY_DST_UNUSED");
+    assert.equal(d115.share!.calls.receive, receivedBefore, "转存都没发起");
+    assert.equal(listCopies().length, 0);
+
+    const res = await post({ action: "receive", url: LINK_115, taskId: "s-115", mode: "sync", items: [readme], copy: true, copyDstDir: "/local/media/tv/" });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().copy?.dstDir, "/local/media/tv", "尾斜杠归一");
+    const [c] = listCopies();
+    assert.equal(c.name, "readme.txt");
+    assert.equal(c.dstDir, "/local/media/tv");
+  } finally {
+    await stopCopyWatcher();
+    clearCopies();
+    replaceAccounts([a115, aQuark]);
+    patchAppSettings({ openlistCopy: baseline.settings.openlistCopy });
+  }
+});
+
 test("后台模式：同步迟迟起不来（远端目录树导出慢）也先回话，不让前端超时报「保存失败」", async () => {
   __test_setAsyncStartGrace(50);
   let release: () => void = () => {};

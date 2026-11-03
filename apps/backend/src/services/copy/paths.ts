@@ -225,6 +225,32 @@ export function copyDstProblem(dstDir: string, task: Pick<TaskDefinition, "copyT
   return `复制目标只能是 ${bases.join(" 或 ")}，或者它下面的目录`;
 }
 
+/**
+ * 这一次指定的复制目标（转存 / 云下载的 copyDstDir、手动复制的 dstDir）能不能用，三条规则只在这里写一遍：
+ *   路径得有效；这次得会复制（明说 copy: true，或任务开着复制——任务开着却传 copy: false 的要说清楚监控照样会复制，不能说成「这次不会复制」）；
+ *   只能是任务上 / 设置页的目标目录或它们下面的目录（copyDstProblem）。
+ * 没给（或空串）回 undefined，给了回归一过的路径；不行就抛 400 的 HttpError，code 是
+ * VALIDATION / COPY_ALWAYS_ON / COPY_DST_UNUSED / COPY_DST_INVALID。REST、智能体、手动复制都走它，说法和代码才不会各漂各的
+ */
+export function checkCopyDstDir(
+  task: Pick<TaskDefinition, "copyToOpenlist"> | null,
+  copy: boolean | undefined,
+  copyDstDir: string | undefined,
+  settings: AppSettings = readAppSettings(),
+): string | undefined {
+  if (copyDstDir === undefined || copyDstDir.trim() === "") return undefined;
+  const dst = normConfigDir(copyDstDir);
+  if (!dst) throw new HttpError(400, "指定的复制目标不是一个有效的路径", { code: "VALIDATION" });
+  const byTask = task?.copyToOpenlist?.enabled === true;
+  if (copy === false && byTask) {
+    throw new HttpError(400, "这个任务开着「复制到 OpenList」，这次没法不复制（网盘监控也会把新文件交给复制）：要指定这次复制到哪，就别传 copy: false", { code: "COPY_ALWAYS_ON" });
+  }
+  if (!(copy ?? byTask)) throw new HttpError(400, "给了 copyDstDir，但这次不会复制到 OpenList：要复制就带上 copy: true，不复制就别给 copyDstDir", { code: "COPY_DST_UNUSED" });
+  const why = copyDstProblem(dst, task, settings);
+  if (why) throw new HttpError(400, why, { code: "COPY_DST_INVALID" });
+  return dst;
+}
+
 /** 只问「这次要不要复制」 */
 export function copyEnabledFor(
   task: Pick<TaskDefinition, "account" | "copyToOpenlist"> | null,

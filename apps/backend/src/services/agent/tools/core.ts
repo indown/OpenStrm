@@ -125,7 +125,7 @@ export const tasksListTool = defineTool({
   name: "tasks_list",
   title: "同步任务列表",
   description:
-    "列出同步任务：每个任务把一个网盘目录（drivePath）同步成本地的 strm 目录（localPath）。返回 id、label（界面上的叫法「账号 · 网盘路径」）、定时、是否开了 302、是否在跑、上次结果；开了「复制到 OpenList」的带 copyToOpenlist：转存、追更、云下载落进来的新文件会复制到哪（dstDir）、复制成功后源文件的去向（afterCopy：keep 不动 / delete 删除 / archive 挪进任务目录下的「归档」）、开着却复制不了的原因（blocked）。其它工具引用任务时可以传 id、网盘路径、本地路径或它们的最后一段。可用 query 按路径或账号过滤，最多返回 50 个。",
+    "列出同步任务：每个任务把一个网盘目录（drivePath）同步成本地的 strm 目录（localPath）。返回 id、label（界面上的叫法「账号 · 网盘路径」）、定时、是否开了 302、是否在跑、上次结果；开了「复制到 OpenList」或任务上填了复制目标目录的带 copyToOpenlist：enabled 开没开自动复制（开着的话转存、追更、云下载落进来的新文件会自动复制走）、复制到哪（dstDir；关着时 copy_add 和转存 / 云下载一次性要的复制也落在这里）、复制成功后源文件的去向（afterCopy：keep 不动 / delete 删除 / archive 挪进任务目录下的「归档」）、复制不了的原因（blocked：开着的不会自动复制，关着的一次性复制会被拒）。其它工具引用任务时可以传 id、网盘路径、本地路径或它们的最后一段。可用 query 按路径或账号过滤，最多返回 50 个。",
   scope: "read",
   toolset: null,
   annotations: LOCAL_READ,

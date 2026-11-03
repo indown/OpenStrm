@@ -381,6 +381,10 @@
         },
         "copy": {
           "type": "boolean"
+        },
+        "copyDstDir": {
+          "type": "string",
+          "maxLength": 1000
         }
       },
       "required": [

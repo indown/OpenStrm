@@ -11,7 +11,7 @@ import { driveErrorToHttp } from "../drive/errors.js";
 import { assertSameKind, providerForTask } from "../drive/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type ShareRef } from "../drive/types.js";
 import { COPY_TRIGGER_LABEL, enqueueCopyFor, type CopyOutcome } from "../copy/service.js";
-import { copyBlockerFor, copyOptionsFor } from "../copy/paths.js";
+import { checkCopyDstDir, copyBlockerFor, copyOptionsFor } from "../copy/paths.js";
 import { releaseCopyHoldsById, type CopyTrigger } from "../copy/queue.js";
 import { events } from "../events.js";
 import { effectiveAutoMode } from "../organize/auto.js";
@@ -51,6 +51,11 @@ export interface SaveSelectionOpts {
   organize?: boolean;
   /** 这次强制复制到 OpenList / 强制不复制；不给就按任务上的开关 */
   copy?: boolean;
+  /**
+   * 这次复制到 OpenList 里的哪个目录（完整路径）：只能是任务上 / 设置页的目标目录或它们下面的目录（比如按类型分的 tv / movie 子目录）；
+   * 不给用任务上的，再没有用设置页的。给了却这次不会复制的是调用方传错了，直接拒
+   */
+  copyDstDir?: string;
   /** 复制队列里记的来源，不给就是「分享转存」；追更复用这条路时写成「追更」 */
   copyTrigger?: CopyTrigger;
   /**
@@ -173,6 +178,8 @@ export async function saveSelectionToTask(opts: SaveSelectionOpts): Promise<Save
     const why = copyBlockerFor(settings)(task);
     if (why) throw new HttpError(400, `没法复制到 OpenList：${why}。先到设置页的「复制到 OpenList」里配好，或者这次不勾复制`);
   }
+  // 这次指定的复制目标：和 REST / 智能体 / 手动复制同一道校验（给了却不复制、越界都在动网盘之前拒）
+  const copyDstDir = checkCopyDstDir(task, opts.copy, opts.copyDstDir, settings);
 
   const fullOriginPath = subPath ? `${task.originPath}/${subPath}` : task.originPath;
   let targetId: string;
@@ -219,6 +226,7 @@ export async function saveSelectionToTask(opts: SaveSelectionOpts): Promise<Save
     items: items.map((i, idx) => ({ name: i.name, isDir: i.isDir, nodeId: ids[idx] })),
     subPath,
     copy: opts.copy,
+    copyDstDir,
     settings,
     organizing,
     trigger: opts.copyTrigger,
@@ -281,6 +289,8 @@ export function enqueueReceivedCopy(input: {
   items: Array<{ name: string; isDir: boolean; nodeId?: string }>;
   subPath: string;
   copy: boolean | undefined;
+  /** 这次复制到哪（已经过 copy/paths.ts 的 checkCopyDstDir）；不给用任务上的，再没有用设置页的 */
+  copyDstDir?: string;
   settings: AppSettings;
   organizing: boolean;
   /** 复制队列里记的来源，默认「分享转存」 */
@@ -292,7 +302,7 @@ export function enqueueReceivedCopy(input: {
   const trigger = input.trigger ?? "share";
   const dir = input.subPath ? `${task.originPath}/${input.subPath}` : task.originPath;
   return enqueueCopyFor(
-    copyOptionsFor(task, input.copy, input.settings),
+    copyOptionsFor(task, input.copy, input.settings, input.copyDstDir),
     {
       account: input.account,
       sources: input.items.map((i) => ({ path: `${dir}/${i.name}`, isDir: i.isDir, nodeId: i.nodeId })),

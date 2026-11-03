@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LRUCache } from "lru-cache";
 import { z } from "zod";
-import type { AgentToken, CopyAfterCopy, TaskDefinition } from "@openstrm/shared";
+import type { AgentToken, AppSettings, CopyAfterCopy, TaskDefinition } from "@openstrm/shared";
 import { getAccount, listAccounts } from "../../../db/repositories/accounts.js";
 import { listByShareCode } from "../../../db/repositories/media-library.js";
 import { readAppSettings } from "../../../db/repositories/settings.js";
@@ -33,7 +33,7 @@ import { withAfterCopy, type CopyOutcome } from "../../copy/service.js";
 import { ARCHIVE_MAX, archiveToStaging, type ArchiveItem, type ArchiveItemOutcome, type ArchiveSummary } from "../../copy/archive.js";
 import { CLEAN_MAX, cleanArchive, listArchive, uniqueArchivePaths, type ArchiveListing, type CleanItem, type CleanItemOutcome, type CleanSummary } from "../../copy/archive-clean.js";
 import { HttpError } from "../../../lib/http-error.js";
-import { copyBlockerFor, copyDstProblem, copyOptionsFor, normConfigDir } from "../../copy/paths.js";
+import { checkCopyDstDir, copyBlockerFor, copyOptionsFor, joinPath, normTargetDir } from "../../copy/paths.js";
 import { isSafeItemName } from "../../strm/share-strm.js";
 import { normalizeSubPath } from "../../strm/naming.js";
 import { hasScope, hasToolset } from "../access.js";
@@ -43,7 +43,7 @@ import { JOB_RETENTION_MS, latestJob, startJob, viewJob, waitForJob, type Job, t
 import { resolveTask, taskBrief } from "../resolve.js";
 import { MAX_WAIT_SECONDS } from "./core.js";
 import { organizeUiPath } from "./organize-view.js";
-import { afterCopyNote, copyAlwaysOn, copyNotReady, copyOutcomeView, copyProblemFor } from "./copy.js";
+import { DST_SUBDIR_HINT, afterCopyNote, copyAlwaysOn, copyNotReady, copyOutcomeView, copyProblemFor } from "./copy.js";
 import { AFTER_COPY_LABEL } from "../../../lib/after-copy.js";
 
 /* ------------------------------- 小缓存 ------------------------------- */
@@ -81,7 +81,7 @@ const BROWSE_LIMIT = 100;
 export const driveBrowseTool = defineTool({
   name: "drive_browse",
   title: "浏览网盘目录",
-  description: `列网盘上一个目录下的子目录（外加文件个数），给转存、云下载挑目标目录用。给 task 时路径相对任务的网盘目录（和 share_save 的 subPath 同一个口径）；不给 task 就要给 account，路径从网盘根算。最多列 ${BROWSE_LIMIT} 个子目录。`,
+  description: `列网盘上一个目录下的子目录（外加文件个数），给转存、云下载挑目标目录用。给 task 时路径相对任务的网盘目录（和 share_save 的 subPath 同一个口径）；不给 task 就要给 account，路径从网盘根算。account 也可以是 OpenList 账号（overview 里能看到）：用来看「复制到 OpenList」的目标目录下分了哪些子目录（比如 tv / movie），再决定 copy_add / share_save / offline_add 复制到哪；按账号浏览时结果里的 drivePath 从网盘根算、带前导 /，拼上子目录名就能直接当复制目标。最多列 ${BROWSE_LIMIT} 个子目录。`,
   scope: "read",
   toolset: "transfer",
   annotations: REMOTE_READ,
@@ -131,7 +131,8 @@ export const driveBrowseTool = defineTool({
       account: provider.account.name,
       ...(task ? { task: taskBrief(task) } : {}),
       path: rel,
-      drivePath: full || "/",
+      // 按账号浏览的从网盘根算、带前导 /（OpenList 账号的拿来就是复制目标）；按任务的沿用任务目录的写法
+      drivePath: task ? full || "/" : joinPath("/", full),
       dirs: items,
       dirCount: total,
       fileCount: listing.fileCount,
@@ -510,6 +511,8 @@ interface SaveMeta {
   /** 会的话，复制成功后删不删网盘上的源文件（只看任务的「复制后删源」） */
   /** 发起时按任务设置定下的、复制成功后源文件的去向 */
   copyAfter: CopyAfterCopy;
+  /** 会复制的话复制到哪（这次指定的 / 任务上的 / 设置页的）：进行中那次的回话里说 */
+  copyDstDir?: string;
   /**
    * 这次转存的条目。不给 itemIds 的整层转存，去重键是「这一层的全部」，再来一次时分享里可能已经多了东西：
    * 补整理、补复制只能认上次真正存进来的这些，不能拿分享现在的样子去对
@@ -554,6 +557,7 @@ function prevCopy(prev: PreviousSave): Record<string, unknown> | undefined {
     const after = afterCopyNote(prev.meta.copyAfter);
     return {
       pending: true,
+      ...(prev.meta.copyDstDir ? { dstDir: prev.meta.copyDstDir } : {}),
       ...withAfterCopy(prev.meta.copyAfter),
       note: after ? `进行中的那次转存完会排进复制队列，${after}。` : "进行中的那次转存完会排进复制队列。",
     };
@@ -582,7 +586,7 @@ function extrasWanted(
 }
 
 /** 同样的请求最近转存过时的回话：带上上次那次的复制情况；这次说了 copy: false 而上次已经复制的，说清楚管不了 */
-function duplicateResult(prev: PreviousSave, args: { copy?: boolean }, extra: Record<string, unknown> = {}): Record<string, unknown> {
+function duplicateResult(prev: PreviousSave, args: { copy?: boolean; copyDstDir?: string }, extra: Record<string, unknown> = {}): Record<string, unknown> {
   const { job, view } = prev;
   const copy = prevCopy(prev);
   const base = {
@@ -591,6 +595,10 @@ function duplicateResult(prev: PreviousSave, args: { copy?: boolean }, extra: Re
     ...(copy ? { copy } : {}),
     ...(args.copy === false && prevCopied(prev)
       ? { copyNote: "上次那次已经排进了复制队列，这次的 copy: false 管不了它；要撤回，得请用户在 OpenStrm 云下载页的「复制到 OpenList」里把那几条去掉。" }
+      : {}),
+    // 这次换了复制目标、却没有再排复制（extra.copy 是补上了复制才有的）：上次那次复制到哪已经定了，不能悄悄当成办成了
+    ...(args.copyDstDir?.trim() && extra.copy === undefined
+      ? { copyDstDirNote: "这次的 copyDstDir 没用上：同样的内容刚转存过，上次那次复制到哪已经定了（见 copy）。要换地方，得请用户在 OpenStrm 云下载页的「复制到 OpenList」里把那几条去掉，再用 copy_add 带 dstDir 重新排。" }
       : {}),
   };
   if (job.status === "running") {
@@ -691,10 +699,34 @@ async function ensureSubDir(provider: DriveProvider, base: string, rel: string):
   }
 }
 
+/**
+ * share_save / offline_add 的 copyDstDir：规则在 copy/paths.ts 的 checkCopyDstDir 里（和 REST、手动复制同一道），
+ * 这里只把 400 换成带 hint 的 ToolError。没给回 undefined，给了回归一过的路径
+ */
+function copyDstDirArg(task: TaskDefinition | null, copy: boolean | undefined, copyDstDir: string | undefined, settings: AppSettings): string | undefined {
+  try {
+    return checkCopyDstDir(task, copy, copyDstDir, settings);
+  } catch (err) {
+    if (!(err instanceof HttpError)) throw err;
+    const code = typeof err.extra.code === "string" ? err.extra.code : "VALIDATION";
+    const hint =
+      code === "COPY_DST_INVALID"
+        ? "不指定 copyDstDir 就复制到任务上或设置页的目标目录；要换地方得在它下面挑（可以用 drive_browse 看 OpenList 账号的目录）。"
+        : code === "COPY_DST_UNUSED"
+          ? task
+            ? "要复制就传 copy: true；不复制就别传 copyDstDir。"
+            : "不给 task 时要复制得传 copy: true；不复制就别传 copyDstDir。"
+          : code === "COPY_ALWAYS_ON"
+            ? "要不复制，得请用户先在任务设置里关掉「复制到 OpenList」；要指定这次复制到哪就别传 copy: false。"
+            : "填 OpenList 里的完整路径，比如 /local/media/tv。";
+    throw new ToolError(code, err.message, hint);
+  }
+}
+
 export const shareSaveTool = defineTool({
   name: "share_save",
   title: "转存分享",
-  description: `把 115 / 夸克分享里的条目转存到某个同步任务的网盘目录（可带子目录），然后为它们生成 strm。**这会往网盘里写东西，调用前先把要转存什么、存到哪告诉用户，得到同意再调用。** 不给 itemIds 就转存 dirId 这一层（默认分享的根）下的全部条目。分享和任务必须是同一家网盘。同样的请求在进行中、或结束不到 10 分钟时不会再转存一次（直接返回上次的作业；这次多要了 follow、organize 或 copy 就只补这几样，补的只是上次真正转存进来的那些条目），确实要再存一份传 force: true；结果里有 received: true 的失败表示条目已经进了网盘、只是 strm 没生成好，这时别再转存，用 sync_start 补 strm。${SAVE_INLINE_WAIT_MS / 1000} 秒内做完就直接返回结果，做不完返回 jobId，用 job_status 等（结果保留 ${JOB_RETENTION_MS / 60000} 分钟）。follow 为 true 时顺手建追更订阅，之后分享里有新增会自动转存。copy 管复不复制到 OpenList（由 OpenList 把转存进来的条目复制到另一个存储，比如本地磁盘）：不传按任务的设置（tasks_list 里任务的 copyToOpenlist），true 这次也复制（任务没开也复制）；任务开着复制的没法这次不复制（和界面一样，网盘监控也会把新文件交给复制），传 false 会被拒。复制成功后源文件的去向只看任务设置（tasks_list 里 copyToOpenlist.afterCopy）：delete 会删掉网盘上的源文件和本地对应的 strm，archive 会把源文件挪进任务目录下的「归档」目录，都要事先告诉用户。结果里的 copy 说排没排上、源文件的去向。`,
+  description: `把 115 / 夸克分享里的条目转存到某个同步任务的网盘目录（可带子目录），然后为它们生成 strm。**这会往网盘里写东西，调用前先把要转存什么、存到哪告诉用户，得到同意再调用。** 不给 itemIds 就转存 dirId 这一层（默认分享的根）下的全部条目。分享和任务必须是同一家网盘。同样的请求在进行中、或结束不到 10 分钟时不会再转存一次（直接返回上次的作业；这次多要了 follow、organize 或 copy 就只补这几样，补的只是上次真正转存进来的那些条目），确实要再存一份传 force: true；结果里有 received: true 的失败表示条目已经进了网盘、只是 strm 没生成好，这时别再转存，用 sync_start 补 strm。${SAVE_INLINE_WAIT_MS / 1000} 秒内做完就直接返回结果，做不完返回 jobId，用 job_status 等（结果保留 ${JOB_RETENTION_MS / 60000} 分钟）。follow 为 true 时顺手建追更订阅，之后分享里有新增会自动转存。copy 管复不复制到 OpenList（由 OpenList 把转存进来的条目复制到另一个存储，比如本地磁盘）：不传按任务的设置（tasks_list 里任务的 copyToOpenlist），true 这次也复制（任务没开也复制）；任务开着复制的没法这次不复制（和界面一样，网盘监控也会把新文件交给复制），传 false 会被拒。复制成功后源文件的去向只看任务设置（tasks_list 里 copyToOpenlist.afterCopy）：delete 会删掉网盘上的源文件和本地对应的 strm，archive 会把源文件挪进任务目录下的「归档」目录，都要事先告诉用户。copyDstDir 指定这次复制到 OpenList 里的哪个目录，只能是任务上或设置页填的目标目录、或者它们下面的目录。copy / copyDstDir 只管这一次转存：带 follow 时之后追更的新增按任务上的开关和目标目录来，想让追更也复制到同一处，让用户在任务上开开关 / 填目标目录。结果里的 copy 说排没排上、复制到哪、源文件的去向。`,
   scope: "write",
   toolset: "transfer",
   annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true },
@@ -716,6 +748,11 @@ export const shareSaveTool = defineTool({
       .boolean()
       .optional()
       .describe("复制到 OpenList：true 这次也复制（任务没开也复制）；不填按任务的设置；任务开着复制的传 false 会被拒。删不删源只看任务设置"),
+    copyDstDir: z
+      .string()
+      .max(1000)
+      .optional()
+      .describe(`复制到 OpenList 里的哪个目录（完整路径）：只能是任务上或设置页填的目标目录、或者它们下面的目录；不填用任务上的，再没有用设置页的；只在复制时有用。${DST_SUBDIR_HINT}`),
   }),
   async run(args, ctx) {
     const task = resolveTask(args.task);
@@ -731,6 +768,8 @@ export const shareSaveTool = defineTool({
     }
     // 任务开着复制时「这次不复制」兑现不了：网盘监控会把转存进来的新文件照样交给复制（界面上的勾选框也是锁住的）
     if (args.copy === false && task.copyToOpenlist?.enabled === true) throw copyAlwaysOn();
+    // 这次指定的复制目标：和 offline_add、REST 同一道校验，转存前就说
+    const copyDstDir = copyDstDirArg(task, args.copy, args.copyDstDir, settings);
     const share = target.share!;
     const dirId = args.dirId?.trim() || "0";
     const subPath = normalizeSubPath(args.subPath);
@@ -856,6 +895,7 @@ export const shareSaveTool = defineTool({
             items: inPlace.here,
             subPath,
             copy: true,
+            ...(copyDstDir ? { copyDstDir } : {}),
             settings,
             // 眼下有会直接执行的自动整理（这次补的、或者上次交过去还没办完的）：先压着，等它改完名再复制
             organizing: organizeMode === "auto" || autoOrganizeBusy(task.id),
@@ -876,12 +916,13 @@ export const shareSaveTool = defineTool({
       });
     }
 
-    const copyOpts = copyOptionsFor(task, args.copy, settings);
+    const copyOpts = copyOptionsFor(task, args.copy, settings, copyDstDir);
     const meta: SaveMeta = {
       follow: args.follow === true,
       organize: args.organize === false ? "off" : effectiveAutoMode(task, forcedOrganizeMode(task, args.organize)),
       copy: copyOpts.enabled,
       copyAfter: copyOpts.afterCopy,
+      ...(copyOpts.enabled ? { copyDstDir: copyOpts.dstDir || normTargetDir(settings.openlistCopy?.dstDir) || undefined } : {}),
       items: items.map((i) => ({ name: i.name, isDir: i.isDir })),
     };
     const job = startJob(
@@ -905,6 +946,7 @@ export const shareSaveTool = defineTool({
             settings: readAppSettings(),
             organize: args.organize,
             copy: args.copy,
+            ...(copyDstDir ? { copyDstDir } : {}),
             // 这次为转存建出来的子目录整个交给整理，挪空了跟着删；原来就有的只交条目
             ...(createdDir ? { createdDir } : {}),
           });
@@ -931,6 +973,10 @@ export const shareSaveTool = defineTool({
           ...(result.copy ? { copy: copyOutcomeView(result.copy, ctx.token) } : {}),
           ...(follow.follow ? { follow: { id: follow.follow.id, name: follow.follow.name, intervalMinutes: follow.follow.intervalMinutes } } : {}),
           ...(follow.followError ? { followError: follow.followError } : {}),
+          // 一次性的 copy / copyDstDir 不进追更订阅：之后的新增按任务上的开关和目标目录来，别让模型以为追更也会复制到同一处
+          ...(follow.follow && (args.copy === true || copyDstDir)
+            ? { copyFollowNote: "copy / copyDstDir 只管这一次转存：追更之后转存的新增按任务上的「复制到 OpenList」开关和目标目录来。想让追更也复制到同一处，请用户在任务上开开关 / 填目标目录。" }
+            : {}),
         };
       },
       { key: dedupKey, meta },
@@ -981,7 +1027,7 @@ export const offlineAddTool = defineTool({
       .string()
       .max(1000)
       .optional()
-      .describe("复制到 OpenList 里的哪个目录（完整路径）：只能是任务上或设置页填的目标目录、或者它们下面的目录；不填用任务上的，再没有用设置页的；只在复制时有用"),
+      .describe(`复制到 OpenList 里的哪个目录（完整路径）：只能是任务上或设置页填的目标目录、或者它们下面的目录；不填用任务上的，再没有用设置页的；只在复制时有用。${DST_SUBDIR_HINT}`),
   }),
   async run(args) {
     // 和提交时同一套认链接的规则：重复的、认不出的不占名额
@@ -1001,22 +1047,10 @@ export const offlineAddTool = defineTool({
       if (provider.kind !== "115") throw new ToolError("NOT_115", "云下载只支持 115 账号的任务", "换一个 115 账号的任务，或者不给 task 下到 115 默认目录。");
     }
     const settings = readAppSettings();
-    const copyDstDir = normConfigDir(args.copyDstDir);
     // 任务开着复制时「这次不复制」兑现不了：网盘监控会把下完落进任务目录的文件照样交给复制（界面上的勾选框也是锁住的）
     if (args.copy === false && task?.copyToOpenlist?.enabled === true) throw copyAlwaysOn();
-    // 不填按任务开关：开着的也算「会复制」，这时 copyDstDir 才有用
-    if (copyDstDir && !(args.copy ?? task?.copyToOpenlist?.enabled === true)) {
-      throw new ToolError(
-        "VALIDATION",
-        "给了 copyDstDir，但这次不会复制到 OpenList",
-        task ? "要复制就传 copy: true；不复制就别传 copyDstDir。" : "不给 task 时要复制得传 copy: true；不复制就别传 copyDstDir。",
-      );
-    }
-    // 这次指定的目标只能在任务上、设置页的目标目录下面（界面和 Telegram 都是从那儿往下选的），提交前就说
-    if (copyDstDir) {
-      const why = copyDstProblem(copyDstDir, task ?? null, settings);
-      if (why) throw new ToolError("VALIDATION", why, "不指定 copyDstDir 就复制到任务上或设置页的目标目录；要换地方得在它下面挑（可以用 drive_browse 看 OpenList 账号的目录）。");
-    }
+    // 这次指定的目标：和 share_save、REST 同一道校验（给了却不复制、越界都在提交前拒）
+    const copyDstDir = copyDstDirArg(task ?? null, args.copy, args.copyDstDir, settings);
     // 明说要复制却复制不了：提交前就说，别下完了才发现
     if (args.copy === true) {
       const account = task?.account ?? listAccounts().find((a) => a.accountType === "115")?.name;
