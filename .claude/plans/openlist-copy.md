@@ -919,3 +919,104 @@ Release #116 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 /
 发布提交 a3a6377（`chore(release): v2.20.0`），tag `v2.20.0`，范围 `v2.19.0..v2.20.0`：f5713df 测试、afb0c65 清理归档（rc.1 之后没动）、1039472 ChatGPT 接入说明（README + 设置页一句文案，发版途中用户提的，记录在 agent-access.md「核实记录」）和方案记录。没有迁移。没评审（rc.1 时用户跳过，正式版没补）；真机是 2026-10-28 做的，见上节「真机验证」，rc.1 之后的改动只有文档和那一句文案。
 本地：tsc / eslint、后端 1682 条、前端 11 条全过（版本号改完后跑的）；之后改了设置页文案，复跑前端 tsc / eslint，并用全新 scratch 库 + 真 Chrome 冒烟（浅色 / 深色 / 宽屏 / 390px 窄屏，正常折行、无横向溢出、控制台无错），实验环境已删。
 Release #117 四作业 + CI@v2 #145 + CI@main #146 全绿；Docker Hub `v2.20.0` 与 `latest` 同为 2a5e52970214（amd64 665164e9d869 / arm64 84abc709a208）；GitHub Release 非 prerelease、是仓库最新。main 从 f5713df 快进到 a3a6377，main == v2 == v2.20.0。更正：上面 rc.1 记录写的 main「仍在 4163124」不对，当时 main 已在 f5713df（比 v2.19.0 多 665d461 方案记录和 f5713df 测试，都不带功能代码），这次仍是纯快进。升级说明交用户手动贴。
+
+## 任务目标目录与开关解耦、智能体按类型选子目录（2026-11-03，方案）
+
+起因：用户把「复制到 OpenList」的默认目标目录设成 `/hdd`，下面按 `tv` / `movie` 分了子目录，希望智能体复制时放进对应的子目录；现在它不会主动选。用户看过分析后「按你的推荐制定计划开始吧」。
+
+### 现状
+
+- 落点 = 目标目录 + 条目相对任务目录的路径（`dstDirFor`），任务目录自己那一段（`tv`、`movie`）不带过去：默认目标 `/hdd` 时 `/tv/某剧` 和 `/movie/某片` 都平铺成 `/hdd/某剧`、`/hdd/某片`。
+- 任务级 `copyToOpenlist.dstDir` 后端各路都认：`copyOptionsFor` / `copyDstProblem` / `copySettingsGap` 读它时不看 `enabled`，copy_add、share_save 的 `copy: true`、云下载、监控、追更、Telegram 都会落到它下面。卡在任务弹框：只有开关打开才显示并保存「复制到哪」，关着就整块记成 `{ enabled: false }`——这就是以前记下没做的「任务目标与开关解耦」。
+- 智能体：`copy_add` 有 `dstDir`、`offline_add` 有 `copyDstDir`，`share_save` 没有；三处描述都只说「不填用任务上或设置页的目标目录」，没说目标根下可能按类型分了子目录；`drive_browse` 本来就能列 OpenList 账号的目录（`providerFor` 支持 openlist），但没人提；`tasks_list` 只给开着复制的任务带 `copyToOpenlist`，关着的看不到任务上填的目标目录。
+
+### 方案
+
+**1. 任务目标目录与开关解耦（主要是前端）**
+
+- 任务弹框 `AddTaskDialog`：「复制到哪」不再跟着 `copyEnabled` 走（OpenList 账号的任务除外，那种任务用不着复制）：开关关着也显示、也保存。说明按开关状态分别说：关着时「关着自动复制也用得上：手动复制、转存 / 云下载时一次性勾的复制都落在这里；不填用设置页的默认目标目录」，开着时沿用现在的话。读设置页 `openlistCopy` 的 effect 改成弹框一打开就读（原来只在开关打开时读，占位里的默认目标目录和「从 OpenList 里选」按钮都靠它）。表单校验「不能是 OpenList 根」不再只在开关开着时做。保存：`copyToOpenlist: { enabled, ...(dstDir ? { dstDir } : {}), ...(enabled ? { afterCopy } : {}) }`——去向照旧只在开着时存（关着留着「删除 / 归档」的话，以后一次性勾复制会连带删源，这条原则不变）。
+- 后端数据和校验不动（schema 本来就收 `{ enabled: false, dstDir }`，仓库层不丢字段）。`tasks_list`：开着复制、或者填了目标目录的任务都带 `copyToOpenlist`，里面多一个 `enabled`；描述改成「enabled 开没开自动复制，dstDir 是复制到哪（开关关着时手动复制 / 一次性勾的复制也落在这里）」。
+- 任务列表的「复制」徽标照旧只看开关。`AddCopyDialog`、`AddOfflineTaskDialog` 本来就读任务上的 `dstDir`，不用改。
+
+**2. `share_save` 加 `copyDstDir`（和 `offline_add` 对齐）**
+
+- 服务层 `SaveSelectionOpts.copyDstDir?` → `enqueueReceivedCopy({ copyDstDir })` → `copyOptionsFor(task, copy, settings, copyDstDir)`。`saveSelectionToTask` 动网盘之前校验：给了却这次不会复制（`copy ?? task.copyToOpenlist.enabled` 为假）→ 400 `COPY_DST_UNUSED`；越界 → 400 `COPY_DST_INVALID`（`copyDstProblem`，只能是任务上 / 设置页的目标目录或它们下面）。REST `POST /api/share` 的 `receive` 收 `copyDstDir`。
+- 工具：参数描述同 `offline_add`；提交前先按同样三条校验（`VALIDATION` 带 hint）；去重「多要 copy 只补复制」那条路也带着 `copyDstDir`；进行中那次的回话（`prevCopy`）带 `dstDir`。
+- 转存弹框（界面）不加子目录选择，见「不做」。
+
+**3. 描述与须知：让模型知道去看子目录**
+
+- `copy_add.dstDir`、`share_save.copyDstDir`、`offline_add.copyDstDir` 的描述加一句：目标目录下按类型分了子目录（比如 tv / movie）的，先用 `drive_browse(account: OpenList 账号, path: 目标目录)` 看一眼，填成对应的子目录；任务上填了目标目录的不填就落在那里。
+- `drive_browse` 描述说明 account 也可以是 OpenList 账号（看复制目标目录下有哪些子目录）；`copy_list` 描述提一句 config 里有 OpenList 账号名和默认目标目录。
+- `USAGE_NOTES` 加一条同样的话；`AGENT_INSTRUCTIONS` 不动（要短）。
+- 工具快照更新（`UPDATE_SNAPSHOTS=1`）。
+
+### 不做
+
+- 默认目标目录支持 `{task}` 占位（`/hdd/{task}` 自动展开成任务目录名）：改动面大（`copyDstProblem` 的根、Telegram 浏览根、设置页「检查」、各弹框的占位），任务级目标目录已经能解决，以后真有很多任务再说。
+- 转存弹框（`SaveToDriveDialog`）选复制子目录：界面上按任务填目标目录就够了。
+- 按 TMDB 识别结果自动分 tv / movie：混合库靠整理模板的二级分类把作品归进子目录，复制照搬层级，不用动复制模块。
+- 已经平铺到目标根下的内容不自动挪。
+
+### 测试
+
+- `routes/mcp/mcp-copy.itest.ts`：`share_save` 的 `copyDstDir`（落点进记录和结果；越界 `VALIDATION` 网盘没动；没复制却给了报错；任务开着复制时不传 copy 也能指定）；`tasks_list` 关着开关但填了 `dstDir` 的任务带 `copyToOpenlist.enabled: false`、开着的带 `enabled: true`；`copy_add` 不给 `dstDir` 时落到任务上关着开关填的目标目录。
+- `routes/share/share.itest.ts`：REST `receive` 带 `copyDstDir` 的落点；越界 400、不复制却给了 400，网盘不碰。
+- `services/agent/tools/tools.test.ts` 快照。
+- 浏览器冒烟：任务弹框关着开关填「复制到哪」→ 保存 → 重开还在、列表徽标不出现；打开开关 → 去向一栏出现、校验照旧；新建复制弹框的默认目标用任务上填的。
+
+### 进度
+
+- [x] 后端：service / REST / 工具 / 须知 / 快照 / 用例
+- [x] 前端：任务弹框
+- [x] README
+- [x] typecheck / lint / 浏览器冒烟（全量测试见实施记录）
+- [x] 评审（`/code-review medium` 7 条全修，见下）
+
+### 实施记录（2026-11-03）
+
+按方案做完，未提交。
+
+- 后端
+  - `services/share/receive.ts`：`SaveSelectionOpts.copyDstDir`；`checkCopyDstDir`（动网盘之前：空串当没给；归一后为空 400 `VALIDATION`；这次不会复制（`copy ?? task.copyToOpenlist.enabled` 为假）400 `COPY_DST_UNUSED`；越界 400 `COPY_DST_INVALID`）；`enqueueReceivedCopy({ copyDstDir })` → `copyOptionsFor(task, copy, settings, dstDir)`。
+  - `routes/share/index.ts`：`receive` 收 `copyDstDir`。
+  - `services/agent/tools/transfer.ts`：`share_save` 加 `copyDstDir`（提交前三条校验和 offline_add 一样，都是 `VALIDATION` 带 hint；去重补复制也带着；`SaveMeta.copyDstDir`，进行中那次的回话带 `dstDir`）；`drive_browse` / `offline_add` 的描述。`tools/copy.ts`：`DST_SUBDIR_HINT`（三个目标参数共用的一句）、`taskCopyView` 关着开关但填了目标目录的也带（多 `enabled` 字段；关着的去向只会是不动、不算 blocked）、`copy_add` / `copy_list` 描述。`tools/core.ts` 的 tasks_list 描述；`instructions.ts` 的 USAGE_NOTES 加一条；工具快照 +4 行（share_save 的 copyDstDir）。
+- 前端 `app/home/components/AddTaskDialog.tsx`：读设置页 `openlistCopy` 的 effect 改成弹框一打开就读；「复制到哪」挪到开关外面（OpenList 账号的任务整块不显示），说明按开关状态分别说；去向一栏只在开着时显示；OpenList 根校验不再看开关；保存成 `{ enabled, dstDir?（OpenList 任务不存）, afterCopy?（只在开着时） }`。`lib/api.ts` 的 receive 入参类型加 `copyDstDir`（界面没入口，只是对齐 REST）。
+- README：115 云下载一节加「任务上能单独填目标目录、开关关着也能填」；智能体一节「转存、云下载指定复制到哪」+ 子目录那句。
+- 测试：`routes/mcp/mcp-copy.itest.ts` +1（copyDstDir 落点进记录和结果 / 越界 / 没复制却给了 / 开着复制的任务不传 copy 也能指定 / copy_add 不给 dstDir 落在任务上关着开关填的目标目录 / tasks_list 带 `enabled: false`），原「总览和任务列表」用例改成带 `enabled: true`；`routes/share/share.itest.ts` +1（REST `copyDstDir` 落点 + `COPY_DST_INVALID` / `COPY_DST_UNUSED` 两种 400，网盘没动）。typecheck / lint 前后端都过；定向跑：mcp-copy 21、share + mcp + agent 50、tools / prompts / paths 29、前端 11，全过；后端全量 1711 条全过（5 分 05 秒）；`check-hygiene.sh` 过。
+- 浏览器冒烟（2026-11-03）：全新 scratch 库起 4100（临时随机口令）+ dev 3223；假 115 账号 `a`、连不上的 OpenList 账号 `ol`（127.0.0.1:9）、设置 `openlistCopy = { account: ol, dstDir: /hdd, mounts: { a: /115 } }`、任务 tv / movie。tv 任务弹框：开关关着也显示「复制到哪」（占位「不填就用设置页的默认目标目录（/hdd）」+ 关着的说明）→ 填 `/hdd/tv` 保存 → toast「任务已保存」、列表没有「复制」徽标 → 重开值还在，`GET /api/task` 回 `{ enabled: false, dstDir: "/hdd/tv" }`、`copyBlocked: null` → 打开开关：去向一栏出现、值不丢（取消没存）。云下载页「新建复制」选 tv 任务：「复制到哪」显示 `/hdd/tv`。收尾：两个进程停掉，token、config 库的只读拷贝删掉；没碰真网盘。
+
+### 评审与修补（2026-11-03，`/code-review medium`）
+
+7 条全修：
+
+1. share_save 去重命中时 `copyDstDir` 被悄悄丢掉（去重键不含它；上次已经复制过就不再补）→ `duplicateResult` 在给了 `copyDstDir`、这次又没补复制时带 `copyDstDirNote`（上次那次复制到哪已经定了；要换地方请用户在云下载页去掉那几条再用 copy_add 指定）→ 回归：mcp-copy 新用例里同一分享换 copyDstDir 再调一次。
+2. `follow: true` + 一次性 `copy` / `copyDstDir`：追更订阅不带它们，之后的新增按任务上的开关和目标目录来（既有设计：一次性参数只管这一次）→ 改成说清楚：share_save 描述加一句，结果里带 `copyFollowNote`；没把一次性目标写进订阅（要让追更复制到同一处，任务上填目标目录即可）→ 回归：同一用例 follow: true 的调用。
+3. 关着开关但填了目标目录的任务，`tasks_list` 不算 `blocked`，模型会以为能复制、到 copy_add 才碰 COPY_NOT_READY → `taskCopyView` 一律算 `blockerOf(task)`，描述改成「复制不了的原因（开着的不会自动复制，关着的一次性复制会被拒）」→ 回归：同一用例清掉挂载根后 c-tv 带 blocked。
+4. 三条目标校验写了四遍（share_save 工具、receive.ts、offline_add 工具、manual.ts）→ 收成 `copy/paths.ts` 的 `checkCopyDstDir(task | null, copy, copyDstDir, settings)`（code：VALIDATION / COPY_ALWAYS_ON / COPY_DST_UNUSED / COPY_DST_INVALID），receive.ts、manual.ts（copy 固定 true）直接调，两个工具经 `copyDstDirArg` 换成带 hint 的 ToolError；offline_add 的错误码随之从 VALIDATION 变成 COPY_DST_UNUSED / COPY_DST_INVALID（mcp-copy 云下载用例改了断言）→ 回归：paths.test 新增 `checkCopyDstDir` 12 个断言。
+5. 任务弹框：OpenList 账号的任务不显示「复制到哪」，但留着个填成 / 的值会让保存卡在看不见的校验上 → 选成 OpenList 账号时连 `copyDstDir` 一起清掉（原来只关开关）。
+6. drive_browse 按账号浏览回的 `drivePath` 没有前导 /（`normalizeSubPath` 剥掉），模型照抄进 copyDstDir 虽然能用（normConfigDir 会补）但和「OpenList 完整路径」的说法对不上 → 按账号浏览时 `drivePath` 从根算、带前导 /（按任务的沿用任务目录写法），描述里说明 → 回归：mcp.itest 看目录用例加断言。段内 trim 掉尾空格是 drive_browse 既有限制，没动。
+7. REST 上任务开着复制却传 `copy: false` + `copyDstDir`，原来报「这次不会复制」（其实监控照样复制）→ `checkCopyDstDir` 先判这一种，回 COPY_ALWAYS_ON 说清楚 → 回归：paths.test 的 `checkCopyDstDir` 用例。
+
+修完：tsc / eslint 前后端过；定向跑 mcp-copy + paths + manual 47 条、mcp + share + tools + prompts + followup 84 条全过；后端全量 1712 条全过（4 分 46 秒），前端 11 条过。未提交。
+
+### 真机验证（2026-11-03，用户批准后做的）
+
+**环境**：lab 库从 `config/openstrm.db` 只读 `.backup`（`mode=ro&immutable=1`）到 scratchpad 的 lab 目录；prep 脚本（`.mts`，先 `initDb()` 跑迁移）把口令换成临时随机的、设置只留 strm / 下载扩展名、UA、限流（Telegram / 监控 / Emby / HDHive / TMDB / PanSou 全不带 = 关）、`openlistCopy = { account: ol-lab, dstDir: /local, mounts: { 115: /115 } }`、`agent.enabled`，生产任务删掉只建 `lab115`（115 `/lab20261103`，开关关着、`dstDir: /local/tv`，整理关），建 OpenList 账号 `ol-lab`（127.0.0.1:5246）和完全档令牌；share_follows / media_library / life_events / drive_snapshots / organize_* / task_history / path_cache 清空，`offline.followups` 和 life 游标删掉。后端 4100（`BACKEND_HOST=127.0.0.1`，用 tsx 的绝对路径起：后台命令里的 `cd` 不生效）、前端 dev 3223。OpenList 容器 `openlist-lab3` 只绑 127.0.0.1:5246（`-e PUID=0 -e PGID=0`，data 目录 777），挂 `115 Cloud`（cookie 取自 lab 库写进 600 文件，addition 只要 `cookie` + `root_folder_id`）和 `Local`（`/local`，host 上 bind 的目录，下面预建 `tv`、`movie`）。测试文件 ffmpeg 造的 44 KB mkv，经 `fs/put` 传成 `/115/lab20261103/剧A/S01/E01.mkv`、`E02.mkv`、`/115/lab20261103/电影B/movie.mkv`。
+
+| 场景 | 结果 |
+|---|---|
+| MCP `tasks_list` | lab115 带 `copyToOpenlist: { enabled: false, dstDir: /local/tv, afterCopy: keep }`，没有 blocked |
+| MCP `drive_browse(account: ol-lab, path: /local)` | `drivePath: /local`、`dirs: [movie, tv]`（真 OpenList 的 Local 存储） |
+| MCP `copy_list` | config：`openlistAccount: ol-lab`、`defaultDstDir: /local`、mounts |
+| MCP `copy_add(task: lab115, paths: [剧A])`（不给 dstDir） | queued 1，`dstDir: /local/tv`，note「复制到 /local/tv 下」 |
+| MCP `copy_add(paths: [电影B], dstDir: /local/movie)` | queued 1，`dstDir: /local/movie` |
+| MCP `copy_add(dstDir: /elsewhere)` | `COPY_DST_INVALID`「复制目标只能是 /local/tv 或 /local，或者它下面的目录」，没登记 |
+| 复制循环 | 登记后约 60 秒两条都 done「复制完成」；host 上 `local/tv/剧A/S01/E01.mkv`、`E02.mkv`、`local/movie/电影B/movie.mkv` 各 44288 字节；115 上源文件原样在（去向不动）；任务列表期间显示「复制中 2」徽标（开关关着也显示，徽标看的是队列） |
+| 界面 任务弹框 | 开关关着「复制到哪」显示 `/local/tv`；点「从 OpenList 里选」列出真 OpenList 根（local、115）→ 展开 local 列出 movie、tv → 选 movie 确认，字段回填 `/local/movie`（取消没存） |
+| share_save 的 copyDstDir | 没验：要真分享链接，用户没给；和 copy_add 走同一段登记（`copyOptionsFor` → `enqueueCopyFor`），集成测试覆盖 |
+
+**真机发现的问题**：没有。日志：lab 后端日志里没有 warn / error。
+
+收尾：lab 后端 / 前端进程已停；容器 `docker rm -f`，lab 目录（含 cookie 拷贝、口令、令牌）整个删掉，Docker Desktop 停掉；浏览器里的 token 清掉、标签页关掉。**115 上的 `/lab20261103`（两个目录、三个 44 KB 的测试视频）没删**：删除那一步被自动模式的权限拦下了，留给用户自己决定，删进回收站即可。
+
