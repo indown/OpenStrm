@@ -114,3 +114,11 @@
 8. **单元键两套写法**：视图里 `JSON.stringify([sourceId, unitKey])`、海报墙上 `unit:<来源>:<单元键>`。`workKey` / `unitWorkKey` 放进 `library-units.ts`，视图、`works.ts`、智能体工具的 `unitRef`、`savedWorkKeys` 都用它。
 
 验证：两端 typecheck / lint 过；后端全量 1715 条、前端 11 条全过（视图 itest 加了整来源重认 / 没这个分享 / 数组副本三段）。浏览器（全新空库起 lab 后端 4123 + dev 3223，临时口令，验完已停、令牌已清）：从任务页切到收藏夹，页签 + 海报骨架出现 56 ms 后直接换成「收藏夹是空的」，中间没有闪作品墙的空状态；换成合成库（5.5 万部）再进，100 ms 内出海报和计数，works 冷 51 ms、热 3 ms。
+
+## 发布（2026-11-04）
+
+- **v2.23.1 正式版**：发布提交 3172654 `chore(release): v2.23.1` = 375aaa2 `perf(library)`（含评审 8 条修补）+ 290e176 `docs(plans)` + 三个 package.json 升到 2.23.1（shared 仍 2.0.0）；tag 注释 `v2.23.1`。用补丁号：没有新功能、没有迁移、没有新设置项，智能体工具数 47 不变。
+- `git push origin v2 v2.23.1`，main 从 ce50a1b（v2.23.0）快进到 3172654，**main == v2 == v2.23.1**，没有 merge 提交。
+- Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）+ CI@v2 + CI@main 全绿（本机 09:49 推 → 10:03 完成）。
+- Docker Hub `v2.23.1` 与 `latest` 同为 `6dc4917ac08a`（amd64 + arm64）；GitHub Release 非 prerelease、是仓库最新。
+- 升级说明（工作流只生成对比链接，手动贴）：收藏夹几万单元时打开、换排序、翻页都是毫秒级，重启后 1 秒预热；切到别的页面时在飞的请求取消，不再拖慢其他页面；待认数连续 6 轮没变时轮询从 5 秒放到 15 秒；整来源重新识别改成一条 UPDATE。真实库上的数字没验，升级后看一眼 `/api/library/works` 的响应时间。海报直连 TMDB 的问题不在这版里。
