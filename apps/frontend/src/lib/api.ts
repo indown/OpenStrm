@@ -684,7 +684,7 @@ export const api = {
   },
 
   library: {
-    list: () => data(axiosInstance.get<MediaLibraryEntry[]>("/api/library")),
+    list: (signal?: AbortSignal) => data(axiosInstance.get<MediaLibraryEntry[]>("/api/library", { signal })),
     create: (input: LibraryCreateInput) => data(axiosInstance.post<LibraryAddResponse>("/api/library", input)),
     /** 一段话里认出的分享（批量添加先列给人看，加还是一个一个 create） */
     links: (text: string) => data(axiosInstance.post<{ links: LibraryShareLink[] }>("/api/library/links", { text })),
@@ -708,8 +708,8 @@ export const api = {
     checkShares: (codes: string[]) =>
       data(axiosInstance.post<{ health: Record<string, LibraryShareHealth> }>("/api/library/shares/check", { codes }, { timeout: 60_000 })),
     /** 海报墙：同一个 tmdbId 的单元合成一张卡 */
-    works: (query: { view?: LibraryWorksView; sort?: LibraryWorksSort; offset?: number; limit?: number }) =>
-      data(axiosInstance.get<LibraryWorksResult>("/api/library/works", { params: query })),
+    works: (query: { view?: LibraryWorksView; sort?: LibraryWorksSort; offset?: number; limit?: number }, signal?: AbortSignal) =>
+      data(axiosInstance.get<LibraryWorksResult>("/api/library/works", { params: query, signal })),
     workDetail: (key: string) => data(axiosInstance.get<LibraryWorkDetail>("/api/library/works/detail", { params: { key } })),
     /** 作品单元：换匹配 / 不是影视 / 重新认 */
     unitAction: (

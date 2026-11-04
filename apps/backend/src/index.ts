@@ -77,6 +77,8 @@ import librarySaveToTaskRoute from "./routes/library/save-to-task.js";
 import { startLibraryHealth, stopLibraryHealth } from "./services/library/health.js";
 import { startIndexer, stopIndexer } from "./services/library/indexer.js";
 import { startLibraryIdentify, stopLibraryIdentify } from "./services/library/identify.js";
+import { warmWorksView } from "./db/repositories/library-works-view.js";
+import { countIndexing } from "./db/repositories/media-library.js";
 
 // Directory routes
 import directoryLocalRoute from "./routes/directory/local.js";
@@ -247,6 +249,15 @@ try {
   } catch (err) {
     app.log.error({ err }, "收藏夹索引没能启动");
   }
+  // 海报墙视图预热：几万单元时全量聚合要好几秒，放到启动后一秒做，重启后第一次打开收藏夹就不用再等它。
+  // 还有来源在抄目录（重启前没抄完的）就不预热：抄完一个视图就整个作废，白算一遍
+  setTimeout(() => {
+    try {
+      if (countIndexing() === 0) warmWorksView();
+    } catch (err) {
+      app.log.warn({ err }, "海报墙视图预热失败");
+    }
+  }, 1000).unref();
 
   // 网盘监控：配置里开着就跟随服务一起起来
   const settings = readAppSettings();

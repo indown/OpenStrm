@@ -5,6 +5,7 @@
  * 还有单元在认时隔几秒重拉一次；影库有变动（加了分享、换了匹配）也重拉。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import axios from "axios";
 import Link from "next/link";
 import { Loader2, Settings as SettingsIcon, Sparkles } from "lucide-react";
 import type { LibraryWork, LibraryWorksResult, LibraryWorksSort, LibraryWorksView } from "@openstrm/shared";
@@ -23,6 +24,9 @@ import { LIBRARY_CHANGED_EVENT } from "@/lib/library";
 
 const PAGE = 60;
 const POLL_MS = 5000;
+/** 待认数连续这么多轮没变（TMDB 不通、识别卡住了）：轮询放慢到这个间隔 */
+const POLL_SLOW_MS = 15_000;
+const SLOW_AFTER_ROUNDS = 6;
 const GRID = "grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8";
 
 const SORTS: Array<{ key: LibraryWorksSort; label: string }> = [
@@ -61,10 +65,13 @@ function WorkCard({ work, onOpen }: { work: LibraryWork; onOpen: () => void }) {
 }
 
 export function LibraryWorks({
+  sourcesLoaded = true,
   onShowShares,
   openWork,
   onWorkClosed,
 }: {
+  /** 来源列表回来了没有（页面和作品墙并行拉）：没回来前墙上空着只画骨架，别先闪一下空状态——来源一个都没有时页面会换成自己的空状态 */
+  sourcesLoaded?: boolean;
   onShowShares: () => void;
   /** 地址里带着的作品键（`/library?work=tv:1399`，智能体给的「在 OpenStrm 里打开」）：进来就打开它的弹框 */
   openWork?: string | null;
@@ -82,17 +89,25 @@ export function LibraryWorks({
   const seq = useRef(0);
   // 轮询 / 重拉时拉回已经展开的那么多条，别一刷新就缩回第一页
   const shownRef = useRef(PAGE);
+  // 在飞的那一次：新一轮开始、换筛选 / 排序、切走时都取消掉，服务端不用再算，浏览器的连接也让出来
+  const abortRef = useRef<AbortController | null>(null);
+  const moreRef = useRef<AbortController | null>(null);
 
   const fetchWorks = useCallback(
-    async (limit = shownRef.current) => {
+    async (limit = shownRef.current): Promise<LibraryWorksResult | null> => {
       const my = ++seq.current;
+      abortRef.current?.abort();
+      const ac = new AbortController();
+      abortRef.current = ac;
       try {
-        const r = await api.library.works({ view, sort, offset: 0, limit });
-        if (seq.current !== my) return;
+        const r = await api.library.works({ view, sort, offset: 0, limit }, ac.signal);
+        if (seq.current !== my) return null;
         setResult(r);
         setError(null);
+        return r;
       } catch (err) {
-        if (seq.current === my) setError(apiErrorMessage(err, "加载作品失败"));
+        if (seq.current === my && !axios.isCancel(err)) setError(apiErrorMessage(err, "加载作品失败"));
+        return null;
       }
     },
     [view, sort],
@@ -102,7 +117,9 @@ export function LibraryWorks({
     shownRef.current = PAGE;
     setResult(null);
     void fetchWorks(PAGE);
+    return () => abortRef.current?.abort();
   }, [fetchWorks]);
+  useEffect(() => () => moreRef.current?.abort(), []);
 
   useEffect(() => {
     const onChanged = () => void fetchWorks();
@@ -110,10 +127,28 @@ export function LibraryWorks({
     return () => window.removeEventListener(LIBRARY_CHANGED_EVENT, onChanged);
   }, [fetchWorks]);
 
-  // 还有单元在认：隔几秒重拉（认出来的一张张冒出来）
+  // 还有单元在认：隔几秒重拉（认出来的一张张冒出来）。待认数连续几轮没变就放慢，别一直打后端
   const pending = result?.counts.pending ?? 0;
   const polling = pending > 0 && result?.tmdbConfigured === true;
-  usePolling(() => fetchWorks(), POLL_MS, { enabled: polling });
+  const [slow, setSlow] = useState(false);
+  const roundsRef = useRef({ pending: -1, rounds: 0 });
+  useEffect(() => {
+    if (polling) return;
+    roundsRef.current = { pending: -1, rounds: 0 };
+    setSlow(false);
+  }, [polling]);
+  usePolling(
+    async () => {
+      const r = await fetchWorks();
+      if (!r) return;
+      const s = roundsRef.current;
+      if (r.counts.pending === s.pending) s.rounds += 1;
+      else roundsRef.current = { pending: r.counts.pending, rounds: 0 };
+      setSlow(roundsRef.current.rounds >= SLOW_AFTER_ROUNDS);
+    },
+    slow ? POLL_SLOW_MS : POLL_MS,
+    { enabled: polling },
+  );
 
   // 本地已有的第一次要扫一遍各任务的本地目录：没扫好时后端只标了存过的，过几秒再拉一次补上「已有」（在轮询的话下一次就有了）
   const ownedPending = result?.ownedPending === true && !polling;
@@ -126,12 +161,15 @@ export function LibraryWorks({
   const loadMore = async () => {
     if (!result) return;
     setLoadingMore(true);
+    moreRef.current?.abort();
+    const ac = new AbortController();
+    moreRef.current = ac;
     try {
-      const r = await api.library.works({ view, sort, offset: result.works.length, limit: PAGE });
+      const r = await api.library.works({ view, sort, offset: result.works.length, limit: PAGE }, ac.signal);
       shownRef.current = result.works.length + r.works.length;
       setResult((prev) => (prev ? { ...r, works: [...prev.works, ...r.works] } : r));
     } catch (err) {
-      setError(apiErrorMessage(err, "加载更多失败"));
+      if (!axios.isCancel(err)) setError(apiErrorMessage(err, "加载更多失败"));
     } finally {
       setLoadingMore(false);
     }
@@ -170,20 +208,27 @@ export function LibraryWorks({
     </div>
   );
 
+  const skeleton = (
+    <div className={GRID}>
+      {Array.from({ length: 14 }).map((_, i) => (
+        <div key={i} className="space-y-1.5">
+          <Skeleton className="aspect-[2/3] w-full" />
+          <Skeleton className="h-4 w-4/5" />
+        </div>
+      ))}
+    </div>
+  );
+
   if (!result) {
     return error ? (
       <EmptyState icon={Sparkles} title="作品加载失败" description={error} action={<Button variant="outline" onClick={() => void fetchWorks(PAGE)}>重试</Button>} />
     ) : (
-      <div className={GRID}>
-        {Array.from({ length: 14 }).map((_, i) => (
-          <div key={i} className="space-y-1.5">
-            <Skeleton className="aspect-[2/3] w-full" />
-            <Skeleton className="h-4 w-4/5" />
-          </div>
-        ))}
-      </div>
+      skeleton
     );
   }
+
+  // 墙上空着、来源列表又还没回来：先画骨架。来源确认为空时页面换成自己的空状态，有来源才显示下面这两种
+  if (!sourcesLoaded && (nothing || (!result.tmdbConfigured && result.counts.all === 0))) return skeleton;
 
   if (!result.tmdbConfigured && result.counts.all === 0) {
     return (

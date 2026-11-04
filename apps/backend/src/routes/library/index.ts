@@ -2,7 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getById, healthOf, listByShareCode, listWithHealth } from "../../db/repositories/media-library.js";
 import { getShare } from "../../db/repositories/library-shares.js";
-import { getUnit, unitSummaries } from "../../db/repositories/library-units.js";
+import { getUnit } from "../../db/repositories/library-units.js";
+import { worksView } from "../../db/repositories/library-works-view.js";
 import { ignoreUnit, matchUnit, reidentifySource, reidentifyUnit } from "../../services/library/identify.js";
 import { listWorks, unitView, workDetail } from "../../services/library/works.js";
 import { localOwned, ownedWorkKeys } from "../../services/library/owned.js";
@@ -84,7 +85,7 @@ const relinkSchema = z.object({
 
 export default async function (fastify: FastifyInstance) {
   fastify.get("/api/library", { preHandler: [fastify.authenticate] }, async () => {
-    const summaries = unitSummaries();
+    const summaries = worksView().summaries;
     return listWithHealth().map((e) => {
       const w = summaries.get(e.id);
       return w ? { ...e, works: w } : e;

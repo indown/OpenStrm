@@ -6,6 +6,7 @@ import type { LibraryConfidence, LibraryUnitStatus, OrganizeCandidate } from "@o
 import { and, asc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { db } from "../client.js";
 import { librarySaves, libraryShares, libraryUnits, mediaLibrary } from "../schema.js";
+import { notifyLibraryChange, type UnitKeyState } from "./library-changes.js";
 
 type Row = typeof libraryUnits.$inferSelect;
 
@@ -127,6 +128,21 @@ const RESET = {
 
 const keyOf = (sourceId: string, unitKey: string) => and(eq(libraryUnits.sourceId, sourceId), eq(libraryUnits.unitKey, unitKey));
 
+/** 海报墙上一张卡的作品键：认出来的是 `movie:1` / `tv:2`，没认出的是 `unit:<来源>:<单元键>`；视图、接口、智能体工具都用这两个拼 */
+export const workKey = (mediaType: "movie" | "tv", tmdbId: number): string => `${mediaType}:${tmdbId}`;
+export const unitWorkKey = (sourceId: string, unitKey: string): string => `unit:${sourceId}:${unitKey}`;
+
+/** 一个单元决定它在海报墙视图里落在哪的三个字段（写前写后各读一次，给视图增量维护用） */
+function keyState(sourceId: string, unitKey: string): UnitKeyState | null {
+  const r = db.select({ status: libraryUnits.status, tmdbId: libraryUnits.tmdbId, mediaType: libraryUnits.mediaType }).from(libraryUnits).where(keyOf(sourceId, unitKey)).get();
+  return r ? { status: coerceStatus(r.status), tmdbId: r.tmdbId ?? null, mediaType: r.mediaType === "movie" || r.mediaType === "tv" ? r.mediaType : null } : null;
+}
+
+/** 单个单元写完：把前后状态广播给视图 */
+function unitChanged(sourceId: string, unitKey: string, before: UnitKeyState | null): void {
+  notifyLibraryChange({ kind: "unit", sourceId, unitKey, before, after: keyState(sourceId, unitKey) });
+}
+
 /**
  * 重建一个来源的单元：同一个单元键的更新结构字段、保留识别结果——解析出来的名字 / 年份 / 类型猜测变了才回到待认，
  * 手动指定的、忽略的一直保留；新的待认；没了的删掉
@@ -183,11 +199,13 @@ export function replaceUnits(sourceId: string, built: BuiltUnit[], now: number):
       if (!keep.has(key)) tx.delete(libraryUnits).where(keyOf(sourceId, key)).run();
     }
   });
+  notifyLibraryChange({ kind: "all" });
   return { added, removed: [...existing.keys()].filter((k) => !keep.has(k)).length, reset };
 }
 
 export function deleteUnits(sourceId: string): void {
   db.delete(libraryUnits).where(eq(libraryUnits.sourceId, sourceId)).run();
+  notifyLibraryChange({ kind: "all" });
 }
 
 export function getUnit(sourceId: string, unitKey: string): UnitRow | null {
@@ -273,10 +291,12 @@ export interface Identified {
 
 export function saveIdentified(sourceId: string, unitKey: string, v: Identified, now: number): void {
   const { details, ...rest } = v;
+  const before = keyState(sourceId, unitKey);
   db.update(libraryUnits)
     .set({ ...rest, ...detailColumns(v.tmdbId != null ? details : undefined), candidates: JSON.stringify(v.candidates), identifiedAt: now, retryAt: null, error: "" })
     .where(keyOf(sourceId, unitKey))
     .run();
+  unitChanged(sourceId, unitKey, before);
 }
 
 /** 从 TMDB 详情来的类型、国家 / 地区、原语言 */
@@ -293,6 +313,9 @@ const detailColumns = (d: UnitDetails | undefined) =>
 /** 补类型、国家 / 地区（不动识别结果） */
 export function saveDetails(sourceId: string, unitKey: string, d: UnitDetails): void {
   db.update(libraryUnits).set(detailColumns(d)).where(keyOf(sourceId, unitKey)).run();
+  // 分组里带着类型、地区（max(genres)）：单元的状态、计数、来源统计都没变，只让视图重查这一组
+  const s = keyState(sourceId, unitKey);
+  if (s && s.tmdbId != null && s.mediaType) notifyLibraryChange({ kind: "group", mediaType: s.mediaType, tmdbId: s.tmdbId });
 }
 
 /** 认出来了、还没补类型的：先来的先补 */
@@ -323,20 +346,37 @@ export function setUnitRetry(sourceId: string, unitKey: string, retryAt: number,
 
 /** 不是影视（花絮合集、字幕包……）：不再认，海报墙不出 */
 export function ignoreUnit(sourceId: string, unitKey: string, now: number): void {
+  const before = keyState(sourceId, unitKey);
   db.update(libraryUnits)
     .set({ ...RESET, status: "ignored", identifiedAt: now })
     .where(keyOf(sourceId, unitKey))
     .run();
+  unitChanged(sourceId, unitKey, before);
 }
 
 /** 重新认：回到待认（手动指定的也放掉） */
 export function resetUnit(sourceId: string, unitKey: string): void {
+  const before = keyState(sourceId, unitKey);
   db.update(libraryUnits).set(RESET).where(keyOf(sourceId, unitKey)).run();
+  unitChanged(sourceId, unitKey, before);
 }
 
 /** 自动认过的都放回待认（识别规则改了）：手动指定的、忽略的不动。返回放回去几个 */
 export function resetAutoIdentified(): number {
-  return db.update(libraryUnits).set(RESET).where(eq(libraryUnits.status, "done")).run().changes;
+  const changes = db.update(libraryUnits).set(RESET).where(eq(libraryUnits.status, "done")).run().changes;
+  if (changes > 0) notifyLibraryChange({ kind: "all" });
+  return changes;
+}
+
+/** 一个来源里自动认过的都放回待认（整来源重认）：手动指定的、忽略的不动。一条 UPDATE，视图整个作废。返回放回去几个 */
+export function resetDoneUnits(sourceId: string): number {
+  const changes = db
+    .update(libraryUnits)
+    .set(RESET)
+    .where(and(eq(libraryUnits.sourceId, sourceId), eq(libraryUnits.status, "done")))
+    .run().changes;
+  if (changes > 0) notifyLibraryChange({ kind: "all" });
+  return changes;
 }
 
 /** 各状态的单元数（没认出 = 认过但没有 tmdbId） */
@@ -381,7 +421,8 @@ export interface WorkGroup {
 const CONF_RANK = sql<number>`max(case when ${libraryUnits.status} = 'manual' or ${libraryUnits.confidence} = 'high' then 3 when ${libraryUnits.confidence} = 'medium' then 2 when ${libraryUnits.confidence} = 'low' then 1 else 0 end)`;
 const NOT_EXPIRED = sql`coalesce(${libraryShares.status}, 'unknown') != 'expired'`;
 
-export function workGroups(): WorkGroup[] {
+/** 全部分组；给了 only 就只算那一部（视图增量重查用） */
+export function workGroups(only?: { mediaType: "movie" | "tv"; tmdbId: number }): WorkGroup[] {
   return db
     .select({
       mediaType: libraryUnits.mediaType,
@@ -404,7 +445,14 @@ export function workGroups(): WorkGroup[] {
     .from(libraryUnits)
     .innerJoin(mediaLibrary, eq(mediaLibrary.id, libraryUnits.sourceId))
     .leftJoin(libraryShares, eq(libraryShares.shareCode, mediaLibrary.shareCode))
-    .where(and(inArray(libraryUnits.status, ["done", "manual"]), isNotNull(libraryUnits.tmdbId), NOT_EXPIRED))
+    .where(
+      and(
+        inArray(libraryUnits.status, ["done", "manual"]),
+        isNotNull(libraryUnits.tmdbId),
+        NOT_EXPIRED,
+        only ? and(eq(libraryUnits.mediaType, only.mediaType), eq(libraryUnits.tmdbId, only.tmdbId)) : undefined,
+      ),
+    )
     .groupBy(libraryUnits.mediaType, libraryUnits.tmdbId)
     .all()
     .map((r) => ({
@@ -427,14 +475,14 @@ export function workGroups(): WorkGroup[] {
     }));
 }
 
-/** 认过但没认出的单元（已失效分享里的不算） */
-export function unidentifiedUnits(): UnitRow[] {
+/** 认过但没认出的单元（已失效分享里的不算）；给了 only 就只看那一个（视图增量重查用） */
+export function unidentifiedUnits(only?: { sourceId: string; unitKey: string }): UnitRow[] {
   return db
     .select({ u: libraryUnits })
     .from(libraryUnits)
     .innerJoin(mediaLibrary, eq(mediaLibrary.id, libraryUnits.sourceId))
     .leftJoin(libraryShares, eq(libraryShares.shareCode, mediaLibrary.shareCode))
-    .where(and(eq(libraryUnits.status, "done"), isNull(libraryUnits.tmdbId), NOT_EXPIRED))
+    .where(and(eq(libraryUnits.status, "done"), isNull(libraryUnits.tmdbId), NOT_EXPIRED, only ? keyOf(only.sourceId, only.unitKey) : undefined))
     .all()
     .map((r) => toUnit(r.u));
 }
@@ -459,8 +507,8 @@ export interface SourceUnitSummary {
   title: string;
 }
 
-/** 每个来源的单元统计（来源列表用）；忽略的不算 */
-export function unitSummaries(): Map<string, SourceUnitSummary> {
+/** 每个来源的单元统计（来源列表用）；忽略的不算。给了 sourceId 就只算那一个来源（视图增量重查用） */
+export function unitSummaries(sourceId?: string): Map<string, SourceUnitSummary> {
   const rows = db
     .select({
       sourceId: libraryUnits.sourceId,
@@ -472,7 +520,7 @@ export function unitSummaries(): Map<string, SourceUnitSummary> {
       title: sql<string>`max(${libraryUnits.title})`,
     })
     .from(libraryUnits)
-    .where(sql`${libraryUnits.status} != 'ignored'`)
+    .where(and(sql`${libraryUnits.status} != 'ignored'`, sourceId !== undefined ? eq(libraryUnits.sourceId, sourceId) : undefined))
     .groupBy(libraryUnits.sourceId)
     .all();
   const out = new Map<string, SourceUnitSummary>();
@@ -528,6 +576,6 @@ export function savedWorkKeys(): Set<string> {
     .from(librarySaves)
     .innerJoin(libraryUnits, and(eq(libraryUnits.sourceId, librarySaves.sourceId), eq(libraryUnits.unitKey, librarySaves.unitKey)))
     .all();
-  return new Set(rows.map((r) => (r.tmdbId != null && r.mediaType ? `${r.mediaType}:${r.tmdbId}` : `unit:${r.sourceId}:${r.unitKey}`)));
+  return new Set(rows.map((r) => (r.tmdbId != null && r.mediaType ? `${r.mediaType}:${r.tmdbId}` : unitWorkKey(r.sourceId, r.unitKey))));
 }
 

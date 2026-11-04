@@ -59,6 +59,7 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
+import axios from "axios";
 import { toast } from "sonner";
 import type { MediaLibraryEntry, ShareFollowSummary } from "@openstrm/shared";
 import { api, type LibraryShareLink } from "@/lib/api";
@@ -173,18 +174,23 @@ function LibraryContent() {
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // 轮询、广播、重试、操作后刷新可能交错：只认最后一次
+  // 轮询、广播、重试、操作后刷新可能交错：只认最后一次，前一次还在飞的直接取消
+  // （切走时也取消：服务端不用再算，浏览器的连接让给下一页）
   const seqRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
   const fetchEntries = useCallback(async (silent = false) => {
     const seq = ++seqRef.current;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     if (!silent) setRefreshing(true);
     try {
-      const list = await api.library.list();
+      const list = await api.library.list(ac.signal);
       if (seq !== seqRef.current) return;
       setEntries(Array.isArray(list) ? list : []);
       setError(null);
     } catch (err) {
-      if (seq !== seqRef.current) return;
+      if (seq !== seqRef.current || axios.isCancel(err)) return;
       const msg = apiErrorMessage(err, "加载收藏夹失败");
       setError(msg);
       if (!silent) toast.error(msg);
@@ -207,6 +213,7 @@ function LibraryContent() {
   useEffect(() => {
     void fetchEntries();
     void fetchFollows();
+    return () => abortRef.current?.abort();
   }, [fetchEntries, fetchFollows]);
 
   // 分享详情里「加入影库」成功了（这页自己的弹框、顶栏的弹框都算）：悄悄重拉
@@ -373,7 +380,8 @@ function LibraryContent() {
         }
       />
 
-      {!searching && loaded && entries.length > 0 && (
+      {/* 页签行在加载中就摆出来：作品墙和来源列表并行拉，墙先出现、页签再把它顶下去一截不好看 */}
+      {!searching && (!loaded || entries.length > 0) && (
         <div role="tablist" aria-label="收藏夹视图" className="inline-flex rounded-lg border p-0.5 text-sm">
           {(
             [
@@ -390,7 +398,7 @@ function LibraryContent() {
               className={cn("rounded-md px-3 py-1", tab === key ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground")}
             >
               {label}
-              {key === "shares" && <span className="ml-1 text-xs tabular-nums text-muted-foreground">{entries.length}</span>}
+              {key === "shares" && loaded && <span className="ml-1 text-xs tabular-nums text-muted-foreground">{entries.length}</span>}
             </button>
           ))}
         </div>
@@ -398,8 +406,14 @@ function LibraryContent() {
 
       {searching ? (
         <LibraryHits query={query} variant="page" pageSize={30} />
-      ) : loaded && entries.length > 0 && tab === "works" ? (
-        <LibraryWorks onShowShares={() => switchTab("shares")} openWork={params.get("work")} onWorkClosed={() => router.replace("/library", { scroll: false })} />
+      ) : tab === "works" && (!loaded || entries.length > 0) ? (
+        // 作品墙不等来源列表回来才挂：两个请求并行，首屏少串一跳；来源确认为空时换成下面的空状态
+        <LibraryWorks
+          sourcesLoaded={loaded}
+          onShowShares={() => switchTab("shares")}
+          openWork={params.get("work")}
+          onWorkClosed={() => router.replace("/library", { scroll: false })}
+        />
       ) : !loaded ? (
         <TableSkeleton rows={5} />
       ) : entries.length === 0 ? (

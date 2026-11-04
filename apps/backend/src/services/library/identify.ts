@@ -225,12 +225,8 @@ export function reidentifyUnit(sourceId: string, unitKey: string): void {
 
 /** 一个来源重新认：手动指定的、忽略的不动（改了识别词以后用） */
 export function reidentifySource(sourceId: string): number {
-  let n = 0;
-  for (const u of units.unitsOfSource(sourceId)) {
-    if (u.status !== "done") continue;
-    units.resetUnit(sourceId, u.unitKey);
-    n++;
-  }
+  // 一条 UPDATE 放回去：几千个单元逐个放，每个都让海报墙视图增量重查一遍，不如整个作废一次
+  const n = units.resetDoneUnits(sourceId);
   syncAka(sourceId);
   kickIdentify();
   return n;

@@ -4,6 +4,7 @@
 import { and, eq, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { db } from "../client.js";
 import { libraryShares, mediaLibrary } from "../schema.js";
+import { notifyLibraryChange } from "./library-changes.js";
 
 export type LibraryShareRow = typeof libraryShares.$inferSelect;
 
@@ -18,7 +19,10 @@ export function getShare(shareCode: string): LibraryShareRow | null {
 
 export function updateShare(shareCode: string, patch: Partial<Omit<LibraryShareRow, "shareCode">>): void {
   if (Object.keys(patch).length === 0) return;
-  db.update(libraryShares).set(patch).where(eq(libraryShares.shareCode, shareCode)).run();
+  const wasExpired = patch.status !== undefined ? getShare(shareCode)?.status === "expired" : undefined;
+  const { changes } = db.update(libraryShares).set(patch).where(eq(libraryShares.shareCode, shareCode)).run();
+  // 分享进出失效：里面的单元整批进出海报墙，视图整个作废（没这一行的什么都没改，不作废）
+  if (changes > 0 && patch.status !== undefined && wasExpired !== (patch.status === "expired")) notifyLibraryChange({ kind: "all" });
 }
 
 /** 这个分享码在影库里有没有来源：分享观察者只记影库里有的 */

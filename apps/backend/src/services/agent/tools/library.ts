@@ -8,7 +8,8 @@
  */
 import { z } from "zod";
 import type { LibraryHit, LibraryOwned, LibrarySearchResult, LibraryUnit, LibraryWork } from "@openstrm/shared";
-import { countMissingDetails, getUnit, unitStatusCounts, unitSummaries, unitsOfSource, unitsOfWork, type UnitRow } from "../../../db/repositories/library-units.js";
+import { countMissingDetails, getUnit, unitsOfSource, unitsOfWork, unitWorkKey, type UnitRow } from "../../../db/repositories/library-units.js";
+import { worksView } from "../../../db/repositories/library-works-view.js";
 import { listWithHealth } from "../../../db/repositories/media-library.js";
 import { HttpError } from "../../../lib/http-error.js";
 import { findShareLinks } from "../../drive/registry.js";
@@ -144,7 +145,7 @@ const ADD_MAX = 20;
 const seasonsOf = (s: number[]) => (s.length ? { seasons: s } : {});
 
 /** 单元引用（library_match 用）：和没认出的作品键同一个写法 */
-const unitRef = (u: { sourceId: string; unitKey: string }) => `unit:${u.sourceId}:${u.unitKey}`;
+const unitRef = (u: { sourceId: string; unitKey: string }) => unitWorkKey(u.sourceId, u.unitKey);
 const UNIT_REF = /^unit:([^:]+):(.+)$/;
 
 /** 没认出 / 把握低的作品：纠错要看的目录名、样例文件名、识别时的前几个备选（认出来的作品取第一个版本） */
@@ -406,7 +407,7 @@ export function libraryOverview(): Record<string, unknown> | undefined {
   const shares = new Set(sources.map((s) => s.shareCode)).size;
   const expired = new Set(sources.filter((s) => s.health?.status === "expired").map((s) => s.shareCode)).size;
   const indexing = sources.filter((s) => s.indexStatus === "pending" || s.indexStatus === "indexing").length;
-  const u = unitStatusCounts();
+  const u = worksView().counts;
   return {
     shares,
     ...(expired ? { expired } : {}),
@@ -514,7 +515,7 @@ export const librarySourcesTool = defineTool({
     const offset = args.cursor ? Number(args.cursor) : 0;
     if (!Number.isInteger(offset) || offset < 0) throw new ToolError("VALIDATION", "cursor 不对", "原样传上一页结果里的 nextCursor；从头看就别传。");
     const all = listWithHealth();
-    const summaries = unitSummaries();
+    const summaries = worksView().summaries;
     const statusOf = (s: (typeof all)[number]) => s.health?.status ?? "unknown";
     const indexing = (s: (typeof all)[number]) => s.indexStatus === "pending" || s.indexStatus === "indexing";
     const want = args.status ?? "all";

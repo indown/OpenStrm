@@ -15,6 +15,7 @@ import type {
 import { getNode } from "../../db/repositories/library-nodes.js";
 import { getShare } from "../../db/repositories/library-shares.js";
 import * as units from "../../db/repositories/library-units.js";
+import { worksView } from "../../db/repositories/library-works-view.js";
 import { getById, healthOf } from "../../db/repositories/media-library.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { parseShareRef } from "../drive/registry.js";
@@ -27,7 +28,7 @@ const CONF: LibraryConfidence[] = ["none", "low", "medium", "high"];
 
 function groupToWork(g: units.WorkGroup): LibraryWork {
   return {
-    key: `${g.mediaType}:${g.tmdbId}`,
+    key: units.workKey(g.mediaType, g.tmdbId),
     tmdbId: g.tmdbId,
     mediaType: g.mediaType,
     title: g.title,
@@ -47,7 +48,7 @@ function groupToWork(g: units.WorkGroup): LibraryWork {
 
 function unitToWork(u: units.UnitRow): LibraryWork {
   return {
-    key: `unit:${u.sourceId}:${u.unitKey}`,
+    key: units.unitWorkKey(u.sourceId, u.unitKey),
     tmdbId: null,
     mediaType: null,
     title: u.parsedTitle || u.rawName,
@@ -63,7 +64,19 @@ function unitToWork(u: units.UnitRow): LibraryWork {
   };
 }
 
-const byTitle = (a: LibraryWork, b: LibraryWork) => a.title.localeCompare(b.title, "zh-CN", { numeric: true });
+/* ------------------------------- 海报墙 ------------------------------- */
+
+/** 复用一个比较器：每次比较都 localeCompare 会各建一个 locale 比较器，几万部排一次要两三秒 */
+const collator = new Intl.Collator("zh-CN", { numeric: true });
+const byTitle = (a: LibraryWork, b: LibraryWork) => collator.compare(a.title, b.title);
+const yearOf = (w: LibraryWork) => Number(w.year) || 0;
+
+/** 三种排序：最近入库、年份（新的在前，没年份的最后）、名称；同一档再按名称 */
+export const WORK_COMPARATORS: Record<LibraryWorksSort, (a: LibraryWork, b: LibraryWork) => number> = {
+  recent: (a, b) => b.addedAt - a.addedAt || byTitle(a, b),
+  year: (a, b) => yearOf(b) - yearOf(a) || byTitle(a, b),
+  title: byTitle,
+};
 
 export interface WorksQuery {
   view: LibraryWorksView;
@@ -90,56 +103,109 @@ export function yearRange(text: string | undefined): [number, number] | null {
 }
 
 /**
- * 海报墙：一次全聚合（收藏夹里的作品也就几千部），在内存里筛、排、切页。
- * owned：已经有了的作品键（ownedWorkKeys），给了就在每部上标 owned
+ * 视图映射成 LibraryWork 之后的那一层，按视图的 generation 缓存：认出的、没认出的各一个数组，每种排序各一份排好的
+ * （用到才排），按名字筛用的归一化名字（用到才建）。几万部时映射加排序几十毫秒，只在视图变了（识别进行中每次轮询都会变）
+ * 才重做；一次请求剩下的只是筛选和切片。
+ */
+interface Derived {
+  generation: number;
+  identified: LibraryWork[];
+  unidentified: LibraryWork[];
+  sorted: Map<string, LibraryWork[]>;
+  names: Map<string, string[]> | null;
+  counts: LibraryWorksResult["counts"];
+}
+
+let derived: Derived | null = null;
+
+function derivedOf(): Derived {
+  const v = worksView();
+  if (derived?.generation === v.generation) return derived;
+  const identified = [...v.groups.values()].map(groupToWork);
+  const unidentified = [...v.unidentified.values()].map(unitToWork);
+  derived = {
+    generation: v.generation,
+    identified,
+    unidentified,
+    sorted: new Map(),
+    names: null,
+    counts: {
+      all: identified.length,
+      movie: identified.filter((w) => w.mediaType === "movie").length,
+      tv: identified.filter((w) => w.mediaType === "tv").length,
+      low: identified.filter((w) => w.confidence === "low").length,
+      none: unidentified.length,
+      pending: v.counts.pending,
+    },
+  };
+  return derived;
+}
+
+function sortedOf(d: Derived, pool: "identified" | "unidentified", sort: LibraryWorksSort): LibraryWork[] {
+  const key = `${pool}:${sort}`;
+  let list = d.sorted.get(key);
+  if (!list) {
+    list = [...d[pool]].sort(WORK_COMPARATORS[sort]);
+    d.sorted.set(key, list);
+  }
+  return list;
+}
+
+/** 按名字筛用的：正式名、原名、英文名归一化；没认出的只有目录名 */
+function namesOf(d: Derived): Map<string, string[]> {
+  if (d.names) return d.names;
+  const names = new Map<string, string[]>();
+  for (const [key, g] of worksView().groups) names.set(key, [g.title, g.originalTitle, g.enTitle].map(normalizeTitle).filter(Boolean));
+  for (const w of d.unidentified) names.set(w.key, [normalizeTitle(w.title)].filter(Boolean));
+  d.names = names;
+  return names;
+}
+
+/** 给出去的是副本（数组也复制）：缓存里的对象不能被 owned 标记或者调用方改到 */
+const withOwned = (w: LibraryWork, owned?: Set<string>): LibraryWork => ({
+  ...w,
+  seasons: [...w.seasons],
+  ...(w.genres ? { genres: [...w.genres] } : {}),
+  ...(w.countries ? { countries: [...w.countries] } : {}),
+  ...(owned?.has(w.key) ? { owned: true } : {}),
+});
+
+/**
+ * 海报墙：在缓存好的视图上筛、切页（排序是预排好的，筛选不打乱顺序）。
+ * owned：已经有了的作品键（ownedWorkKeys），给了就在给出去的每部上标 owned
  */
 export function listWorks(q: WorksQuery, owned?: Set<string>): LibraryWorksResult {
-  const groups = units.workGroups();
-  const identified = groups.map(groupToWork);
-  const unidentified = units.unidentifiedUnits().map(unitToWork);
-  if (owned) for (const w of [...identified, ...unidentified]) if (owned.has(w.key)) w.owned = true;
-  const status = units.unitStatusCounts();
-  const counts = {
-    all: identified.length,
-    movie: identified.filter((w) => w.mediaType === "movie").length,
-    tv: identified.filter((w) => w.mediaType === "tv").length,
-    low: identified.filter((w) => w.confidence === "low").length,
-    none: unidentified.length,
-    pending: status.pending,
-  };
+  const d = derivedOf();
   let list: LibraryWork[];
   switch (q.view) {
     case "movie":
-      list = identified.filter((w) => w.mediaType === "movie");
+      list = sortedOf(d, "identified", q.sort).filter((w) => w.mediaType === "movie");
       break;
     case "tv":
-      list = identified.filter((w) => w.mediaType === "tv");
+      list = sortedOf(d, "identified", q.sort).filter((w) => w.mediaType === "tv");
       break;
     case "low":
-      list = identified.filter((w) => w.confidence === "low");
+      list = sortedOf(d, "identified", q.sort).filter((w) => w.confidence === "low");
       break;
     case "none":
-      list = unidentified;
+      list = sortedOf(d, "unidentified", q.sort);
       break;
     default:
-      list = identified;
+      list = sortedOf(d, "identified", q.sort);
   }
   const kw = normalizeTitle(q.keyword ?? "");
   if (kw) {
-    const names = new Map(groups.map((g) => [`${g.mediaType}:${g.tmdbId}`, [g.title, g.originalTitle, g.enTitle]]));
-    list = list.filter((w) => (names.get(w.key) ?? [w.title]).some((n) => normalizeTitle(n).includes(kw)));
+    const names = namesOf(d);
+    list = list.filter((w) => (names.get(w.key) ?? []).some((n) => n.includes(kw)));
   }
   const years = yearRange(q.year);
   if (years) list = list.filter((w) => Number(w.year) >= years[0] && Number(w.year) <= years[1]);
   if (q.genres?.length) list = list.filter((w) => w.genres?.some((g) => q.genres!.includes(g)));
   if (q.countries?.length) list = list.filter((w) => w.countries?.some((c) => q.countries!.includes(c)));
-  if (q.sort === "title") list.sort(byTitle);
-  else if (q.sort === "year") list.sort((a, b) => (b.year || "0").localeCompare(a.year || "0") || byTitle(a, b));
-  else list.sort((a, b) => b.addedAt - a.addedAt || byTitle(a, b));
   return {
-    works: list.slice(q.offset, q.offset + q.limit),
+    works: list.slice(q.offset, q.offset + q.limit).map((w) => withOwned(w, owned)),
     total: list.length,
-    counts,
+    counts: { ...d.counts },
     tmdbConfigured: !!readAppSettings().tmdb?.apiKey?.trim(),
   };
 }
@@ -166,18 +232,16 @@ export interface WorkLookup {
  * 只有一部名字包含它（或者它包含那部的名字）也算；给了年份要对上。owned 同 listWorks
  */
 export function lookupWorks(titles: string[], owned?: Set<string>): WorkLookup[] {
-  const works = units.workGroups().map((g) => {
-    const w = groupToWork(g);
-    if (owned?.has(w.key)) w.owned = true;
-    return { w, names: [g.title, g.originalTitle, g.enTitle].map(normalizeTitle).filter(Boolean) };
-  });
+  const d = derivedOf();
+  const names = namesOf(d);
+  const works = d.identified.map((w) => ({ w, names: names.get(w.key) ?? [] }));
   return titles.map((query) => {
     const { name, year } = splitTitleYear(query);
     const n = normalizeTitle(name);
     const pool = year ? works.filter((x) => x.w.year === year) : works;
     const exact = n ? pool.filter((x) => x.names.includes(n)) : [];
     const hits = exact.length || !n ? exact : pool.filter((x) => x.names.some((m) => m.includes(n) || (m.length >= 2 && n.includes(m))));
-    return hits.length === 1 ? { query, work: hits[0].w, maybe: [] } : { query, work: null, maybe: hits.slice(0, 3).map((x) => x.w) };
+    return hits.length === 1 ? { query, work: withOwned(hits[0].w, owned), maybe: [] } : { query, work: null, maybe: hits.slice(0, 3).map((x) => withOwned(x.w, owned)) };
   });
 }
 

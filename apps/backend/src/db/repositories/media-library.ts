@@ -9,6 +9,7 @@ import type {
 } from "@openstrm/shared";
 import { db } from "../client.js";
 import { libraryShares, mediaLibrary } from "../schema.js";
+import { notifyLibraryChange } from "./library-changes.js";
 
 type Row = typeof mediaLibrary.$inferSelect;
 type ShareRow = typeof libraryShares.$inferSelect;
@@ -149,6 +150,8 @@ export function update(id: string, updates: Partial<MediaLibraryEntry>): MediaLi
     updatedAt: Math.floor(Date.now() / 1000),
   };
   db.update(mediaLibrary).set(toUpdateRow(merged)).where(eq(mediaLibrary.id, id)).run();
+  // 换了分享码（换链接）：单元归到另一个分享、死活跟着变，海报墙视图整个作废
+  if (merged.shareCode !== current.shareCode) notifyLibraryChange({ kind: "all" });
   return merged;
 }
 
@@ -217,6 +220,8 @@ export function countIndexing(): number {
 
 export function remove(id: string): void {
   db.delete(mediaLibrary).where(eq(mediaLibrary.id, id)).run();
+  // 单元级联删了：海报墙视图整个作废
+  notifyLibraryChange({ kind: "all" });
 }
 
 export function getById(id: string): MediaLibraryEntry | null {
