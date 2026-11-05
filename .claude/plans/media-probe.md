@@ -137,3 +137,9 @@
 | 福尔摩斯小姐：失踪的侯爵（mkv） | 28 秒：`H.264 · 1080p · DDP Atmos 5.1 en · 31 条音轨 · 只读了前 96 MB`，不受影响 |
 
 缓存行：ISO 的 `size` 是整个文件的大小，`data.sampleOffset` 约为一半（28 GB 左右），`truncated` 1。音轨语言 ISO 里都是空（裸流没有）。没有告警；网盘没动。
+
+## 发布（2026-11-05，v2.24.1）
+
+用户：「提交并发 v2.24.1 吧」。`36c368f` `chore(release): v2.24.1` = `180aa36` fix(organize)（预算到顶给半截结果 + 旧失败缓存重探、原盘 ISO 中点取样、模板探测变量按解析器认 `{audio:.}`）+ `108fda3` docs(plans) + 三个 package.json 升到 2.24.1；tag 注释 `v2.24.1`。`git push origin v2 v2.24.1`，main 从 `b6e24db` 快进到 `36c368f`（main == v2 == v2.24.1）。没有迁移、没有新设置键。发前：全量 1730 / 11、115 真机（三部福尔摩斯小姐、三张 UHD 原盘、两部 mkv）。升级说明交用户手动贴。CI / Docker Hub 结果见下一行。
+
+→ 15:37 盯梢脚本回 RELEASE_OK：Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）+ CI@v2 + CI@main 全绿（本机 15:26 推 → 15:37），Docker Hub `v2.24.1` 与 `latest` 同为 `sha256:0212d0dc1d8d…`（amd64 + arm64），GitHub Release 非 prerelease、是仓库最新。**v2.24.1 正式版已发**，main == v2.24.1。
