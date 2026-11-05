@@ -618,3 +618,18 @@ test("缺集：按每季集数和已播到哪一集算，只看单元里出现�
   assert.deepEqual(missingEpisodes(dune, { 1: [1] }), {}, "电影没有缺集");
   assert.deepEqual(plan(["x/Dune.2024.mkv"], dune).plan.episodes, {});
 });
+
+test("发布组写法的模板：作品根仍是含片名 / id 的那一层；文件名按点号写法，英文名没有就用原名，空标签的段整段不要", () => {
+  const scene = resolveOrganizeSettings({
+    organize: {
+      templates: {
+        movie: "{category}/{title} ({year}) {idTag}/{enTitle|originalTitle:.}.{year}[.{edition:.}][.{resolution}][.{source:.}][.{videoCodec}][.{hdr}][.{audio:.}][-{group}][-{part}].{ext}",
+      },
+    },
+  });
+  const { plan: p, items } = plan(["inbox/Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.mkv"], dune, {}, scene);
+  assert.equal(p.dstRoot, "沙丘：第二部 (2024) [tmdbid=693134]");
+  assert.equal(items.find((i) => i.srcPath.endsWith(".mkv"))!.dstPath, "沙丘：第二部 (2024) [tmdbid=693134]/Dune.Part.Two.2024.2160p.WEB-DL.H.265.DV.DDP.5.1.Atmos-FLUX.mkv");
+  const bare = plan(["inbox/沙丘2.mkv"], dune, {}, scene);
+  assert.equal(bare.items.find((i) => i.srcPath.endsWith(".mkv"))!.dstPath, "沙丘：第二部 (2024) [tmdbid=693134]/Dune.Part.Two.2024.mkv", "文件名没标签：可选段全丢，不留多余的点");
+});

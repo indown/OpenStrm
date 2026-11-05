@@ -38,6 +38,13 @@ test("剧集：倒数第二段含季变量且不含片名才是季目录；没�
     file: "{title} - E{episode00}.{ext}",
   });
   assert.deepEqual(splitTv("{title}/{season}/{episode}.{ext}"), { dir: "{title}", season: "{season}", file: "{episode}.{ext}" });
+  // 带兜底链 / 后缀的变量也算：`{enTitle|originalTitle:.} S{season00}` 是把季写进剧目录，不是季目录
+  assert.deepEqual(splitTv("{category}/{enTitle|originalTitle:.} S{season00}/{title} - E{episode00}.{ext}"), {
+    dir: "{category}/{enTitle|originalTitle:.} S{season00}",
+    season: "",
+    file: "{title} - E{episode00}.{ext}",
+  });
+  assert.equal(splitTv("{title}/Season {season00}/{enTitle|originalTitle:.}.S{season00}E{episode00}.{ext}")!.season, "Season {season00}");
   assert.deepEqual(splitTv("{title} - S{season00}E{episode00}.{ext}"), { dir: "", season: "", file: "{title} - S{season00}E{episode00}.{ext}" });
 });
 
@@ -49,6 +56,8 @@ test("拆了再拼一字不差（设置页的脏状态是比字符串）", () =>
     "{category}/[{collection}/]{title} ({year}) {idTag}/{title} ({year}).{ext}",
     "{category}/{year}/{title} ({year}) {idTag}/Season {season00}/{title} - S{season00}E{episode00}[ - {absolute000}].{ext}",
     "{category}/{title} ({year}) {idTag}/{originalName}.{ext}",
+    "{category}/{title} ({year}) {idTag}/{enTitle|originalTitle:.}.{year}[.{resolution}][.{source:.}][-{group}].{ext}",
+    "{category}/{title} ({year}) {idTag}/Season {season00}/{enTitle|originalTitle:.}.S{season00}E{episode00}[.{episodeTitle:.}].{ext}",
     "a/b/c/d/e.{ext}",
     "{title} \\[x\\]/{title}.{ext}",
   ];

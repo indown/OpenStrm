@@ -59,7 +59,7 @@ test("MKV：读文件头就拿到编码 / 分辨率 / 音轨，读的字节不�
   assert.deepEqual([p.video?.width, p.video?.height], [1280, 720]);
   assert.equal(p.audio[0]?.codec, "AAC");
   assert.equal(p.audio[0]?.language, "en");
-  assert.deepEqual(probeTags(p), { resolution: "720p", videoCodec: "H.264", audio: "AAC" });
+  assert.deepEqual(probeTags(p), { resolution: "720p", videoCodec: "H.264", audio: "AAC 2.0" });
   assert.equal(probeSummary(p), "H.264 · 720p · AAC 2.0 en");
   assert.ok(reads >= 1 && bytesRead <= mkv.length, `${reads} 次 ${bytesRead} 字节`);
   assert.equal(src.reads.length, reads);

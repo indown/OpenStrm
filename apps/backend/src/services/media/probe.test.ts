@@ -31,7 +31,7 @@ test("4K HEVC 杜比视界 + DDP Atmos：编码 / 分辨率 / HDR / 主音轨都
   assert.equal(mainAudio(p)?.atmos, true);
   assert.deepEqual(p.subtitles.map((s) => s.language), ["zh", "en"]);
   assert.equal(p.bytesRead, 1234);
-  assert.deepEqual(probeTags(p), { resolution: "2160p", videoCodec: "HEVC", audio: "DDP", hdr: "DV" });
+  assert.deepEqual(probeTags(p), { resolution: "2160p", videoCodec: "HEVC", audio: "DDP 5.1 Atmos", hdr: "DV" }, "audio 和文件名解析出来的形状一致：编码 声道 Atmos");
   assert.equal(probeSummary(p), "HEVC · 2160p 10bit · DV · DDP Atmos 5.1 en · 2 条音轨 · 字幕 zh/en");
 });
 

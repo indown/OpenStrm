@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_TEMPLATES, SERVERS, STRUCTURES, buildTemplate, detectServer, detectStructure, serverFromIdTag } from "./organize-presets";
+import { DEFAULT_TEMPLATES, SCENE_FILES, SERVERS, STRUCTURES, buildTemplate, detectServer, detectStructure, isServerIndependentFile, serverFromIdTag } from "./organize-presets";
 import { splitMovie, splitTv } from "./template-parts";
 
 test("默认模板和后端 services/organize/settings.ts 的 DEFAULT_TEMPLATES 一字不差", () => {
@@ -18,6 +18,16 @@ test("结构 × 服务器生成模板：结构只动目录，服务器只动文�
   assert.equal(buildTemplate("tv", "absolute", "emby"), "{category}/{title} ({year}) {idTag}/Season {season00}/{title} - S{season00}E{episode00}[ - {absolute000}][ - {episodeTitle}].{ext}");
   assert.equal(buildTemplate("tv", "default", "plex"), "{category}/{title} ({year}) {idTag}/Season {season00}/{title} ({year}) - s{season00}e{episode00}[ - {episodeTitle}].{ext}");
   assert.equal(buildTemplate("tv", "keepName", "kodi"), "{category}/{title} ({year}) {idTag}/Season {season00}/{originalName}.{ext}");
+  // 发布组写法：目录照规范，文件名是点号写法，不随服务器变
+  assert.equal(
+    buildTemplate("movie", "scene", "plex"),
+    "{category}/{title} ({year}) {idTag}/{enTitle|originalTitle:.}.{year}[.{edition:.}][.{resolution}][.{source:.}][.{videoCodec}][.{hdr}][.{audio:.}][-{group}][-{part}].{ext}",
+  );
+  assert.equal(buildTemplate("tv", "scene", "emby"), `{category}/{title} ({year}) {idTag}/Season {season00}/${SCENE_FILES.tv}`);
+  assert.equal(buildTemplate("tv", "scene", "emby"), buildTemplate("tv", "scene", "plex"));
+  assert.ok(isServerIndependentFile("movie", splitMovie(buildTemplate("movie", "scene", "emby"))!.file));
+  assert.ok(isServerIndependentFile("tv", "{originalName}.{ext}"));
+  assert.equal(isServerIndependentFile("tv", "{title} - S{season00}E{episode00}.{ext}"), false);
   // 生成的每一条都能按层拆开、文件名那格没有斜杠
   for (const s of SERVERS) {
     for (const st of STRUCTURES.movie) assert.ok(!splitMovie(buildTemplate("movie", st.key, s.key))!.file.includes("/"), `${s.key}/${st.key}`);

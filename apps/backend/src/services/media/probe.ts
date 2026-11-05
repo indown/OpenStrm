@@ -166,19 +166,20 @@ export function mainAudio(p: MediaProbe): MediaProbeAudio | undefined {
   return p.audio.find((a) => a.isDefault) ?? p.audio[0];
 }
 
-/** 模板用的四个标签 */
+const channelsLabel = (n: number | undefined): string => (n === undefined ? "" : n >= 8 ? "7.1" : n >= 6 ? "5.1" : n === 2 ? "2.0" : n === 1 ? "1.0" : `${n}ch`);
+
+/** 模板用的四个标签；audio 和文件名解析出来的形状一致：编码 声道 Atmos（`DDP 5.1 Atmos`） */
 export function probeTags(p: MediaProbe): MediaProbeTags {
   const a = mainAudio(p);
   const out: MediaProbeTags = {};
   const resolution = resolutionLabel(p.video?.width, p.video?.height);
   if (resolution) out.resolution = resolution;
   if (p.video?.codec) out.videoCodec = p.video.codec;
-  if (a?.codec) out.audio = a.codec;
+  if (a?.codec) out.audio = [a.codec, channelsLabel(a.channels), a.atmos ? "Atmos" : ""].filter(Boolean).join(" ");
   if (p.video?.hdr) out.hdr = p.video.hdr;
   return out;
 }
 
-const channelsLabel = (n: number | undefined): string => (n === undefined ? "" : n >= 8 ? "7.1" : n >= 6 ? "5.1" : n === 2 ? "2.0" : n === 1 ? "1.0" : `${n}ch`);
 
 /** 一行给人看的：HEVC · 2160p · DV · DDP Atmos 5.1 · 字幕 chi/eng */
 export function probeSummary(p: MediaProbe): string {

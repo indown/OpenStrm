@@ -256,6 +256,9 @@ export function withSpecialsDir(path: string): string {
     .join("/");
 }
 
+/** 片名 / id 变量，不管写没写兜底链和后缀；和前端 lib/template-parts.ts 的 RE_WORK_VAR 一致 */
+const RE_WORK_VAR = /\{[^{}]*\b(title|originalTitle|enTitle|idTag|tmdbId)\b[^{}]*\}/;
+
 /** 文件级的模板变量：文件名里的标签优先，没有的用探测结果（file.probe）补 */
 function fileVars(file: UnitFile): TemplateVars {
   const t = file.parsed.tags;
@@ -402,12 +405,12 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
   };
   const template = match.mediaType === "movie" ? s.templates.movie : s.templates.tv;
 
-  // 先规划视频：每个视频的目标路径；作品根目录 = 模板里含 {title} / {idTag} 的那一层及其之上的层
+  // 先规划视频：每个视频的目标路径；作品根目录 = 模板里含 {title} / {idTag} 的那一层及其之上的层（带兜底链 / 后缀的 {enTitle|originalTitle:.} 也算）
   const videoDst = new Map<UnitFile, string>();
   const videoKey = new Map<UnitFile, string>();
   const rootTemplate = (() => {
     const segs = template.split("/");
-    const idx = segs.findIndex((seg) => /\{(title|originalTitle|enTitle|idTag|tmdbId)\}/.test(seg));
+    const idx = segs.findIndex((seg) => RE_WORK_VAR.test(seg));
     return idx === -1 ? "" : segs.slice(0, idx + 1).join("/");
   })();
   const dstRoot = rootTemplate ? renderTemplate(rootTemplate, common, { colon: s.colon }).path : "";

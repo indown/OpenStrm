@@ -11,7 +11,7 @@ import { api } from "@/lib/api";
 import { FieldHint } from "@/components/field-hint";
 import { TemplateEditor, previewFor } from "@/components/template-editor";
 import { SkipDirs } from "./SkipDirs";
-import { DEFAULT_TEMPLATES, SERVERS, STRUCTURES, buildTemplate, detectServer, detectStructure, serverFromIdTag, type MediaKind, type ServerPreset } from "@/lib/organize-presets";
+import { DEFAULT_TEMPLATES, SERVERS, STRUCTURES, buildTemplate, detectServer, detectStructure, isServerIndependentFile, serverFromIdTag, type MediaKind, type ServerPreset } from "@/lib/organize-presets";
 import { joinMovie, joinTv, splitMovie, splitTv } from "@/lib/template-parts";
 
 export { DEFAULT_TEMPLATES };
@@ -60,7 +60,6 @@ const DEFAULT_CATEGORY_TEXT = {
 };
 
 const KIND_LABEL: Record<MediaKind, string> = { movie: "电影", tv: "剧集" };
-const KEEP_NAME_FILE = "{originalName}.{ext}";
 
 type Props = {
   value: OrganizeSettings;
@@ -120,13 +119,13 @@ export function OrganizeSection({ value, onChange }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewKey]);
 
-  /** 套一个服务器：改 id 标签、特别篇 / 花絮目录名和两条模板的文件名细节；目录结构（年份 / 系列 / 分类那几层）和「保留原文件名」照旧 */
+  /** 套一个服务器：改 id 标签、特别篇 / 花絮目录名和两条模板的文件名细节；目录结构（年份 / 系列 / 分类那几层）、「保留原文件名」和「发布组写法」照旧 */
   const applyServer = (s: ServerPreset) => {
     const m = splitMovie(effMovie);
     const t = splitTv(effTv);
-    const movie = m ? joinMovie({ dir: m.dir, file: m.file === KEEP_NAME_FILE ? m.file : s.movieFile }) : buildTemplate("movie", "default", s.key);
+    const movie = m ? joinMovie({ dir: m.dir, file: isServerIndependentFile("movie", m.file) ? m.file : s.movieFile }) : buildTemplate("movie", "default", s.key);
     const tv = t
-      ? joinTv({ dir: t.dir, season: t.season, file: t.file === KEEP_NAME_FILE ? t.file : s.tvFile.replace("{ABS}", t.file.includes("{absolute") ? "[ - {absolute000}]" : "") })
+      ? joinTv({ dir: t.dir, season: t.season, file: isServerIndependentFile("tv", t.file) ? t.file : s.tvFile.replace("{ABS}", t.file.includes("{absolute") ? "[ - {absolute000}]" : "") })
       : buildTemplate("tv", "default", s.key);
     set({ idTag: s.idTag, specials: s.specials, extrasDir: s.extrasDir, templates: { movie, tv } });
   };

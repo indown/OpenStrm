@@ -195,7 +195,13 @@ export function TemplateEditor({
           <div className="space-y-1">
             <Label htmlFor={`${id}-file`}>文件名</Label>
             <Input id={`${id}-file`} value={parts!.file} onChange={(e) => emit({ file: e.target.value })} {...fieldProps("file")} />
-            {fileSlash ? <p className="text-xs text-destructive">文件名里不能有 /，目录层级写到上面那格。</p> : <p className="text-xs text-muted-foreground">末尾要有 .{"{ext}"}；[ … ] 可选段里的变量全为空就整段丢掉。</p>}
+            {fileSlash ? (
+              <p className="text-xs text-destructive">文件名里不能有 /，目录层级写到上面那格。</p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                末尾要有 .{"{ext}"}；[ … ] 可选段里的变量全为空就整段丢掉；{"{a|b}"} 是兜底（a 为空就用 b）；变量后面加 :. 把空格换成点（发布组写法），:_ 下划线、:- 横线。
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -256,6 +262,9 @@ export function TemplateEditor({
                 ))}
               </tbody>
             </table>
+            <p className="border-t px-2 py-1 text-xs text-muted-foreground">
+              写法：{"{a|b}"} a 为空就用 b；变量后面加 :. 把空格换成点、去掉引号逗号这类标点（{"{enTitle|originalTitle:.}"} → Dune.Part.Two），:_ 下划线、:- 横线。
+            </p>
           </div>
         )}
       </div>

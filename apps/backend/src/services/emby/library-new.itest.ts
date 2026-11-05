@@ -130,13 +130,13 @@ test("回填探测缓存：Emby 分析过的流按 strm 内容换算回网盘文
   const row = rows.get("path:/tv/A/A.S01E01.mkv")!;
   assert.ok(row, "对上任务的写进去了");
   assert.equal(row.size, 1234);
-  assert.deepEqual(probeTags(row.data!), { resolution: "2160p", videoCodec: "HEVC", audio: "DDP", hdr: "DV" });
+  assert.deepEqual(probeTags(row.data!), { resolution: "2160p", videoCodec: "HEVC", audio: "DDP 5.1 Atmos", hdr: "DV" });
   assert.equal(row.data!.audio[0].atmos, true);
   assert.equal(row.data!.audio[0].language, "eng");
   assert.equal(rows.get("path:/tv/A/A.S01E03.mkv"), undefined, "没有视频流的不写");
   assert.equal(countMediaProbes(), 1, "对不上任务的不写");
   // 有 id 的目标也能退到按路径找
-  assert.deepEqual(cachedProbeTags("acc", [{ path: "/tv/A/A.S01E01.mkv", id: "fid1", size: 1234 }]).get("/tv/A/A.S01E01.mkv"), { resolution: "2160p", videoCodec: "HEVC", audio: "DDP", hdr: "DV" });
+  assert.deepEqual(cachedProbeTags("acc", [{ path: "/tv/A/A.S01E01.mkv", id: "fid1", size: 1234 }]).get("/tv/A/A.S01E01.mkv"), { resolution: "2160p", videoCodec: "HEVC", audio: "DDP 5.1 Atmos", hdr: "DV" });
 
   // 读文件头得到的结果（bytesRead > 0）不被 Emby 的覆盖
   putMediaProbe({ ...row, data: { ...row.data!, bytesRead: 100, video: { ...row.data!.video!, codec: "AV1" } }, probedAt: 1 });

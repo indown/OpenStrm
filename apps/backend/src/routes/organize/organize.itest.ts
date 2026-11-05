@@ -431,7 +431,7 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     const { items } = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${run.id}/items?unit=${encodeURIComponent(unit.key)}`);
     const movie = items.find((i) => i.srcPath.endsWith(".mkv"))!;
     assert.equal(r.files[0].path, movie.srcPath);
-    assert.deepEqual(movie.probe, { resolution: "2160p", videoCodec: "HEVC", audio: "DDP", hdr: "HDR10" });
+    assert.deepEqual(movie.probe, { resolution: "2160p", videoCodec: "HEVC", audio: "DDP 5.1", hdr: "HDR10" });
     assert.ok(movie.dstPath.endsWith("沙丘：第二部 (2024) - 2160p.mkv"), movie.dstPath);
     const again = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${run.id}/probe`, { keys: [unit.key] });
     assert.equal(again.probed + again.failed, 0, "缺的标签已经有探测结果了，不用再探");

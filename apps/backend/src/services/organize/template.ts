@@ -7,6 +7,8 @@
  *   - 路径段整体为空就去掉这一层（分类关掉时 `{category}/` 自然消失）。
  *   - 变量值先清洗：`/ \` → `-`，冒号按策略，`< > " | ? *` 删掉，首尾空格和点去掉。
  *   - 单段超过 200 字节时截标题不截扩展名。
+ *   - `{a|b}` 兜底：a 为空就用 b。`{title:.}` 后缀把值按发布组写法连接（空格换成点；`:_` 下划线、`:-` 横线），
+ *     顺手去掉 ' " ! , 这类标点、& 写成 and、冒号策略留下的孤立横线。后缀写在整条兜底链末尾。
  */
 import type { OrganizeColonStyle } from "@openstrm/shared";
 
@@ -25,7 +27,7 @@ export interface RenderOptions {
   maxSegmentBytes?: number;
 }
 
-type Node = { kind: "text"; text: string } | { kind: "var"; name: string } | { kind: "opt"; children: Node[] };
+type Node = { kind: "text"; text: string } | { kind: "var"; names: string[]; sep?: string } | { kind: "opt"; children: Node[] };
 
 interface Parsed {
   nodes: Node[];
@@ -33,6 +35,29 @@ interface Parsed {
 }
 
 const MAX_SEGMENT_BYTES = 200;
+const SEPARATORS = new Set([".", "_", "-"]);
+
+/** 花括号里的写法：`a|b|c` 是兜底链，末尾可以带 `:.` / `:_` / `:-` 后缀 */
+function parseVarSpec(raw: string): { names: string[]; sep?: string; errors: string[] } {
+  const errors: string[] = [];
+  const colon = raw.indexOf(":");
+  const body = colon === -1 ? raw : raw.slice(0, colon);
+  const sep = colon === -1 ? undefined : raw.slice(colon + 1).trim();
+  if (sep !== undefined && !SEPARATORS.has(sep)) errors.push(`变量 {${raw.trim()}} 的后缀只能是 :. :_ :-`);
+  const names = body.split("|").map((n) => n.trim());
+  for (const name of names) if (!(TEMPLATE_VARS as readonly string[]).includes(name)) errors.push(`不认识的变量 {${name}}`);
+  return { names, sep: sep !== undefined && SEPARATORS.has(sep) ? sep : undefined, errors };
+}
+
+/** 发布组写法：去掉引号 / 逗号 / 叹号，& 写成 and，冒号策略留下的孤立横线丢掉，剩下的词用 sep 连起来 */
+export function releaseJoin(value: string, sep: string): string {
+  return value
+    .replace(/[‘’“”'"!,]/g, "")
+    .replace(/&/g, " and ")
+    .split(/\s+/)
+    .filter((w) => w && !/^[-–—:]+$/.test(w))
+    .join(sep);
+}
 
 export function parseTemplate(template: string): Parsed {
   const errors: string[] = [];
@@ -57,10 +82,10 @@ export function parseTemplate(template: string): Parsed {
         errors.push(`第 ${i + 1} 个字符起的 { 没有配对的 }`);
         break;
       }
-      const name = template.slice(i + 1, end).trim();
-      if (!(TEMPLATE_VARS as readonly string[]).includes(name)) errors.push(`不认识的变量 {${name}}`);
+      const spec = parseVarSpec(template.slice(i + 1, end));
+      errors.push(...spec.errors);
       flush();
-      stack[stack.length - 1].push({ kind: "var", name });
+      stack[stack.length - 1].push({ kind: "var", names: spec.names, sep: spec.sep });
       i = end + 1;
       continue;
     }
@@ -142,7 +167,15 @@ export interface RenderResult {
 export function renderTemplate(template: string, vars: TemplateVars, opts: RenderOptions = {}): RenderResult {
   const { nodes, errors } = parseTemplate(template);
   const colon = opts.colon ?? "smart";
-  const value = (name: string): string => cleanValue(vars[name as TemplateVarName], colon);
+  /** 兜底链里第一个非空的值；带后缀就按发布组写法连接 */
+  const value = (names: string[], sep?: string): string => {
+    let v = "";
+    for (const name of names) {
+      v = cleanValue(vars[name as TemplateVarName], colon);
+      if (v) break;
+    }
+    return sep && v ? releaseJoin(v, sep) : v;
+  };
   const render = (list: Node[]): { text: string; hadValue: boolean; hadVar: boolean } => {
     let text = "";
     let hadValue = false;
@@ -151,7 +184,7 @@ export function renderTemplate(template: string, vars: TemplateVars, opts: Rende
       if (n.kind === "text") text += n.text;
       else if (n.kind === "var") {
         hadVar = true;
-        const v = value(n.name);
+        const v = value(n.names, n.sep);
         if (v) hadValue = true;
         text += v;
       } else {
@@ -164,7 +197,7 @@ export function renderTemplate(template: string, vars: TemplateVars, opts: Rende
     }
     return { text, hadValue, hadVar };
   };
-  const ext = value("ext");
+  const ext = value(["ext"]);
   const raw = render(nodes).text;
   const segments = raw
     .split("/")

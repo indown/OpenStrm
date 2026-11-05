@@ -17,8 +17,10 @@ import { stripInvisible } from "../../lib/text.js";
 
 export interface ParsedTags {
   resolution?: string;
+  /** 来源；原盘 / REMUX 叠在后面：`BluRay Remux`，只有 remux 词就是 `Remux` */
   source?: string;
   videoCodec?: string;
+  /** 音频按出现顺序空格连接：`DTS-HD MA TrueHD 7.1 Atmos`、`DDP 5.1 Atmos` */
   audio?: string;
   hdr?: string;
   group?: string;
@@ -71,9 +73,19 @@ const VIDEO: Record<string, string> = {
 };
 const AUDIO: Record<string, string> = {
   aac: "AAC", ac3: "AC3", eac3: "EAC3", "e-ac3": "EAC3", "e-ac-3": "EAC3", dd: "DD", "dd+": "DDP", ddp: "DDP", dts: "DTS",
-  "dts-hd": "DTS-HD", dtshd: "DTS-HD", "dts-x": "DTS-X", dtsx: "DTS-X", truehd: "TrueHD", atmos: "Atmos", flac: "FLAC",
-  opus: "Opus", mp3: "MP3", lpcm: "LPCM", pcm: "PCM", "aac2.0": "AAC", "aac5.1": "AAC", "ddp5.1": "DDP", "ddp2.0": "DDP",
-  "dd5.1": "DD", "dd2.0": "DD", "ac3-5.1": "AC3",
+  "dts-hd": "DTS-HD", dtshd: "DTS-HD", "dts-hdma": "DTS-HD MA", dtshdma: "DTS-HD MA", "dts-x": "DTS-X", dtsx: "DTS-X", "dts:x": "DTS-X",
+  truehd: "TrueHD", atmos: "Atmos", flac: "FLAC", opus: "Opus", mp3: "MP3", lpcm: "LPCM", pcm: "PCM",
+};
+/** 粘在编码后面的声道：`DDP5.1` 被 glueDottedTech 粘成了 ddp51 */
+const RE_AUDIO_GLUED = /^(ddp|dd\+|dd|aac|ac3|eac3|dts|truehd|atmos|flac|lpcm|pcm|opus)(\d{1,2})(?:ch)?$/;
+/** 独立的声道词：`7.1` 粘成了 71，`6ch` 这类按声道数 */
+const RE_CHANNELS = /^(10|20|21|51|61|71|2ch|6ch|8ch|51ch|71ch|20ch)$/;
+/** DTS-HD 后面的 MA / HRA */
+const RE_DTS_SUFFIX = /^(ma|hra|hr)$/;
+const channelsOf = (s: string): string => {
+  const d = s.replace(/ch$/, "");
+  if (d.length === 2) return `${d[0]}.${d[1]}`;
+  return d === "2" ? "2.0" : d === "5" || d === "6" ? "5.1" : d === "7" || d === "8" ? "7.1" : d === "1" ? "1.0" : `${d}ch`;
 };
 const HDR: Record<string, string> = {
   hdr: "HDR", hdr10: "HDR10", "hdr10+": "HDR10+", hdr10plus: "HDR10+", dv: "DV", dovi: "DV", dolbyvision: "DV", sdr: "SDR", hlg: "HLG",
@@ -103,17 +115,17 @@ const CJK_RELEASE =
 const GLUED_TECH = /^(?:4k|8k|2160p?|1080p?|720p?)(?:web|bluray|remux|hdr|dv|sdr|hdtv|uhd)/;
 const RE_SIZE = /^(?:\d{2,}|\d+\.\d+)(?:g|gb|t|tb)$/;
 
-/** 粘在中文词里的发布信息顺手记成标签（整理的命名模板用得上） */
-function cjkReleaseTags(w: string, tags: ParsedTags): void {
+/** 粘在中文词里的发布信息顺手记成标签（整理的命名模板用得上）；返回是不是原盘 / REMUX，来源最后拼成 `BluRay Remux` */
+function cjkReleaseTags(w: string, tags: ParsedTags): boolean {
   if (/4k|2160p/.test(w)) tags.resolution ??= "4K";
   else if (/1080p/.test(w)) tags.resolution ??= "1080p";
   else if (/720p/.test(w)) tags.resolution ??= "720p";
-  if (/remux|原盘/.test(w)) tags.source ??= "Remux";
-  else if (/蓝光|bluray/.test(w)) tags.source ??= "BluRay";
+  if (/蓝光|bluray/.test(w)) tags.source ??= "BluRay";
   else if (/web-?dl/.test(w)) tags.source ??= "WEB-DL";
   if (/杜比视界/.test(w)) tags.hdr ??= "DV";
   else if (/hdr10\+/.test(w)) tags.hdr ??= "HDR10+";
   else if (/hdr/.test(w)) tags.hdr ??= "HDR";
+  return /remux|原盘/.test(w);
 }
 
 /** 罗马数字（冰雪奇缘Ⅱ）：比对时当阿拉伯数字，搜 TMDB 时多给一个阿拉伯数字的候选 */
@@ -262,13 +274,12 @@ function chunk(input: string): Chunk[] {
   return out;
 }
 
-/** 被点号拆坏的技术词先粘回去：H.264 → H264、DDP5.1 → DDP5、DTS-HD.MA → DTS-HD、Blu-ray 已经带连字符不用管 */
+/** 被点号拆坏的技术词先粘回去：H.264 → H264、DDP5.1 → DDP51（解析时拆回 DDP 5.1）、7.1 → 71、Blu-ray 已经带连字符不用管；DTS-HD.MA 不粘，MA 单独认 */
 function glueDottedTech(text: string): string {
   return text
     .replace(/\b([Hh])\.(26[45])\b/g, "$1$2")
-    .replace(/\b(DDP|DD|AAC|AC3|EAC3|DTS|TrueHD|Atmos|FLAC|E-?AC-?3)(\d)\.(\d)\b/gi, "$1$2")
+    .replace(/\b(DDP|DD\+?|AAC|AC3|EAC3|DTS|TrueHD|Atmos|FLAC|E-?AC-?3)(\d)\.(\d)\b/gi, "$1$2$3")
     .replace(/\b(\d)\.(\d)(ch)?\b/gi, "$1$2$3")
-    .replace(/\bDTS-HD\.MA\b/gi, "DTS-HD")
     .replace(/\bWEB\.DL\b/gi, "WEB-DL")
     .replace(/\bBlu\.Ray\b/gi, "BluRay");
 }
@@ -454,44 +465,77 @@ export function parseMediaName(rawName: string, opts: ParseOptions = {}): Parsed
     if (result.season === undefined) result.season = n;
   };
 
-  /** 认技术词 / 噪音；认出来返回 true（并记标签） */
-  const tech = (word: string): boolean => {
-    const w = lower(word);
+  /** 音频词按出现顺序攒（DTS-HD MA TrueHD 7.1 Atmos）；声道、DTS-HD 的 MA 只有紧跟在音频词后面才算，`Movie.2020.7.1.BluRay` 的 7.1 不是 */
+  const audioWords: string[] = [];
+  let lastAudio: string | undefined;
+  let afterAudio = false;
+  let remux = false;
+  const pushAudio = (...ws: string[]) => {
+    for (const x of ws) {
+      if (!x) continue;
+      if (!audioWords.includes(x)) audioWords.push(x);
+      lastAudio = x;
+    }
+  };
+  /** 认一个（小写的）词：音频词 / 别的技术词（含噪音）/ 不是技术词，顺手记标签 */
+  const classify = (w: string): "audio" | "tech" | false => {
     if (RESOLUTION[w]) {
       result.tags.resolution ??= RESOLUTION[w];
-      return true;
+      return "tech";
     }
     if (SOURCE[w]) {
-      result.tags.source ??= SOURCE[w];
-      return true;
+      // 原盘 / REMUX 不占来源位，最后叠在来源后面；BDRemux 本身就说了是蓝光
+      if (SOURCE[w] === "Remux") {
+        remux = true;
+        if (w === "bdremux") result.tags.source ??= "BluRay";
+      } else result.tags.source ??= SOURCE[w];
+      return "tech";
     }
     if (VIDEO[w]) {
       result.tags.videoCodec ??= VIDEO[w];
-      return true;
+      return "tech";
     }
     if (AUDIO[w]) {
-      result.tags.audio ??= AUDIO[w];
-      return true;
+      pushAudio(AUDIO[w]);
+      return "audio";
     }
     if (HDR[w]) {
       result.tags.hdr ??= HDR[w];
-      return true;
+      return "tech";
     }
-    if (NOISE.has(w)) return true;
-    // 2160p.WEB-DL 已经拆开；`DDP5.1` 被点拆成 ddp5 / 1，`DDP5` 也认
-    if (/^(ddp|dd|aac|ac3|eac3|dts|truehd|atmos|flac)\d{1,2}(\.\d)?(ch)?$/.test(w)) {
-      result.tags.audio ??= AUDIO[w.replace(/\d.*$/, "")] ?? w.toUpperCase();
-      return true;
+    let m: RegExpExecArray | null;
+    if (afterAudio) {
+      if ((m = RE_CHANNELS.exec(w))) {
+        pushAudio(channelsOf(m[1]));
+        return "audio";
+      }
+      if (RE_DTS_SUFFIX.test(w) && lastAudio === "DTS-HD") {
+        pushAudio(w.toUpperCase());
+        return "audio";
+      }
     }
-    if (/^\d{1,2}bit$/.test(w)) return true;
-    if (/^\d+fps$/.test(w)) return true;
-    if (/^v\d$/.test(w)) return true;
+    if (NOISE.has(w)) return "tech";
+    // `DDP5.1` 粘成了 ddp51：编码 + 声道
+    if ((m = RE_AUDIO_GLUED.exec(w))) {
+      pushAudio(AUDIO[m[1]] ?? m[1].toUpperCase(), channelsOf(m[2]));
+      return "audio";
+    }
+    if (/^\d{1,2}bit$/.test(w)) return "tech";
+    if (/^\d+fps$/.test(w)) return "tech";
+    if (/^v\d$/.test(w)) return "tech";
     if (RE_CJK.test(w) && CJK_RELEASE.test(w)) {
-      cjkReleaseTags(w, result.tags);
-      return true;
+      if (cjkReleaseTags(w, result.tags)) remux = true;
+      return "tech";
     }
-    if (GLUED_TECH.test(w) || RE_SIZE.test(w)) return true;
+    if (GLUED_TECH.test(w) || RE_SIZE.test(w)) return "tech";
     return false;
+  };
+  /** 认技术词 / 噪音；认出来返回 true（并记标签）。不是技术词的不动「上一个是音频词」的状态：`DTS-HD.MA.5.1-GROUP` 的尾段先整个试一次、再拆成两半认，后半才接得上 */
+  const tech = (word: string): boolean => {
+    const kind = classify(lower(word));
+    if (kind === false) return false;
+    afterAudio = kind === "audio";
+    return true;
   };
 
   /** 一个词是不是标记（季集 / 年份 / 特别篇 …），是就登记并切断。`inTitle`：这个词在标题 / 集标题的正文里，不当特别篇 / 花絮 / sample 的标记 */
@@ -611,10 +655,13 @@ export function parseMediaName(rawName: string, opts: ParseOptions = {}): Parsed
       cutAt("tech");
       return true;
     }
-    // x265-FLUX / AAC-PTHweb：技术词带组名后缀
+    // x265-FLUX / AAC-PTHweb：技术词带组名后缀；`AC3-5.1` 粘成了 ac3-51、`DTS-HD-MA` 的后半是声道 / MA，不是组名
     const tg = RE_TECH_GROUP.exec(w);
     if (tg && tech(tg[1])) {
-      result.tags.group ??= tg[2];
+      const tail = lower(tg[2]);
+      const audioTail = afterAudio && RE_CHANNELS.test(tail) ? channelsOf(tail) : afterAudio && lastAudio === "DTS-HD" && RE_DTS_SUFFIX.test(tail) ? tail.toUpperCase() : "";
+      if (audioTail) pushAudio(audioTail);
+      else result.tags.group ??= tg[2];
       cutAt("tech");
       return true;
     }
@@ -759,6 +806,8 @@ export function parseMediaName(rawName: string, opts: ParseOptions = {}): Parsed
   });
 
   if (groupFromBracket && result.tags.group === undefined) result.tags.group = groupFromBracket;
+  if (audioWords.length > 0) result.tags.audio = audioWords.join(" ");
+  if (remux) result.tags.source = result.tags.source ? `${result.tags.source} Remux` : "Remux";
   result.year = yearBeforeCut ?? yearAfterCut;
   // 没切断、标题最后一个词是年份（《Avatar 2009》）：它就是年份
   if (!cut && result.year === undefined && titleWords.length > 1 && RE_YEAR.test(titleWords[titleWords.length - 1])) {
@@ -876,7 +925,7 @@ export function hasReleaseNoise(stem: string): boolean {
   if (RE_CANONICAL_MOVIE.test(s) || RE_CANONICAL_TV.test(s)) return false;
   if (/^\[/.test(s)) return true;
   const t = parseMediaName(s).tags;
-  return !!(t.videoCodec || t.group || (t.source && STRONG_SOURCE.has(t.source)));
+  return !!(t.videoCodec || t.group || t.source?.split(" ").some((x) => STRONG_SOURCE.has(x)));
 }
 
 /**

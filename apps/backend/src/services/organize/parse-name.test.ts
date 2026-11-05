@@ -12,10 +12,19 @@ type Expect = Partial<Omit<ParsedName, "tags" | "titles">> & { tags?: Partial<Pa
 
 const samples: Array<[string, Expect]> = [
   // 场景组 / PT 风格
-  ["Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX", { title: "Dune Part Two", year: "2024", tags: { resolution: "2160p", source: "WEB-DL", audio: "DDP", hdr: "DV", videoCodec: "H.265", group: "FLUX" } }],
+  ["Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX", { title: "Dune Part Two", year: "2024", tags: { resolution: "2160p", source: "WEB-DL", audio: "DDP 5.1 Atmos", hdr: "DV", videoCodec: "H.265", group: "FLUX" } }],
   ["BEEF.S01E01.1080p.NF.WEB-DL.DDP5.1.H.264-XXX", { title: "BEEF", season: 1, episode: 1, tags: { resolution: "1080p", source: "WEB-DL", videoCodec: "H.264", group: "XXX" } }],
   ["BEEF.S01.1080p.NF.WEB-DL.DDP5.1.H.264-XXX", { title: "BEEF", season: 1, episode: undefined, cutoff: "season" }],
   ["Game.of.Thrones.S01E01.Winter.Is.Coming.1080p.BluRay.x265-RARBG", { title: "Game of Thrones", season: 1, episode: 1, tags: { source: "BluRay", videoCodec: "x265", group: "RARBG" } }],
+  // 发布组写法：原盘 REMUX 叠在来源后面，音轨按出现顺序攒，声道 / MA 只跟在音频词后面才算
+  ["Peter.Rabbit.2018.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos", { title: "Peter Rabbit", year: "2018", tags: { resolution: "2160p", source: "BluRay Remux", videoCodec: "HEVC", audio: "DTS-HD MA TrueHD 7.1 Atmos", group: undefined } }],
+  ["Peter.Rabbit.2018.UHD.BluRay.2160p.DTS-HD.MA.TrueHD.7.1.Atmos.HEVC.REMUX-FraMeSToR", { title: "Peter Rabbit", year: "2018", tags: { source: "BluRay Remux", videoCodec: "HEVC", audio: "DTS-HD MA TrueHD 7.1 Atmos", group: "FraMeSToR" } }],
+  ["Movie.2020.1080p.BDRemux.AVC.DTS-HD.MA.5.1-GROUP", { title: "Movie", year: "2020", tags: { source: "BluRay Remux", audio: "DTS-HD MA 5.1", group: "GROUP" } }],
+  ["Movie.2020.1080p.WEB-DL.AC3-5.1.x264", { title: "Movie", year: "2020", tags: { audio: "AC3 5.1", videoCodec: "x264", group: undefined } }],
+  ["Show.S01E01.1080p.WEB-DL.DD+5.1.H.264-GRP", { title: "Show", season: 1, episode: 1, tags: { audio: "DDP 5.1", videoCodec: "H.264", group: "GRP" } }],
+  ["Movie.2020.1080p.BluRay.FLAC.2.0.x264-GRP", { title: "Movie", tags: { audio: "FLAC 2.0", group: "GRP" } }],
+  ["Movie.2020.1080p.BluRay.DTS-HD.MA.7.1.x264", { title: "Movie", tags: { audio: "DTS-HD MA 7.1", videoCodec: "x264" } }],
+  ["Movie.2020.7.1.1080p.BluRay.x264", { title: "Movie", year: "2020", tags: { audio: undefined, resolution: "1080p" } }],
   ["The.Bear.S03E01E02.1080p.WEB.h264-ETHEL", { title: "The Bear", season: 3, episode: 1, episodeEnd: 2 }],
   ["Show.Name.S02E05-E06.720p.HDTV", { title: "Show Name", season: 2, episode: 5, episodeEnd: 6 }],
   ["Blade.Runner.2049.2017.1080p.BluRay.x264", { title: "Blade Runner 2049", year: "2017" }],
@@ -89,7 +98,7 @@ const samples: Array<[string, Expect]> = [
   // 中文分享包的目录名：发布信息粘在一起、演员 / 奖项 / 豆瓣分 / 体积跟在片名后面
   ["阿甘正传 4K原盘REMUX 杜比视界 国英双音 特效字幕", { title: "阿甘正传", tags: { resolution: "4K", source: "Remux" } }],
   ["阿甘正传4K原盘REMUX", { title: "阿甘正传", tags: { resolution: "4K", source: "Remux" } }],
-  ["一次别离 奥斯卡提名 豆瓣8.8 蓝光原盘REMUX 26.38GB", { title: "一次别离" }],
+  ["一次别离 奥斯卡提名 豆瓣8.8 蓝光原盘REMUX 26.38GB", { title: "一次别离", tags: { source: "BluRay Remux" } }],
   ["七宗罪 1995 布拉德皮特 豆瓣8.8 4K原盘REMUX", { title: "七宗罪", year: "1995" }],
   ["比得兔2 逃跑计划 4K原盘REMUX 国英双音", { title: "比得兔2 逃跑计划" }],
   ["沙丘 两部4K原盘REMUX 杜比视界 内封字幕", { title: "沙丘" }],
@@ -225,6 +234,7 @@ test("有没有发布噪音：规范过的名字没有，原始命名有，集�
   assert.equal(hasReleaseNoise("Show - S01E01 - Web of Lies"), false);
   assert.equal(hasReleaseNoise("Dune (2024) - WEB-DL x265 [RARBG]"), false, "用户模板里带了来源 / 编码也是规范形状");
   assert.equal(hasReleaseNoise("Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX"), true);
+  assert.equal(hasReleaseNoise("Peter.Rabbit.2018.2160p.BluRay.REMUX"), true, "来源叠了 Remux 仍算强来源");
   assert.equal(hasReleaseNoise("[Nekomoe kissaten][Sousou no Frieren][01][1080p][JPSC]"), true);
   assert.equal(hasReleaseNoise("BEEF.S01E01.1080p.NF.WEB-DL.DDP5.1.H.264-XXX"), true);
   assert.equal(hasReleaseNoise("Some Movie 2020"), false, "只是没有年份括号，不算噪音");

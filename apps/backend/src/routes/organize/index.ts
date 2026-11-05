@@ -15,6 +15,7 @@ import { HttpError } from "../../lib/http-error.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { parse } from "../../lib/validate.js";
 import { requireAgentScope } from "../../services/agent/access.js";
+import { parseMediaName } from "../../services/organize/parse-name.js";
 import {
   applyRun,
   cancelRun,
@@ -345,7 +346,14 @@ export default async function (fastify: FastifyInstance) {
       ...validateTemplate(tvTpl).map((e) => `剧集模板：${e}`),
       ...(body.rules ? parseRules(body.rules).errors.map((e) => `识别词${e}`) : []),
     ];
-    // 两个样例：沙丘：第二部（科幻 / 冒险，美国）和怒呛人生（喜剧 / 剧情，美国）；分类按规则算，没开分类就没有这一层
+    // 两个样例：沙丘：第二部（科幻 / 冒险，美国）和怒呛人生（喜剧 / 剧情，美国）；分类按规则算，没开分类就没有这一层。
+    // 画质 / 来源 / 音频这些标签真从样例文件名解析，变量表「本例」列看到的就是解析器的输出
+    const movieSample = "Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX";
+    const tvSample = "BEEF.S01E01.1080p.NF.WEB-DL.DDP5.1.H.264-NTb";
+    const sampleTags = (name: string): TemplateVars => {
+      const t = parseMediaName(name).tags;
+      return { resolution: t.resolution ?? "", source: t.source ?? "", videoCodec: t.videoCodec ?? "", audio: t.audio ?? "", hdr: t.hdr ?? "", group: t.group ?? "" };
+    };
     const cats = current.categories;
     const movieVars: TemplateVars = {
       category: cats.enabled ? pickCategory(cats.movie, { genreIds: [878, 12], countries: ["US"], originalLanguage: "en" }) : "",
@@ -359,13 +367,8 @@ export default async function (fastify: FastifyInstance) {
       idTag: idTagFor(idTag, 693134),
       part: "",
       edition: "",
-      resolution: "2160p",
-      source: "WEB-DL",
-      videoCodec: "H.265",
-      audio: "DDP",
-      hdr: "DV",
-      group: "FLUX",
-      originalName: "Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX",
+      ...sampleTags(movieSample),
+      originalName: movieSample,
       ext: "mkv",
     };
     const tvVars: TemplateVars = {
@@ -385,13 +388,8 @@ export default async function (fastify: FastifyInstance) {
       absolute000: "001",
       episodeTitle: episodeTitle ? "飞鸟不鸣" : "",
       part: "",
-      resolution: "1080p",
-      source: "WEB-DL",
-      videoCodec: "H.264",
-      audio: "DDP",
-      hdr: "",
-      group: "NTb",
-      originalName: "BEEF.S01E01.1080p.NF.WEB-DL.DDP5.1.H.264-NTb",
+      ...sampleTags(tvSample),
+      originalName: tvSample,
       ext: "mkv",
     };
     const movie = renderTemplate(movieTpl, movieVars, { colon }).path;

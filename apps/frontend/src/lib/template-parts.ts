@@ -68,8 +68,9 @@ export function joinMovie(parts: MovieParts): string {
   return parts.dir ? `${parts.dir}/${parts.file}` : parts.file;
 }
 
-const RE_SEASON_VAR = /\{(season|season00)\}/;
-const RE_WORK_VAR = /\{(title|originalTitle|enTitle|idTag|tmdbId)\}/;
+/** 变量不管写没写兜底链 / 后缀（`{enTitle|originalTitle:.}`）都算；RE_WORK_VAR 和后端 plan.ts 的一致 */
+const RE_SEASON_VAR = /\{[^{}]*\b(season|season00)\b[^{}]*\}/;
+const RE_WORK_VAR = /\{[^{}]*\b(title|originalTitle|enTitle|idTag|tmdbId)\b[^{}]*\}/;
 
 /** 倒数第二段含季变量、又不含片名 / id 变量才算季目录（`{title} S{season00}` 是把季写进剧目录，不是季目录） */
 export function splitTv(template: string): TvParts | null {
