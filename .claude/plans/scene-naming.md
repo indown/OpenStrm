@@ -111,3 +111,9 @@ lab 后端日志没有告警和报错。真机（真网盘上按发布组写法�
 日志：lab 后端日志里没有 warn / error 级别的行。
 
 收尾：lab 后端已停，lab 目录（库、令牌、口令、data）整个删了。网盘上的 `115:/lab1105/` 和里面两集用户说「删除吧」之后用 Provider 的 `write.remove` + `rmdirIfEmpty` 删了（两集进 115 回收站，目录删掉，`resolvePath` 已找不到）；删时又只读拷了一次 config 库拿凭据，用完即删。
+
+## 发布（2026-11-05）
+
+用户：「发正式版吧」。`b6e24db` `chore(release): v2.24.0` = `3419378` feat(organize) 发布组写法 + `e42c8cb` docs(plans) + 三个 package.json 升到 2.24.0（shared 仍 2.0.0）；tag 注释 `v2.24.0`。`git push origin v2 v2.24.0`，main 从 `2bc8836` 快进到 `b6e24db`（main == v2 == v2.24.0）。没有迁移、没有新设置键。发前做过：后端全量 1727 / 前端 11、浏览器冒烟、115 真机三步。升级说明交用户手动贴，要点：模板新语法 `{a|b}` 兜底和 `:.` / `:_` / `:-` 后缀；预设「发布组写法」；`{audio}` 从单个编码变成「编码 声道 Atmos」按文件名顺序连起来、`{source}` 带 `Remux`，模板里用了这两个变量的文件下次整理会被改名（默认模板没用）；探测回填的 audio 同形状。CI / Release / Docker Hub 结果见下一行。
+
+→ 13:54 盯梢脚本回 RELEASE_OK：Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）+ CI@v2 + CI@main 全绿（本机 13:44 推 → 13:54），Docker Hub `v2.24.0` 与 `latest` 同为 `sha256:8aefc5b83348…`（amd64 + arm64），GitHub Release 非 prerelease、是仓库最新。**v2.24.0 正式版已发**，main == v2.24.0。
