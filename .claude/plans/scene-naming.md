@@ -117,3 +117,9 @@ lab 后端日志没有告警和报错。真机（真网盘上按发布组写法�
 用户：「发正式版吧」。`b6e24db` `chore(release): v2.24.0` = `3419378` feat(organize) 发布组写法 + `e42c8cb` docs(plans) + 三个 package.json 升到 2.24.0（shared 仍 2.0.0）；tag 注释 `v2.24.0`。`git push origin v2 v2.24.0`，main 从 `2bc8836` 快进到 `b6e24db`（main == v2 == v2.24.0）。没有迁移、没有新设置键。发前做过：后端全量 1727 / 前端 11、浏览器冒烟、115 真机三步。升级说明交用户手动贴，要点：模板新语法 `{a|b}` 兜底和 `:.` / `:_` / `:-` 后缀；预设「发布组写法」；`{audio}` 从单个编码变成「编码 声道 Atmos」按文件名顺序连起来、`{source}` 带 `Remux`，模板里用了这两个变量的文件下次整理会被改名（默认模板没用）；探测回填的 audio 同形状。CI / Release / Docker Hub 结果见下一行。
 
 → 13:54 盯梢脚本回 RELEASE_OK：Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）+ CI@v2 + CI@main 全绿（本机 13:44 推 → 13:54），Docker Hub `v2.24.0` 与 `latest` 同为 `sha256:8aefc5b83348…`（amd64 + arm64），GitHub Release 非 prerelease、是仓库最新。**v2.24.0 正式版已发**，main == v2.24.0。
+
+## 发布后修补（2026-11-05，工作区未提交）
+
+用户问 `Enola.Holmes.2020.1080p.mkv` 选了发布组写法后「主音轨信息以及视频编码什么都没展示出来，是没探测到吗」。查的时候发现一个 v2.24.0 带出去的缺口：`preview.ts` 的 `probeVarsOf` 按字面找 `{audio}` 等四个变量判断模板用没用到探测标签，发布组预设写的是 `{audio:.}`，于是 audio 不算「模板要用的标签」——文件名里已经有画质、编码、HDR 的视频（`Movie.2160p.HDR.x265.mkv` 这种）在「探测缺标签的视频」/ 预览自动探测里永远不会被探，`{audio}` 一直空；像 Enola 这种缺编码的文件照样会探（videoCodec / hdr 没带后缀），所以它不是用户那条看不到编码的原因。修法：`template.ts` 加 `templateVarNames()`（按解析器收变量名，兜底链、后缀、可选段里的都算），`probeVarsOf` 改用它。回归：`template.test`「templateVarNames」、`organize.itest` 探测编码一测里加「模板写成 `{audio:.}`，missing 模式照样探、目标名带 `.DDP.5.1`」。typecheck / lint 干净，template.test + organize.itest 27 条过。
+
+用户那条的解释：探测只在三处触发——作品卡片「探测编码」、清单上方「探测缺标签的视频」、设置页「预览时自动探测」（默认关）；没触发时模板只能用文件名里有的标签，`Enola.Holmes.2020.1080p.mkv` 只有 1080p，所以目标名没有编码和音频。探过的文件行会显示「探测到 …」，没读到会 toast 原因。

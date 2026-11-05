@@ -80,3 +80,60 @@
 ## 还没做的
 
 - 探测结果现在只喂模板；写 nfo 时可以直接用 `media_probes` 里的完整结果（音轨 / 字幕 / 码率都存了）。
+
+## 预算到顶给半截结果（2026-11-05）
+
+**起因**：用户在 115 `/movie` 里探测编码，别的都探到了，就「福尔摩斯小姐」三部电影没有探测信息（v2.24.0 发布组写法之后看得更明显：目标名只有 1080p）。
+
+**真机（config 库只读拷贝，Provider + probeDriveFile 直接跑，没起后端）**：三部的直链都能取到，失败原因都是「读取量超过上限（64 次 / 96 MB）」；对照组 `生化危机：爆发夜 (2026)`（16 GB）在没有 Emby 回填缓存的 lab 里也一样失败。把预算放到 512 MB 量访问模式：
+- `福尔摩斯小姐：失踪的侯爵 (2020) - 1080p.mkv`（15.2 GB，Netflix 原生 WEB-DL）：**31 条音轨 + 44 条字幕轨**，MediaInfoLib 从头顺序读 150 MB 才凑齐每条轨的首帧，再跳到文件尾读一块看时长，共 76 次 / 151 MB / 34 秒。
+- 生化危机（2160p HDR10+，41 条字幕轨）：512 MB / 256 次读完还没停（字幕首条靠后）。
+- 读模式都是从 0 顺序往后，HDR 元数据、Atmos、主音轨这些在最前面几 MB 就有了；多出来的读取全是为了靠后的字幕首条和文件尾的时长。
+- 顺带一个脚本坑：`openRangeSource` 不带设置里的 User-Agent 直链一律 403——115 直链和取链时的 UA 绑定，不是 CDN 的连接上限。
+
+**改法**：
+- `mediainfo.ts` `analyzeSource`：预算到顶不再抛 `ProbeBudgetError`，给 mediainfo.js 一个空块让它收尾（`shouldReadMore` 对空块返回 false → `openBufferFinalize` + `inform`），结果带 `truncated: true`。`ProbeBudgetError` 只剩超时子类在用。
+- `probe.ts`：`MediaProbe.truncated`；`probeFromResult(result, bytesRead, truncated)`；半截里没有视频轨才算失败，文案「读了前 N MB 还没找到视频轨（上限 …）」；`probeSummary` 末尾加「只读了前 N MB」。旧版留下的失败缓存（错误含「读取量超过上限」）当没探过，预览自动探测 / 探测缺标签的都会重探，不用人再按作品点一次。
+- 三部福尔摩斯小姐在默认 96 MB 预算下复跑：各 48 次 / 96 MB / 20–24 秒，`H.264 · 1080p · DDP Atmos 5.1 en · 31 条音轨 · 字幕 en/zh/ar/cs · 只读了前 96 MB`、`HEVC · 2160p 10bit · DV · DDP Atmos 5.1 en · 2 条音轨 · …`、`HEVC · 2160p 10bit · DDP Atmos 5.1 en · …`，标签四项齐全。
+- 没改预算数值：96 MB 已经够拿标签，再大只是多花时间等字幕。
+
+**测试**：`mediainfo.test`「MKV …」加预算只够第一块的半截用例（标签齐、摘要带「只读了前」）、「MP4 的 moov 在尾部」改成截断后半截里没有视频轨；`probe.test` 摘要末尾；`organize.itest` 探测编码一测加「旧版失败缓存自动重探」。
+
+**原盘 ISO（同日补测，用户问「原盘的生化危机也没有探测信息」）**：`/movie` 里三部 UHD 原盘 `.iso`（各 52 GB）在旧预算下同样失败。改成半截结果后：
+- 《生化危机6：终章》：96 MB 截断就有 `HEVC · 2160p 10bit · HDR10 · TrueHD Atmos 7.1 · 16 条音轨`，标签四项齐。
+- 《生化危机5：惩罚》《生化危机4：战神再生》：只有 `HEVC · 2160p 10bit · HDR10`，没有音轨——不是预算问题：放宽到 512 MB 让 MediaInfo 自己停（读了头 58 MB + 文件尾 42 MB，truncated=false），结果还是没有音轨。原因是 mediainfo.js 把 ISO 当成裸的 BDAV 流（General.Format = BDAV，Duration 只有 32 秒），不解析 UDF / BDMV 目录、不按播放列表找主片，只看镜像最前面那段 m2ts：6 的那段正好是正片（音轨全在），4 / 5 的那段是只有视频 + PGS 的菜单 / 片头。
+- 结论：原盘 ISO 的探测只能保证视频编码 / 分辨率 / HDR，音轨看镜像里第一段 m2ts 是什么。要稳就得自己解析 UDF 找到主播放列表的 m2ts 偏移再喂 MediaInfo，另起方案，这次不做。
+
+**原盘 ISO 的便宜做法（同日实验，未实施）**：不解析 UDF，直接把镜像从中点起当成一段裸 BDAV 流喂给 MediaInfo（按 2048 字节扇区对齐，`read(o) → src.read(base + o)`）。《生化危机5》从 50% 处起：24 秒 / 96 MB 截断，`HEVC · 2160p 10bit · HDR10 · TrueHD Atmos 7.1 · 19 条音轨`，默认轨是 TrueHD Atmos；从 20% 处起结果一样（62 秒，直链慢了些）。原理：正片占了镜像的绝大部分，中点几乎必在正片里，TS 的 PAT / PMT 每几十毫秒重复一次，MediaInfo 从任意位置都能同步上。拿不到的只有音轨语言（在播放列表的 STN 表里，裸流里没有），标签用不到。正经做法（解析 UDF 2.50 含 metadata partition → 目录 → PLAYLIST/*.mpls 挑最长的 → 主片 m2ts 的区段偏移）估计四五百行加合成镜像的测试，先不做。
+
+## 方案：原盘 ISO 从镜像中点取样（2026-11-05，用户：「按你的推荐制定计划开始吧」）
+
+**做法**：`probe.ts` 加 `probeView(source, path)`：路径以 `.iso` 结尾就把来源包成从镜像中点起的视图（`base = floor(size / 2 / 2048) * 2048`，`read(o) → source.read(base + o)`，`size` 相应减掉），别的文件原样。`probeDriveFile` 用视图喂 MediaInfo，缓存行的 size 仍记整个文件的。`MediaProbe.sampleOffset` 记从哪个偏移起读的；`probeSummary` 截断提示按它写「只读了中间 N MB」，半截里没有视频轨的失败文案也分开写。不解析 UDF，不挑播放列表。
+
+**不做**：音轨语言（在播放列表 STN 表里，裸流没有）；双正片的盘中点可能落在另一部上，不处理；DVD ISO 走同一条路（MPEG-PS 从任意位置也能同步），不单独验。
+
+**测试**：`probe.test` 的 `probeView`（扇区对齐、偏移映射、非 ISO 原样）和摘要文案；`mediainfo.test` 用 ffmpeg 生成 m2ts（`-f mpegts -mpegts_m2ts_mode 1`），从中点起喂 MediaInfo 能同步出 H.264 + AAC。真机：三张 UHD 原盘 ISO 各探一次看音轨，再探一部 mkv 确认没受影响。
+
+**进度**：
+- [x] 实现 + 单测（2026-11-05）
+- [x] 真机三张 ISO（2026-11-05）
+- [x] 记录（2026-11-05）
+- [ ] 提交 / 发版（等用户定）
+
+### 实施记录（2026-11-05）
+
+`probe.ts`：`probeView(source, path)`（`.iso` 且大于 4 个扇区才取样；`base = floor(size / 2 / 2048) * 2048`；视图的 `read` 加基准、`size` 减掉）；`probeDriveFile` 用视图喂 MediaInfo，缓存行 `size` 仍是整个文件；`MediaProbe.sampleOffset`，`probeFromResult(result, bytesRead, truncated, sampleOffset)`；摘要「只读了中间 N MB」，半截里没有视频轨时文案「从镜像中点读了 N MB 还没找到视频轨」/「镜像中点读到的不是能识别的视频流」。README 探测段补一句。测试：`probe.test`「原盘 ISO 从镜像中点取样」（对齐 / 偏移 / 非 ISO 原样 / 太小不取样）+ 摘要文案；`mediainfo.test`「蓝光 m2ts 从中间起喂也能同步出轨道」——ffmpeg 生成 m2ts（`-f mpegts -mpegts_m2ts_mode 1`）要加 `-g 12`，默认两秒的测试片只有开头一个关键帧、SPS 不重复，从中间起拿不到分辨率（真盘关键帧一两秒一个，96 MB 里有好几个）。typecheck / lint 干净，media 两个文件 13 条过。
+
+### 真机验证（2026-11-05，115，只读）
+
+**环境**：config 库只读拷贝，Provider + `probeDriveFile` 直接跑（没起后端），默认预算 96 MB / 64 次，验完拷贝删了。
+
+| 文件 | 结果 |
+|---|---|
+| 生化危机4：战神再生 - UHD.iso（53 GB） | 36 秒：`HEVC · 2160p 10bit · HDR10 · TrueHD Atmos 7.1 · 14 条音轨 · 只读了中间 96 MB`，标签 `{2160p, HEVC, TrueHD 7.1 Atmos, HDR10}` |
+| 生化危机5：惩罚 - UHD.iso（52 GB） | 98 秒（这次直链慢）：`… TrueHD Atmos 7.1 · 19 条音轨`，同上 |
+| 生化危机6：终章 - UHD.iso（52 GB） | 49 秒：`… TrueHD Atmos 7.1 · 16 条音轨`，和从头读一样 |
+| 生化危机：爆发夜（mkv） | 28 秒：`HEVC · 2160p 10bit · HDR10+ · DDP Atmos 5.1 en · 只读了前 96 MB`，不受影响 |
+| 福尔摩斯小姐：失踪的侯爵（mkv） | 28 秒：`H.264 · 1080p · DDP Atmos 5.1 en · 31 条音轨 · 只读了前 96 MB`，不受影响 |
+
+缓存行：ISO 的 `size` 是整个文件的大小，`data.sampleOffset` 约为一半（28 GB 左右），`truncated` 1。音轨语言 ISO 里都是空（裸流没有）。没有告警；网盘没动。

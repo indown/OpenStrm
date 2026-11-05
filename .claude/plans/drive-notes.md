@@ -89,3 +89,7 @@
 - 探测脚本错误只打 `name / code / message`；整个 axios 错误对象里有请求头，请求头里有 cookie。
 - 磁盘：Docker 里删掉的文件要容器退了才释放；实验结束 `docker rm -f`，必要时 `docker system df` 看构建缓存。
 - 只看界面、不碰真网盘：给 scratch 后端 `node --import tsx --import <预加载>` 一个预加载，里面 `setDriveProviderFactory` 把账号接到 `src/test/fake-drive.ts` 的 FakeDrive 上（树里预置好目录和文件），账号 cookie 随便填；同步、归档、清理、监控都能在假网盘上走（2026-10-28 清理归档的冒烟就是这么做的）。
+
+### 直链 403 先查 UA（2026-11-05）
+
+- 115 直链和取链时的 User-Agent 绑定：实验脚本里拿 `provider.downloadLink` 之后自己 `openRangeSource` 读，不带设置里的 `user-agent` 就一律 403，换文件、等两分钟都没用；带上就 206。看到 403 先查 UA，再怀疑同文件连接上限。
