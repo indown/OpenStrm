@@ -8,7 +8,7 @@ import type { MediaInfoResult } from "mediainfo.js";
 import { getMediaProbes, putMediaProbe, type MediaProbeRow } from "../../db/repositories/media-probes.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import type { DriveProvider } from "../drive/types.js";
-import { analyzeSource, openRangeSource, ProbeBudgetError, type AnalyzeOutcome, type ProbeSource, type RangeLink } from "./mediainfo.js";
+import { analyzeSource, openRangeSource, PROBE_LIMITS, ProbeBudgetError, type AnalyzeOutcome, type ProbeSource, type RangeLink } from "./mediainfo.js";
 
 export interface MediaProbeVideo {
   codec: string;
@@ -48,6 +48,23 @@ export interface MediaProbe {
   subtitles: MediaProbeText[];
   /** 为了这个结果读了多少字节 */
   bytesRead: number;
+  /** 读到预算上限就停了：轨道表和首帧都在前面，标签照样齐，只是时长 / 靠后的字幕首条可能缺 */
+  truncated?: boolean;
+  /** 原盘 ISO 从镜像中点取样：从这个字节偏移起读的（0 / 没有 = 从头读） */
+  sampleOffset?: number;
+}
+
+const SECTOR = 2048;
+
+/**
+ * 原盘 ISO：mediainfo.js 把它当裸 BDAV 流、只看镜像最前面那段 m2ts（多半是片头 / 菜单，只有视频），正片的音轨拿不到。
+ * 正片占了镜像的绝大部分，从中点起喂它就落在正片里；TS 的节目表每几十毫秒重复一次，从哪儿起都同步得上。按扇区对齐。
+ * 拿不到的只有音轨语言（在播放列表里，裸流没有），标签用不到；不解析 UDF、不挑播放列表
+ */
+export function probeView(source: ProbeSource, path: string): { source: ProbeSource; sampleOffset: number } {
+  if (!/\.iso$/i.test(path) || source.size < 4 * SECTOR) return { source, sampleOffset: 0 };
+  const base = Math.floor(source.size / 2 / SECTOR) * SECTOR;
+  return { source: { size: source.size - base, read: (offset, length, signal) => source.read(base + offset, length, signal) }, sampleOffset: base };
 }
 
 type AnyTrack = Record<string, unknown> & { "@type"?: string };
@@ -106,7 +123,7 @@ export function audioCodecOf(format: string | undefined, commercial: string | un
 }
 
 /** 把 mediainfo.js 的结果收成我们自己的模型；没有视频轨就是 null（不是视频，或文件头没读到） */
-export function probeFromResult(result: MediaInfoResult, bytesRead: number): MediaProbe | null {
+export function probeFromResult(result: MediaInfoResult, bytesRead: number, truncated = false, sampleOffset = 0): MediaProbe | null {
   const tracks = (result.media?.track ?? []) as AnyTrack[];
   const general = tracks.find((t) => t["@type"] === "General");
   const video = tracks.find((t) => t["@type"] === "Video");
@@ -145,6 +162,8 @@ export function probeFromResult(result: MediaInfoResult, bytesRead: number): Med
     }),
     subtitles: text.map((t) => ({ codec: str(t.Format) ?? "", language: str(t.Language), title: str(t.Title), forced: str(t.Forced) === "Yes" || undefined })),
     bytesRead,
+    ...(truncated ? { truncated: true } : {}),
+    ...(sampleOffset > 0 ? { sampleOffset } : {}),
   };
 }
 
@@ -194,6 +213,7 @@ export function probeSummary(p: MediaProbe): string {
   if (a) parts.push([a.codec, a.atmos ? "Atmos" : "", channelsLabel(a.channels), a.language ?? ""].filter(Boolean).join(" "));
   if (p.audio.length > 1) parts.push(`${p.audio.length} 条音轨`);
   if (p.subtitles.length > 0) parts.push(`字幕 ${[...new Set(p.subtitles.map((s) => s.language ?? "?"))].slice(0, 4).join("/")}`);
+  if (p.truncated) parts.push(`只读了${p.sampleOffset ? "中间" : "前"} ${Math.max(1, Math.round(p.bytesRead / 1048576))} MB`);
   return parts.join(" · ");
 }
 
@@ -259,17 +279,25 @@ export function cachedProbe(accountName: string, target: ProbeTarget): MediaProb
  */
 export async function probeDriveFile(provider: DriveProvider, accountName: string, target: ProbeTarget, opts: { signal?: AbortSignal; retryFailed?: boolean } = {}): Promise<ProbeOutcome> {
   const hit = cachedProbe(accountName, target);
-  if (hit && (hit.status === "ok" || !opts.retryFailed)) return { status: hit.status, probe: hit.data, error: hit.error || undefined, cached: true };
+  // 旧版预算到顶算失败（「读取量超过上限」），现在到顶给半截结果：这种失败缓存不算数，当没探过，不用人再点一次重试
+  const staleBudgetFailure = hit?.status === "failed" && /读取量超过上限/.test(hit.error ?? "");
+  if (hit && !staleBudgetFailure && (hit.status === "ok" || !opts.retryFailed)) return { status: hit.status, probe: hit.data, error: hit.error || undefined, cached: true };
   const key = probeKey(target);
   const now = Math.floor(Date.now() / 1000);
   try {
     const link = await provider.downloadLink(target.path, { token: provider.kind === "quark" ? target.id : undefined, signal: opts.signal });
     const ua = readAppSettings()["user-agent"];
     const source = await deps.open(link, target.size, typeof ua === "string" && ua ? { "User-Agent": ua } : {});
-    const { result, bytesRead } = await deps.analyze(source, { signal: opts.signal });
-    const probe = probeFromResult(result, bytesRead);
+    const view = probeView(source, target.path);
+    const { result, bytesRead, truncated } = await deps.analyze(view.source, { signal: opts.signal });
+    const probe = probeFromResult(result, bytesRead, truncated, view.sampleOffset);
     if (!probe) {
-      const error = "读到了文件头，但不是能识别的视频";
+      const where = view.sampleOffset ? "从镜像中点读了" : "读了前";
+      const error = truncated
+        ? `${where} ${Math.max(1, Math.round(bytesRead / 1048576))} MB 还没找到视频轨（上限 ${PROBE_LIMITS.MAX_READS} 次 / ${PROBE_LIMITS.MAX_BYTES >> 20} MB）`
+        : view.sampleOffset
+          ? "镜像中点读到的不是能识别的视频流"
+          : "读到了文件头，但不是能识别的视频";
       putMediaProbe({ accountName, key, path: target.path, size: source.size, status: "failed", data: null, error, probedAt: now });
       return { status: "failed", probe: null, error, cached: false };
     }

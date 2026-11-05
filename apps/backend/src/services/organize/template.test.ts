@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cleanValue, episodeToken, idTagFor, releaseJoin, renderTemplate, validateTemplate } from "./template.js";
+import { cleanValue, episodeToken, idTagFor, releaseJoin, renderTemplate, templateVarNames, validateTemplate } from "./template.js";
 import { DEFAULT_TEMPLATES } from "./settings.js";
 
 const movie = { title: "沙丘：第二部", year: "2024", idTag: "[tmdbid=693134]", resolution: "2160p", ext: "mkv" };
@@ -89,4 +89,10 @@ test("模板校验：兜底链里的未知变量、坏后缀", () => {
   assert.match(validateTemplate("{enTitle|titel:.}.{ext}")[0], /titel/);
   assert.match(validateTemplate("{title:x}.{ext}")[0], /后缀只能是/);
   assert.match(validateTemplate("{title:}.{ext}")[0], /后缀只能是/);
+});
+
+test("templateVarNames：兜底链、带后缀、可选段里的变量都算（探测要靠它判断模板用没用 {audio}）", () => {
+  const names = templateVarNames("{category}/{title} ({year}) {idTag}/{enTitle|originalTitle:.}.{year}[.{resolution}][.{source:.}][.{audio:.}][-{group}].{ext}");
+  assert.deepEqual([...names].sort(), ["audio", "category", "enTitle", "ext", "group", "idTag", "originalTitle", "resolution", "source", "title", "year"]);
+  assert.ok(!templateVarNames("{title}.{ext}").has("audio"));
 });

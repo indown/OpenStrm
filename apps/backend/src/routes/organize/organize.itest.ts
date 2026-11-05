@@ -12,7 +12,7 @@ import axios, { type AxiosResponse } from "axios";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AccountInfo, AppSettings, OrganizeItem, OrganizeProbeResult, OrganizeRun, OrganizeRunDetail, OrganizeRunSummary, OrganizeTemplatePreview, OrganizeUnit, TaskDefinition, OrganizeSkip } from "@openstrm/shared";
 import type { MediaInfoResult } from "mediainfo.js";
-import { __test_resetMediaProbes } from "../../db/repositories/media-probes.js";
+import { __test_resetMediaProbes, putMediaProbe } from "../../db/repositories/media-probes.js";
 import { setProbeDeps } from "../../services/media/probe.js";
 import { registerErrorHandling } from "../../plugins/error-handler.js";
 import { authPlugin } from "../../plugins/auth.js";
@@ -435,6 +435,27 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     assert.ok(movie.dstPath.endsWith("沙丘：第二部 (2024) - 2160p.mkv"), movie.dstPath);
     const again = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${run.id}/probe`, { keys: [unit.key] });
     assert.equal(again.probed + again.failed, 0, "缺的标签已经有探测结果了，不用再探");
+    // 旧版预算到顶留下的失败缓存（「读取量超过上限」）：当没探过，探测缺标签的会自动重探，不用人按作品再点一次
+    __test_resetMediaProbes();
+    putMediaProbe({ accountName: "acc", key: `path:${movie.srcPath}`, path: movie.srcPath, size: 0, status: "failed", data: null, error: "读取量超过上限（64 次 / 96 MB）", probedAt: 1 });
+    const retry = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe" }, 201);
+    const retryReady = await untilStatus(retry.id, ["ready"]);
+    const retryUnit = retryReady.units.find((u) => u.match?.tmdbId === 693134)!;
+    const stale = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${retry.id}/probe`, { keys: [retryUnit.key] });
+    assert.equal(stale.probed, 1, `旧版的预算失败不算缓存：${JSON.stringify(stale)}`);
+    assert.equal(stale.cached, 0, "真的重新读了文件头");
+    // 发布组写法把 {audio} 写成 {audio:.}：也算模板用到了，missing 模式照样探（以前按字面找 {audio} 会漏掉）
+    replaceAppSettings({ ...readAppSettings(), organize: { templates: { movie: "{title} ({year}) {idTag}/{title}[.{audio:.}].{ext}" } } });
+    __test_resetMediaProbes();
+    const scene = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe" }, 201);
+    const sceneReady = await untilStatus(scene.id, ["ready"]);
+    const sceneUnit = sceneReady.units.find((u) => u.match?.tmdbId === 693134)!;
+    const suffixed = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${scene.id}/probe`, { missing: true });
+    assert.ok(suffixed.probed >= 1, `带后缀的 {audio:.} 也要探：${JSON.stringify(suffixed)}`);
+    const sceneItems = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${scene.id}/items?unit=${encodeURIComponent(sceneUnit.key)}`);
+    const sceneMovie = sceneItems.items.find((i) => i.srcPath.endsWith(".mkv"))!;
+    assert.equal(sceneMovie.probe?.audio, "DDP 5.1");
+    assert.ok(sceneMovie.dstPath.endsWith("沙丘：第二部.DDP.5.1.mkv"), sceneMovie.dstPath);
     const local = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh", naming: "local" }, 201);
     await untilStatus(local.id, ["ready"]);
     const bad = await app.inject({ method: "POST", url: `/api/organize/runs/${local.id}/probe`, headers: auth, payload: { missing: true } });

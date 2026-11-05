@@ -5,7 +5,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MediaInfoResult } from "mediainfo.js";
-import { mainAudio, probeFromResult, probeKey, probeSummary, probeTags, resolutionLabel } from "./probe.js";
+import { probeView, mainAudio, probeFromResult, probeKey, probeSummary, probeTags, resolutionLabel } from "./probe.js";
+import type { ProbeSource } from "./mediainfo.js";
 
 const result = (tracks: Array<Record<string, unknown>>): MediaInfoResult => ({ media: { "@ref": "", track: tracks } }) as unknown as MediaInfoResult;
 const video = (extra: Record<string, unknown>) => ({ "@type": "Video", ...extra });
@@ -33,6 +34,8 @@ test("4K HEVC 杜比视界 + DDP Atmos：编码 / 分辨率 / HDR / 主音轨都
   assert.equal(p.bytesRead, 1234);
   assert.deepEqual(probeTags(p), { resolution: "2160p", videoCodec: "HEVC", audio: "DDP 5.1 Atmos", hdr: "DV" }, "audio 和文件名解析出来的形状一致：编码 声道 Atmos");
   assert.equal(probeSummary(p), "HEVC · 2160p 10bit · DV · DDP Atmos 5.1 en · 2 条音轨 · 字幕 zh/en");
+  assert.equal(probeSummary({ ...p, truncated: true, bytesRead: 96 * 1048576 }), "HEVC · 2160p 10bit · DV · DDP Atmos 5.1 en · 2 条音轨 · 字幕 zh/en · 只读了前 96 MB", "截断的结果在摘要末尾写明");
+  assert.equal(probeSummary({ ...p, truncated: true, bytesRead: 96 * 1048576, sampleOffset: 25 * 1073741824 }), "HEVC · 2160p 10bit · DV · DDP Atmos 5.1 en · 2 条音轨 · 字幕 zh/en · 只读了中间 96 MB", "原盘 ISO 从中点取样的写法");
 });
 
 test("编码 / HDR / 音频的词表：和文件名里的写法一致", () => {
@@ -89,4 +92,18 @@ test("分辨率标签按高度，宽屏 / 竖版按宽度兜底", () => {
 test("缓存键：有文件 id 按 id（改名挪动后还认），没有按绝对路径", () => {
   assert.equal(probeKey({ path: "/tv/a.mkv", id: "f123" }), "id:f123");
   assert.equal(probeKey({ path: "/tv/a.mkv" }), "path:/tv/a.mkv");
+});
+
+test("原盘 ISO 从镜像中点取样：按 2048 字节扇区对齐、读的偏移加上基准、大小减掉；别的文件原样", async () => {
+  const reads: number[] = [];
+  const src: ProbeSource = { size: 10_000_000, read: async (offset) => { reads.push(offset); return new Uint8Array(0); } };
+  const same = probeView(src, "/movie/a.mkv");
+  assert.equal(same.source, src);
+  assert.equal(same.sampleOffset, 0);
+  const iso = probeView(src, "/movie/生化危机5 (2012) - UHD.ISO");
+  assert.equal(iso.sampleOffset, 4_999_168, "5_000_000 向下对齐到 2048 的倍数");
+  assert.equal(iso.source.size, 10_000_000 - 4_999_168);
+  await iso.source.read(10, 5);
+  assert.deepEqual(reads, [4_999_178]);
+  assert.equal(probeView({ size: 4096, read: src.read }, "/x.iso").sampleOffset, 0, "太小的 ISO 不取样");
 });

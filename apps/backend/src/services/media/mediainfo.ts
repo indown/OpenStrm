@@ -1,7 +1,8 @@
 /**
  * mediainfo.js（MediaInfoLib 的 WASM 版）：只读文件头就能拿到编码 / 分辨率 / HDR / 音轨。
  * 进程里一个实例、串行用（WASM 模块不是线程安全的，探测本身也就一两秒）；readChunk 由调用方提供，
- * 远程文件用网盘直链 + Range 请求实现，每个文件有读取预算（见 ProbeLimits），超了算失败而不是半途给结果。
+ * 远程文件用网盘直链 + Range 请求实现，每个文件有读取预算（见 ProbeLimits）：到顶就让 mediainfo.js 收尾，把前面这些字节能给的结果
+ * 交出去并标 truncated；够不够用由调用方看有没有视频轨。
  */
 import axios from "axios";
 import mediaInfoFactory, { type MediaInfo, type MediaInfoResult } from "mediainfo.js";
@@ -10,8 +11,10 @@ import mediaInfoFactory, { type MediaInfo, type MediaInfoResult } from "mediainf
  * 读取预算。MediaInfoLib 不只读轨道表，还要在第一个簇里找到每条轨的首个包（HDR 元数据、Atmos 这些只在帧里，
  * 字幕轨的第一条可能在几十秒之后），最后再跳到文件尾看时长：真机上一个 68 GiB、77 Mbps 的 4K 原盘 remux（4 条音轨）
  * 从头顺序读了 33 MB 才凑齐；夸克上 4 GB 的 4K 剧集（HEVC + DDP + 字幕轨）要 42–66 MB。底层 Open_Buffer_Continue 的
- * Filled 位也是读到同一处才亮，没有更早的停法；WASM 版没有 ParseSpeed 可调。所以预算要放到这个量级，
- * 超了算失败「读取量超过上限」，不半途给结果。网盘直链慢（夸克约 1 MB/s）时一个 4K 文件要一两分钟，这是探测的真实成本
+ * Filled 位也是读到同一处才亮，没有更早的停法；WASM 版没有 ParseSpeed 可调。所以预算要放到这个量级。
+ * 到顶不再算失败：轨道表和每条音视频轨的首帧都在最前面几 MB（HDR 元数据、Atmos 就在那里），再往后读的只是靠后的字幕首条
+ * 和文件尾的时长，15 GB 的电影读 96 MB 也凑不齐；截断的结果标签照样齐，analyzeSource 标 truncated、摘要里写明只读了前面多少。
+ * 网盘直链慢（夸克约 1 MB/s）时一个 4K 文件要一两分钟，这是探测的真实成本
  */
 export interface ProbeLimits {
   /** 一个文件最多读这么多字节 */
@@ -38,6 +41,7 @@ export interface ProbeSource {
   read(offset: number, length: number, signal?: AbortSignal): Promise<Uint8Array>;
 }
 
+/** 预算类错误的基类：预算到顶现在不抛（给半截结果），只有超时还会抛 */
 export class ProbeBudgetError extends Error {
   constructor(message: string) {
     super(message);
@@ -82,6 +86,8 @@ export interface AnalyzeOutcome {
   result: MediaInfoResult;
   bytesRead: number;
   reads: number;
+  /** 读到预算上限就停了：结果只有前 bytesRead 字节能给的（没给就是没截断） */
+  truncated?: boolean;
 }
 
 /** 分析一个来源；全局串行。预算超了抛 ProbeBudgetError，超时后丢掉实例下次重建（分析可能卡在半路） */
@@ -90,12 +96,15 @@ export function analyzeSource(source: ProbeSource, opts: { signal?: AbortSignal 
     const mi = await getInstance();
     let bytesRead = 0;
     let reads = 0;
+    let truncated = false;
     const readChunk = async (length: number, offset: number): Promise<Uint8Array> => {
       opts.signal?.throwIfAborted();
       if (offset >= source.size || length <= 0) return new Uint8Array(0);
       const want = Math.min(length, source.size - offset);
+      // 预算到顶：给 mediainfo.js 一个空块让它收尾，拿前面这些字节能给的结果
       if (reads >= PROBE_LIMITS.MAX_READS || bytesRead + want > PROBE_LIMITS.MAX_BYTES) {
-        throw new ProbeBudgetError(`读取量超过上限（${PROBE_LIMITS.MAX_READS} 次 / ${PROBE_LIMITS.MAX_BYTES >> 20} MB）`);
+        truncated = true;
+        return new Uint8Array(0);
       }
       const buf = await source.read(offset, want, opts.signal);
       reads++;
@@ -104,7 +113,7 @@ export function analyzeSource(source: ProbeSource, opts: { signal?: AbortSignal 
     };
     try {
       const result = await withTimeout(mi.analyzeData(source.size, readChunk), PROBE_LIMITS.TIMEOUT_MS, opts.signal);
-      return { result, bytesRead, reads };
+      return { result, bytesRead, reads, truncated };
     } catch (err) {
       if (err instanceof ProbeTimeoutError) instance = null;
       throw err;

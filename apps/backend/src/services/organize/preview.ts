@@ -33,6 +33,7 @@ import { looksLikeFileName } from "../drive/walk.js";
 import { type UnitFile, buildUnits, type ScopeEntry, type Unit } from "./units.js";
 import { log, ORGANIZE_LIMITS, handPicked, deps, type Job, beginOp, jobLog, setProgress, baseOf, dirOf, joinRel, absOf, relOf, videoExtsOf, computeStats, runStartedAt, startJob, type PlanState, planContext, mergePreferId, mergeEntries, planStates, releaseHeldCopies, accountTasks } from "./run-state.js";
 import { applyRun } from "./apply.js";
+import { templateVarNames } from "./template.js";
 
 /* ------------------------------- 建 run ------------------------------- */
 
@@ -745,10 +746,10 @@ async function previewLocal(
 
 const PROBE_VARS: Array<keyof MediaProbeTags> = ["resolution", "videoCodec", "audio", "hdr"];
 
-/** 模板里用到了哪些可以探测出来的标签 */
+/** 模板里用到了哪些可以探测出来的标签：按解析器收变量名，`{audio:.}` 这种带后缀 / 兜底链的写法也算（按字面找 `{audio}` 会漏掉发布组写法里的音频） */
 function probeVarsOf(org: PlanState["org"]): Array<keyof MediaProbeTags> {
-  const text = `${org.templates.movie} ${org.templates.tv}`;
-  return PROBE_VARS.filter((v) => text.includes(`{${v}}`));
+  const names = new Set([...templateVarNames(org.templates.movie), ...templateVarNames(org.templates.tv)]);
+  return PROBE_VARS.filter((v) => names.has(v));
 }
 
 const probeTargetOf = (state: PlanState, file: UnitFile): ProbeTarget => ({ path: absOf(state.task, file.path), id: file.id, size: file.size });

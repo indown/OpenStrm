@@ -112,6 +112,19 @@ export function parseTemplate(template: string): Parsed {
   return { nodes: root, errors };
 }
 
+/** 模板里用到的全部变量名：兜底链里的每一个都算，不管写没写后缀；可选段里的也算。括号不配对也尽量收 */
+export function templateVarNames(template: string): Set<string> {
+  const out = new Set<string>();
+  const walk = (list: Node[]): void => {
+    for (const n of list) {
+      if (n.kind === "var") for (const name of n.names) out.add(name);
+      else if (n.kind === "opt") walk(n.children);
+    }
+  };
+  walk(parseTemplate(template).nodes);
+  return out;
+}
+
 export function validateTemplate(template: string): string[] {
   const { errors } = parseTemplate(template);
   if (!template.trim()) errors.push("模板不能为空");

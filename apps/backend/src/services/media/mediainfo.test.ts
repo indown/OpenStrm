@@ -11,13 +11,14 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
-import { __test_resetMediaInfo, __test_setProbeLimits, analyzeSource, openRangeSource, PROBE_LIMITS, ProbeBudgetError, ProbeTimeoutError, type ProbeSource } from "./mediainfo.js";
+import { __test_resetMediaInfo, __test_setProbeLimits, analyzeSource, openRangeSource, PROBE_LIMITS, ProbeTimeoutError, type ProbeSource } from "./mediainfo.js";
 import { probeFromResult, probeSummary, probeTags } from "./probe.js";
 
 const FFMPEG = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"].find((p) => fs.existsSync(p));
 let dir = "";
 let mkv = Buffer.alloc(0);
 let mp4 = Buffer.alloc(0);
+let m2ts = Buffer.alloc(0);
 
 /** 内存里的来源：记下每次读的位置和长度 */
 function bufferSource(buf: Buffer): ProbeSource & { reads: Array<[number, number]> } {
@@ -39,8 +40,12 @@ before(() => {
   execFileSync(FFMPEG, [...common, path.join(dir, "a.mkv")]);
   // mp4 不加 faststart：moov 在尾部，得读两次
   execFileSync(FFMPEG, [...common, path.join(dir, "a.mp4")]);
+  // 蓝光的 m2ts（192 字节包）：原盘 ISO 从镜像中点取样靠「从任意位置都能同步上」。关键帧每半秒一个，SPS 跟着关键帧重复，
+  // 从中间起才拿得到分辨率（真盘的关键帧一两秒一个，96 MB 里有好几个；两秒的测试片默认只有开头一个）
+  execFileSync(FFMPEG, [...common, "-g", "12", "-f", "mpegts", "-mpegts_m2ts_mode", "1", path.join(dir, "a.m2ts")]);
   mkv = fs.readFileSync(path.join(dir, "a.mkv"));
   mp4 = fs.readFileSync(path.join(dir, "a.mp4"));
+  m2ts = fs.readFileSync(path.join(dir, "a.m2ts"));
 });
 
 after(() => {
@@ -63,9 +68,25 @@ test("MKV：读文件头就拿到编码 / 分辨率 / 音轨，读的字节不�
   assert.equal(probeSummary(p), "H.264 · 720p · AAC 2.0 en");
   assert.ok(reads >= 1 && bytesRead <= mkv.length, `${reads} 次 ${bytesRead} 字节`);
   assert.equal(src.reads.length, reads);
+  // 预算只够读第一块（文件约 120 KB，一块 64 KB，预算放四分之三）：轨道表和首帧都在前面，半截结果标签照样齐，摘要写明只读了前面多少
+  __test_setProbeLimits({ CHUNK_BYTES: 64 * 1024, MAX_BYTES: Math.floor(mkv.length * 0.75) });
+  __test_resetMediaInfo();
+  try {
+    const cut = await analyzeSource(bufferSource(mkv));
+    assert.equal(cut.truncated, true);
+    assert.ok(cut.bytesRead > 0 && cut.bytesRead < mkv.length, `只读了 ${cut.bytesRead} 字节`);
+    const pc = probeFromResult(cut.result, cut.bytesRead, cut.truncated)!;
+    assert.equal(pc.truncated, true);
+    assert.equal(pc.video?.codec, "H.264");
+    assert.deepEqual(probeTags(pc), { resolution: "720p", videoCodec: "H.264", audio: "AAC 2.0" });
+    assert.match(probeSummary(pc), /只读了前 \d+ MB$/);
+  } finally {
+    __test_setProbeLimits(null);
+    __test_resetMediaInfo();
+  }
 });
 
-test("MP4 的 moov 在尾部：按块读会跳到文件尾多读几次；读取次数超预算就报错、不给半截结果", { skip: !FFMPEG && "没有 ffmpeg" }, async () => {
+test("MP4 的 moov 在尾部：按块读会跳到文件尾多读几次；读取次数超预算就截断，半截里没有视频轨", { skip: !FFMPEG && "没有 ffmpeg" }, async () => {
   __test_setProbeLimits({ CHUNK_BYTES: 64 * 1024, MAX_READS: 500, MAX_BYTES: 64 * 1024 * 1024 });
   __test_resetMediaInfo();
   try {
@@ -75,8 +96,12 @@ test("MP4 的 moov 在尾部：按块读会跳到文件尾多读几次；读取�
     assert.ok(src.reads.some(([offset]) => offset > 0), "跳到了文件尾");
     assert.equal(probeFromResult(result, 0)?.video?.codec, "H.264");
 
+    // 预算到顶不再抛错：给半截结果、标 truncated；moov 在尾部一块读不到，半截里没有视频轨，由调用方判成失败
     __test_setProbeLimits({ MAX_READS: 1 });
-    await assert.rejects(analyzeSource(bufferSource(mp4)), (err: unknown) => err instanceof ProbeBudgetError && !(err instanceof ProbeTimeoutError) && /上限/.test(err.message));
+    const cut = await analyzeSource(bufferSource(mp4));
+    assert.equal(cut.truncated, true);
+    assert.equal(cut.reads, 1);
+    assert.equal(probeFromResult(cut.result, cut.bytesRead, cut.truncated), null);
   } finally {
     __test_setProbeLimits(null);
     __test_resetMediaInfo();
@@ -170,4 +195,18 @@ test("端到端：直链 + Range + 引擎", { skip: !FFMPEG && "没有 ffmpeg" }
   } finally {
     server.close();
   }
+});
+
+test("蓝光 m2ts 从中间起喂也能同步出轨道（原盘 ISO 从镜像中点取样靠这个）", { skip: !FFMPEG && "没有 ffmpeg" }, async () => {
+  const base = Math.floor(m2ts.length / 2 / 2048) * 2048;
+  const whole = bufferSource(m2ts);
+  const view: ProbeSource = { size: m2ts.length - base, read: (offset, length) => whole.read(base + offset, length) };
+  const { result, bytesRead, truncated } = await analyzeSource(view);
+  const p = probeFromResult(result, bytesRead, truncated, base)!;
+  assert.ok(p, "有视频轨");
+  assert.equal(p.video?.codec, "H.264");
+  assert.deepEqual([p.video?.width, p.video?.height], [1280, 720]);
+  assert.equal(p.audio[0]?.codec, "AAC");
+  assert.equal(p.sampleOffset, base);
+  assert.ok(whole.reads.every(([offset]) => offset >= base), "没有回头读镜像开头");
 });
