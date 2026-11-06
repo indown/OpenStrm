@@ -212,3 +212,9 @@ shared 新类型（`types/organize.ts`）：
 - 前端 `flagsFromTags` 的家族表和后端 `tags.ts` 的词表仍各一份：一个是认词、一个是上色，职责不同。
 
 **冒烟（2026-11-06，假后端 + dev 3223，窗口 1920 宽）**：按 CLAUDE.md「改全局样式要带着海报墙看」补了三页——任务页（`/api/strm/posters/all` 回 12 张）、strm 页（根目录 12 个作品目录的墙）、整理页（识别出的 10 部作品的海报），浅色 / 暗色各一遍，墙都真的画出来了（页面里 `/api/posters/` 的 img 180–200 张全部加载完）。顺带看了：strm 表格视图的行旗标（上次窗口窄只看到卡片视图）、详情面板的媒体信息块、点「刷新」后假后端日志里 list 后面紧跟着一次 media（忘掉重问生效）、整理 run 头部「探测过 13 / 19 个视频」按钮和它的 title、作品卡片旗标。没看：lacking = 0 时头部徽标的非按钮态（只是三元分支，typecheck 过）、8K 旗标（单测覆盖）。假后端、dev 进程、标签页都清掉了。
+
+## 发布（2026-11-06）
+
+用户：「提交发正式版吧」。`5f1d88b` `chore(release): v2.25.0` = `f0e606f` feat(media) 两阶段的媒体信息标签 + `1cf1d63` docs(plans) + `b5265fd` fix(media) 评审修补 + `33ec994` docs(plans) + 三个 package.json 升到 2.25.0（shared 仍 2.0.0）；tag 注释 `v2.25.0`。`git push origin v2 v2.25.0`，main 从 `36c368f` 快进到 `5f1d88b`（main == v2 == v2.25.0）。**带迁移 0029**（`media_probes` 加 (account_name, path) 索引，没有数据改动）；新接口 `POST /api/strm/media`；没有新设置键。发前做过：后端全量 1742 / 前端 20、typecheck / lint、假后端浏览器冒烟（含海报墙三页浅暗）、评审 15 条全修；没做真机（这次改动不碰网盘，只读缓存和文件头探测结果）。升级说明交用户手动贴，要点：整理页作品卡片 / 文件表、strm 页、搜索 / 收藏夹 / HDHive 的探测与文件名标签统一成旗标；文件名和实测对不上会提示；strm 页按 strm 指向的路径查探测缓存（整理页探过或 Emby 回填过的才有）；收藏夹海报角标 4K / DV / HDR；run 头部「探测过 M / N」按钮；命名模板的优先级不变（仍文件名优先）。
+
+结果：11:10 盯梢脚本回 RELEASE_OK——Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）+ CI@v2 + CI@main 全绿（11:00 推 → 11:10），Docker Hub `v2.25.0` 与 `latest` 同为 `c7aa598bd933`（amd64 + arm64），GitHub Release 非 prerelease、是仓库最新。main == v2.25.0；这条记录之后作为 docs(plans) 提交推到 v2，main 不动。
