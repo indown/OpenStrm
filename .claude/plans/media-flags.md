@@ -218,3 +218,31 @@ shared 新类型（`types/organize.ts`）：
 用户：「提交发正式版吧」。`5f1d88b` `chore(release): v2.25.0` = `f0e606f` feat(media) 两阶段的媒体信息标签 + `1cf1d63` docs(plans) + `b5265fd` fix(media) 评审修补 + `33ec994` docs(plans) + 三个 package.json 升到 2.25.0（shared 仍 2.0.0）；tag 注释 `v2.25.0`。`git push origin v2 v2.25.0`，main 从 `36c368f` 快进到 `5f1d88b`（main == v2 == v2.25.0）。**带迁移 0029**（`media_probes` 加 (account_name, path) 索引，没有数据改动）；新接口 `POST /api/strm/media`；没有新设置键。发前做过：后端全量 1742 / 前端 20、typecheck / lint、假后端浏览器冒烟（含海报墙三页浅暗）、评审 15 条全修；没做真机（这次改动不碰网盘，只读缓存和文件头探测结果）。升级说明交用户手动贴，要点：整理页作品卡片 / 文件表、strm 页、搜索 / 收藏夹 / HDHive 的探测与文件名标签统一成旗标；文件名和实测对不上会提示；strm 页按 strm 指向的路径查探测缓存（整理页探过或 Emby 回填过的才有）；收藏夹海报角标 4K / DV / HDR；run 头部「探测过 M / N」按钮；命名模板的优先级不变（仍文件名优先）。
 
 结果：11:10 盯梢脚本回 RELEASE_OK——Release 四作业（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）+ CI@v2 + CI@main 全绿（11:00 推 → 11:10），Docker Hub `v2.25.0` 与 `latest` 同为 `c7aa598bd933`（amd64 + arm64），GitHub Release 非 prerelease、是仓库最新。main == v2.25.0；这条记录之后作为 docs(plans) 提交推到 v2，main 不动。
+
+## 真机验证（2026-11-06，115 + 夸克）
+
+用户：「真机测试一下」→「批准」（网盘四步）→「你可以全量跑一下kuake tv 和 moive」。TMDB v4 读取令牌在对话里给的，只写进 lab 库，验完连库一起删了。
+
+**环境**：`config/openstrm.db` 只读 `.backup` 到 scratchpad 的 lab 目录，后端 `127.0.0.1:4101`（`BACKEND_HOST=127.0.0.1`），临时口令；Telegram / Emby / HDHive 设置删掉、网盘监控关掉、唯一的生产任务删掉。迁移 0029 在这份真实库拷贝上跑过（`media_probes_account_path_idx` 建出来了）。lab 任务四个：`lab1106`（115，originPath / targetPath 都是 `lab1106`，strmPrefix `/lab115`，整理 off，库类型 tv）、`labtv`（115 的真实 `/tv`，只做只读预览）、`kuake-tv` / `kuake-movie`（夸克的真实 `/tv`、`/movie`，targetPath `kuake/tv`、`kuake/movie`，strmPrefix `/labquark`）。后三个任务不执行整理。网盘目录 `/lab1106` 用 Provider 的 `write.mkdir` 在 115 根下新建（11:41），样本从测试分享 `115cdn.com/s/swsgklr3z1r`（提取码 wbc1，末日地堡 2023）只转存 S03E01 / E02 / E03 三集（各约 3.9 GB，`toDirId` 直接存进 `/lab1106`），再用 `write.rename` 改名：E01 `Silo.S03E01.2160p.ATVP.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX.mkv`（文件名写对的样子）、E02 `Silo.S03E02.2160p.WEB-DL.DV.x265.DDP5.1-FAKE.mkv`（故意写错）、E03 `Silo.S03E03.mkv`（一个标签不写）。实际三集都是 1918×802 H.264 SDR DDP Atmos 5.1 en，所以 E01 也是「文件名和实测对不上」。预览 / 探测 / 执行 / 撤销全走接口（scratchpad 的 `api.py`），页面用 `next dev -p 3223` 指向 4101 看。
+
+| 场景 | 结果 |
+|---|---|
+| 115 真实 `/tv/最后生还者 (2023) [tmdbid=100088]` 只读预览（5 集，文件名 `最后生还者 - S02E01.mkv` 没标签） | 9 秒 ready，单元汇总 `videos 5 / probed 0 / lacking 5`，分布全空；按作品探测 5 个 141 秒全读到（每个约 28 秒，都是 `HEVC · 2160p 10bit · DV · DDP Atmos 5.1 en · 只读了前 96 MB`，E01 字幕 29 种语言）；探完汇总 `probed 5 / lacking 0`，`2160p ×5 / HEVC ×5 / 10bit ×5 / DV ×5 / DDP 5.1 Atmos ×5`，项上 `media` 齐、`conflicts` 空 |
+| `lab1106` 全量同步（mkdir 后 6 分钟） | 3 个 strm 落在 `data/lab1106/`，名字和网盘一致 |
+| `lab1106` 预览 | 6 秒 ready，1 个单元 → tv 125988 末日地堡 (2023) [medium]「标题对上，文件名里没有年份」，5 项要动；探测前汇总 `videos 3 / probed 0 / lacking 1`（只有 E03 缺 {resolution}），分布按文件名：`2160p ×2 / HEVC ×2 / DV ×2 / DDP 5.1 ×1 / DDP 5.1 Atmos ×1` |
+| 执行前 `POST /api/strm/media`（三个 strm） | 空（还没探） |
+| 探测缺标签的（`missing: true`） | 35 秒，只探了 E03（和 lacking 一致），`H.264 · 1080p · DDP Atmos 5.1 en` |
+| 按作品探测（`key`） | 94 秒，3 个读到（E03 走缓存）；项上 E01 三条冲突 `2160p→1080p / H.265→H.264 / DV→SDR`，E02 三条 `2160p→1080p / x265→H.264 / DV→SDR`，E03 没有；汇总 `probed 3 / lacking 0 / conflicts 2`，分布仍按文件名（`2160p ×2 1080p ×1 …`） |
+| 整理页（浏览器，浅色） | 头部「探测过 3 / 3 个视频」非按钮态；作品卡 `4K ×2 1080P ×1 HEVC ×2 H.264 ×1 DV ×2 | DDP 5.1 ATMOS ×2 DDP 5.1 ×1 | 2 个文件名和实测对不上`；展开文件表每行 `1080P H.264 | DDP 5.1 ATMOS 英 | 英 / 中 / 阿 +34` 加三枚黄色冲突旗，E03 没有冲突旗；TMDB 真海报在卡片上 |
+| strm 页 + 详情面板（`lab1106`） | 三行名字下各一排旗标；E02 的面板「媒体信息」：`1080P H.264 | DDP 5.1 ATMOS 英 | 英 / 中 / 阿 +34`，来源 读文件头探测、画面 `1918×802 · H.264 · 23.976 fps`、视频码率 9.8 Mbps、时长 52 分、容器 Matroska、音轨「1 条，主音轨 DDP 5.1 Atmos en」、字幕 42 种、备注 只读了文件头的一部分 |
+| 执行（5 项：2 mkdir + 3 move） | 9 秒 done，0 失败；本地 strm 变成 `末日地堡 (2023) [tmdbid=125988]/Season 03/末日地堡 - S03E0N.strm`；**按新路径查 `POST /api/strm/media` 三条都在**（`repathMediaProbes` 跟着 115 上的真实移动走了） |
+| 撤销 | 18 秒 reverted，退回 5 项；strm 回到三个原名，按原路径查三条都在；115 上 `/lab1106` 顶层回到三个原名、两层空目录删干净；strm 页点「刷新」三行旗标重新出现 |
+| 夸克 `kuake-movie` 全量同步 + 预览 + 逐部探测 | 11 个 strm；预览 15 秒 ready，10 个单元全 high（目录名 tmdbid）、3 项要动；逐部探 11 个视频读到 10 个，`明日边缘 (2014) - 2160p.mkv` 121 秒「读文件头超时」（夸克直链抖，已知）；单文件耗时 8–121 秒（4K 多在 100 秒上下，1080p 8–53 秒）；结果有 `HDR10+ · TrueHD Atmos 7.1 · 2 条音轨`（多力特 2160p）、`DTS-HD 5.1`（逆世界）、`AAC 5.1 is`（冰路营救2）这些不同形状；汇总 `videos 11 / probed 10 / lacking 0 / conflicts 0`；整理页头部「探测过 1 / 11」→ 非按钮态，title 解释「文件名里已经有模板要用的标签」；strm 页按夸克路径（`/labquark/movie/…` → `/movie/…`）10 / 11 查到，超时那部 `file` 接口 `media` 为空 |
+| 夸克 `kuake-tv` 全量同步 + 全量预览 | 691 个 strm；预览 24 个单元（22 high / 1 medium / 1 low）、693 项、15 项要动、6 项命名冲突；汇总合计 `videos 691 / probed 0 / lacking 681`（整理过的名字 `辐射 - S02E01.mkv` 没有分辨率标签）；整理页头部「探测过 18 / 691 个视频」是按钮，title 写「663 个视频的文件名缺模板要用的标签、又没探过」（18 探完后 681 → 663，对得上） |
+| 夸克探两部剧 | 辐射 8 集 823 秒（约 103 秒一集）、黑白清道夫 10 集 524 秒（约 52 秒一集），全读到；辐射卡片 `4K HEVC 10BIT ×7 HDR10+ ×5 DV ×2 | DDP 5.1 ATMOS ×7 DDP 5.1 ×1`（混合取值的 ×N 画法，真实数据）；strm 页进到 `辐射 (2024) [tmdbid=106379]/Season 02` 八行各带 `4K HEVC 10BIT HDR10+ / DV DDP 5.1 ATMOS …`，超过 6 枚折成 +N；接口核对 691 条里 18 条有媒体信息，正是两部探过的剧 |
+
+**真机发现的问题**：没有。两件顺手记下：夸克直链一个 4K 文件读文件头要 100 秒上下，整库「探测缺标签的」在几百集的库上要按小时算，头部按钮点下去之前要有数（title 里写了数量）；字幕语言码认不出的（`CA-ES`、`es-419`）原样大写显示，不算错，词表以后可以再补。一个顺手的观察：strm 页目录行上用脚本点第一个按钮会点中勾选框（出现「删除所选」），要进目录用 `path` 参数或点名字。
+
+**日志**：lab 后端日志里没有 warn / error 级别的行；夸克那次超时只记成缓存里的一行 failed（`media_probes` 36 ok + 1 failed）。
+
+**收尾**：lab 后端、dev 进程已停，lab 目录（库、令牌、口令、data）整个删了。网盘上的 `115:/lab1106/` 和里面三集用户说「处理一下」之后用 Provider 的 `write.remove` + `rmdirIfEmpty` 删了（三集进 115 回收站，目录删掉，`resolvePath` 已找不到）；删时又只读拷了一次 config 库拿凭据，用完即删。夸克上没有写过任何东西（只读了 `/tv`、`/movie` 的目录树和文件头）。
