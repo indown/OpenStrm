@@ -85,7 +85,8 @@ shared 新类型（`types/organize.ts`）：
 - [x] 前端：token、lib、组件、四处替换、整理页两处、用例（2026-11-05）
 - [x] typecheck / lint / 全量测试（2026-11-05，后端 1734 / 前端 18）
 - [x] 浏览器冒烟（2026-11-05，假后端 + dev）
-- [ ] 评审 / rc（未提交）
+- [x] 评审（2026-11-06，两个阶段一起评，15 条确认项 + 截掉的性能 / 重复项全修，见末节「评审修补」；修补未提交）
+- [ ] rc
 
 ## 实施记录（2026-11-05）
 
@@ -150,7 +151,8 @@ shared 新类型（`types/organize.ts`）：
 - [x] 前端：hook / 行 / 面板、海报角标、覆盖率徽标、用例（2026-11-05）
 - [x] typecheck / lint / 全量（2026-11-05）
 - [x] 冒烟（2026-11-05，假后端 + dev）
-- [ ] 评审 / rc（未提交）
+- [x] 评审（2026-11-06，两个阶段一起评，15 条确认项 + 截掉的性能 / 重复项全修，见末节「评审修补」；修补未提交）
+- [ ] rc
 
 ### 实施记录（2026-11-05）
 
@@ -169,3 +171,44 @@ shared 新类型（`types/organize.ts`）：
 - `lib/media-flags.ts` 加 `briefDetails` / `posterMarks`，用例各一条；前端 20 条过，typecheck / lint 干净。
 
 **冒烟（2026-11-05，假后端 + dev，和第一阶段同一套）**：strm 页卡片视图三种行（齐全 / 截断 / 没有）、详情面板媒体信息块、收藏夹海报墙角标（4K + DV、HDR、没有）、整理 run 头部「探测过 5 / 11 个视频」按钮，浅色暗色各看了一遍。这次 `resize_window` 把窗口定在了 606px 没再放得开，所以 strm 表格视图没看到（行里的名字组件和卡片视图是同一个）。假后端里 `/api/follow` 要回 `{ follows: [] }` 不然收藏夹页在 followedKeys 那里炸，记一笔。假后端、dev 进程都已清掉。
+
+## 评审修补（2026-11-06，用户：「review一下」）
+
+评审（/code-review，6614341..HEAD）回来 15 条确认项，外加几条被篇幅截掉的性能 / 重复代码项，按规矩全部修完。后端全量 1742 过、前端 20 过，typecheck / lint 干净，卫生脚本 ok。修补未提交。
+
+**strm 页按路径查缓存（`services/strm/manage.ts` 的 `remoteAbsOf`）**
+
+- 开了路径编码的任务：文件名本身不用编码时 inspect 把目录段的 `%20` 原样留着，和整理页记的（解码后的）路径对不上，整页没旗标 → 内容和应有的一字不差就按本地路径算；解析出来的按任务的编码开关解码。
+- `normalizePath` 会削掉段首尾的空白，整理页写缓存用的 `absOf` 不削（夸克 / OpenList 目录名带空格是真实存在的）→ 改成和 `absOf` 同一拼法。
+- 文件名对不上（name-mismatch）的 strm 指向的是别的文件，原来拿「应有的那个文件」的缓存充数 → 只有前缀对不上才用应有的兜底；共用输出目录的兄弟任务的 strm 不查（同 scan / verify 的 `isForeignStrm`）。
+- 一页两百个 strm 每个都走 `resolveManagedPath`（两次 realpath，网络盘上要几百毫秒）→ 根解析一次，每个文件只做词法检查（只读内容当查缓存的键、什么都不写）。
+- 用例：`strm.itest` 新增一条（编码任务的两种内容、段尾空格、name-mismatch、兄弟任务、同一路径两行大小不同取新的）。
+
+**缓存行的选取和跟随**
+
+- `cachedProbesByPath`：两行记的大小都有又不一样，说明换过文件，取新的；否则读过文件头的优先、再取新的（原来读过文件头的无条件赢，换了文件还显示旧的实测）。
+- 整理执行 / 撤销后缓存行的 path 跟着文件走（`db/repositories/media-probes.ts` 的 `repathMediaProbes`，按路径记的行连键一起换），和 `repathMatches` 放在同一处；`organize.itest` 执行 / 撤销那条加了断言。
+- `media_probes` 加 `(account_name, path)` 索引：**迁移 0029**（strm 页按路径查原来是扫账号的全部行；这次发版要带迁移，发版说明记一句）。
+
+**冲突判定和汇总口径（`services/organize/media-info.ts`）**
+
+- Emby 自己的流只有 `VideoRange` + `ExtendedVideoType`，`VideoRangeType` 是 Jellyfin 的字段，回填出来一律是「HDR」，DV 片全被判成「文件名写 DV · 实测 HDR」→ 回填读 `ExtendedVideoType`（DolbyVision / Hdr10 / Hdr10Plus / Hlg / None）；实测只知道是 HDR 的分不出是不是 DV，不算冲突。
+- 汇总只数正片：花絮 / 样片（人改判的听人的，`units.ts` 新抽的 `asExtraFile`，plan.ts 同一口径）和取消勾选的不算（`run-state.ts` 的 `mediaSkipOf`）；探测目标也同样过滤（花絮不套模板，探了没处用）。
+- 文件名标签归一后为空的（10bit 占了编码位、UHD 占了分辨率位）退到实测，不再在汇总里消失；文件名写 SDR 的不进 hdr 分布。
+- 音频按统一写法归一（`audioKey`：EAC3 / DD+ → DDP、DD → AC3、DTS-HD MA → DTS-HD、顺序统一成「编码 声道 Atmos」），文件名和实测的同一种音频不再分成两条；前端的 `displayCodec` / `displayAudioCodec` 随之删掉，归一只在后端一处。
+- 8K：`resolutionLabel` 加 4320p 档，文件名写 8K 的不再报冲突。
+- `OrganizeUnitMedia.lacking`：文件名缺模板标签、又没探过的正片数。run 头部「探测过 M / N」只在 lacking > 0 时是按钮——原来 M < N 就是按钮，发布组命名的库点了永远是「没有要探的视频」。
+- `mediaBrief`：und / zxx 这种占位语言码不当语言（Emby 照抄 ffprobe 的 tag）。
+
+**前端**
+
+- strm 页媒体信息 hook：问成了才记「问过」，在问的另记一份，没问成的（超时、5xx）下次列到再问；不再因为 `visible` 变化（筛选、进子目录）丢掉在途的响应；刷新 / 换目录忘掉重问（整理页探过 / Emby 回填过的这时才会出现）；换任务靠 taskId 判丢弃。`media` 改成 Map：根目录下叫 constructor 的条目会撞上对象原型，整页炸掉。
+- `briefTitle` 改成从 `briefDetails` 生成（一行一项，含编码 / 位深 / HDR / 主音轨，方案里原来承诺的 10bit / 主音轨补上了），两份格式合一；`MediaFlags` 组件的分组 / 不分组合成一条路径。
+- `works.ts` `unitToWork` 的 `unitTags` 只算一次；仓库层的行映射抽成 `toRow`。
+
+**没改的（说明）**
+
+- 全量重建 `workGroups` 时按名字认标签约 +0.4 s / 10 万单元（评审量的）：只在启动预热和整个作废重建时发生，不在请求路径上；增量维护只重算变了的那一组。
+- 前端 `flagsFromTags` 的家族表和后端 `tags.ts` 的词表仍各一份：一个是认词、一个是上色，职责不同。
+
+**冒烟（2026-11-06，假后端 + dev 3223，窗口 1920 宽）**：按 CLAUDE.md「改全局样式要带着海报墙看」补了三页——任务页（`/api/strm/posters/all` 回 12 张）、strm 页（根目录 12 个作品目录的墙）、整理页（识别出的 10 部作品的海报），浅色 / 暗色各一遍，墙都真的画出来了（页面里 `/api/posters/` 的 img 180–200 张全部加载完）。顺带看了：strm 表格视图的行旗标（上次窗口窄只看到卡片视图）、详情面板的媒体信息块、点「刷新」后假后端日志里 list 后面紧跟着一次 media（忘掉重问生效）、整理 run 头部「探测过 13 / 19 个视频」按钮和它的 title、作品卡片旗标。没看：lacking = 0 时头部徽标的非按钮态（只是三元分支，typecheck 过）、8K 旗标（单测覆盖）。假后端、dev 进程、标签页都清掉了。
