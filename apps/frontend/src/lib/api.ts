@@ -59,6 +59,7 @@ import type {
   StrmAllPostersResult,
   StrmDeleteResult,
   StrmFileInfo,
+  StrmMediaResult,
   StrmListResult,
   StrmPosterResult,
   StrmRegenerateMode,
@@ -902,6 +903,8 @@ export const api = {
       data(axiosInstance.get<StrmListResult>("/api/strm/list", { params: { taskId, path } })),
     file: (taskId: string, path: string) =>
       data(axiosInstance.get<StrmFileInfo>("/api/strm/file", { params: { taskId, path } })),
+    /** 一批 strm 指向的网盘文件的实测媒体信息（整理页探测过或 Emby 回填过的才有）：列表行上画旗标 */
+    media: (taskId: string, paths: string[]) => data(axiosInstance.post<StrmMediaResult>("/api/strm/media", { taskId, paths })),
     /** 整个目录递归找名字，大库要一会 */
     search: (taskId: string, q: string) =>
       data(axiosInstance.get<StrmSearchResult>("/api/strm/search", { params: { taskId, q }, timeout: 60_000 })),

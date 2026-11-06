@@ -21,10 +21,12 @@ import { api } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/axios";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatSize } from "@/lib/format";
+import { flagsFromTags } from "@/lib/media-flags";
 import { displayTags } from "@/lib/resource";
 import { notifyFollowResult, notifySaveToTaskResult } from "@/lib/save-result";
 import { cn } from "@/lib/utils";
 import { WorkPoster } from "@/components/work-poster";
+import { MediaFlags } from "@/components/media-flags";
 
 /** 一行最多挂几个标签 */
 const TAGS_SHOWN = 6;
@@ -138,16 +140,7 @@ const LibraryHitRow = memo(function LibraryHitRow({ hit, keyword, health, expire
             </span>
             {hit.size != null && hit.size > 0 && <span className="tabular-nums">{formatSize(hit.size)}</span>}
             {hit.videoCount > 0 && <span className="tabular-nums">{hit.videoCount} 个视频</span>}
-            {tags.length > 0 && (
-              <span className="flex flex-wrap items-center gap-1" title={tags.join(" · ")}>
-                {tags.slice(0, TAGS_SHOWN).map((t) => (
-                  <span key={t} className="rounded border px-1 text-[11px] leading-4 text-muted-foreground">
-                    {t}
-                  </span>
-                ))}
-                {tags.length > TAGS_SHOWN && <span className="text-[11px]">+{tags.length - TAGS_SHOWN}</span>}
-              </span>
-            )}
+            {tags.length > 0 && <MediaFlags flags={flagsFromTags(tags)} max={TAGS_SHOWN} title={tags.join(" · ")} />}
             <ShareHealthBadge health={health} />
           </div>
           {/* 剧目录、分类目录：视频在下一层，先报下一层是些什么（季目录名里常有画质、集数、体积） */}

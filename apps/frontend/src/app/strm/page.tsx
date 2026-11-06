@@ -51,6 +51,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
+import type { MediaBrief } from "@openstrm/shared";
+import { MediaFlags } from "@/components/media-flags";
 import { EmptyState } from "@/components/empty-state";
 import { PosterBackdrop } from "@/components/poster-backdrop";
 import { useDirPosters } from "@/hooks/use-dir-posters";
@@ -58,6 +60,7 @@ import { Spinner, TableSkeleton } from "@/components/loading";
 import { fmtTime, formatSize } from "@/lib/format";
 import { KIND_META, PARSE_REASON_LABEL, parentOf } from "@/lib/strm";
 import { keywordFromPath, searchHref } from "@/lib/resource";
+import { briefTitle, flagsFromBrief } from "@/lib/media-flags";
 import { useStrmBrowser, type DeleteRequest, type StrmRow } from "./use-strm-browser";
 import { StrmFileSheet } from "./components/StrmFileSheet";
 import { ScanDialog } from "./components/ScanDialog";
@@ -113,6 +116,8 @@ type RowProps = {
   onArchive: () => void;
   /** 这个任务复制不了的原因（OpenList 账号的任务、设置没配好）：有就把入口灰掉 */
   copyBlocked: string | null;
+  /** strm 指向的网盘文件的实测媒体信息（整理页探测过或 Emby 回填过的才有） */
+  media?: MediaBrief;
 };
 
 /** 网盘绝对路径 → 相对任务目录；不在任务目录下面回 null */
@@ -204,6 +209,7 @@ function StrmContent() {
     onCopy: () => void copyRow(row),
     onArchive: () => void archiveRow(row),
     copyBlocked: task?.copyBlocked ?? null,
+    media: b.media[row.path],
   });
 
   const task = b.task;
@@ -635,7 +641,7 @@ function StrmContent() {
 
 /* ------------------------------- 行 / 卡片 ------------------------------- */
 
-function EntryName({ row, showPath, onOpen }: Pick<RowProps, "row" | "showPath" | "onOpen">) {
+function EntryName({ row, showPath, onOpen, media }: Pick<RowProps, "row" | "showPath" | "onOpen" | "media">) {
   const Icon = row.isDir ? FolderOpen : File;
   const clickable = row.isDir || row.kind === "strm";
   return (
@@ -653,6 +659,11 @@ function EntryName({ row, showPath, onOpen }: Pick<RowProps, "row" | "showPath" 
           {row.isSymlink && <span className="ml-1 text-xs font-normal text-muted-foreground">（链接）</span>}
         </button>
         {showPath && <div className="break-all text-xs text-muted-foreground">{parentOf(row.path) || "根目录"}</div>}
+        {media && (
+          <div className="mt-0.5">
+            <MediaFlags flags={flagsFromBrief(media)} max={6} title={briefTitle(media)} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -731,7 +742,7 @@ function StrmTableRow(p: RowProps) {
         <Checkbox checked={p.checked} onCheckedChange={(v) => p.onToggle(v === true)} aria-label={`选择 ${row.name}`} />
       </TableCell>
       <TableCell className="min-w-[240px]">
-        <EntryName row={row} showPath={p.showPath} onOpen={p.onOpen} />
+        <EntryName row={row} showPath={p.showPath} onOpen={p.onOpen} media={p.media} />
       </TableCell>
       <TableCell className="w-24">
         <KindBadge row={row} />
@@ -781,7 +792,7 @@ function StrmCard(p: RowProps) {
       <div className="flex items-start gap-3">
         <Checkbox className="mt-0.5" checked={p.checked} onCheckedChange={(v) => p.onToggle(v === true)} aria-label={`选择 ${row.name}`} />
         <div className="min-w-0 flex-1">
-          <EntryName row={row} showPath={p.showPath} onOpen={p.onOpen} />
+          <EntryName row={row} showPath={p.showPath} onOpen={p.onOpen} media={p.media} />
           <div className="mt-1 text-xs text-muted-foreground tabular-nums">
             {row.isDir ? fmtTime(row.mtime) : `${formatSize(row.size)} · ${fmtTime(row.mtime)}`}
           </div>

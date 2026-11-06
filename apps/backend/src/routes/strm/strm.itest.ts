@@ -17,6 +17,7 @@ import type {
   StrmPosterResult,
   StrmDeleteResult,
   StrmFileInfo,
+  StrmMediaResult,
   StrmListResult,
   StrmRegenerateResult,
   StrmRewriteResult,
@@ -26,6 +27,7 @@ import type {
   StrmVerifyResult,
   TaskDefinition,
 } from "@openstrm/shared";
+import { __test_resetMediaProbes, putMediaProbe } from "../../db/repositories/media-probes.js";
 import { registerErrorHandling } from "../../plugins/error-handler.js";
 import { authPlugin } from "../../plugins/auth.js";
 import strmRoute from "./index.js";
@@ -807,5 +809,29 @@ test("全库海报：TMDB 连不上就歇一阵，不是每次都去撞", async 
     tmdb.stop();
     useTmdbKey(false);
     lib.cleanup();
+  }
+});
+
+test("媒体信息：按 strm 指向的网盘路径查探测缓存，同一路径取读过文件头的那行；别的前缀 / 不是 strm / 没缓存的不在结果里；file 接口也带", async () => {
+  __test_resetMediaProbes();
+  const probe = (bytesRead: number, codec: string) => ({ video: { codec, width: 1920, height: 1080 }, audio: [{ codec: "AAC", channels: 2 }], subtitles: [], bytesRead });
+  // 同一路径两行：Emby 回填的（path 键、bytesRead 0、更新）和读文件头的（id 键、更旧）→ 取读过文件头的
+  putMediaProbe({ accountName: "acc", key: "path:/tv/Show/Season 1/ep1.mkv", path: "/tv/Show/Season 1/ep1.mkv", size: 0, status: "ok", data: probe(0, "H.264"), error: "", probedAt: 2 });
+  putMediaProbe({ accountName: "acc", key: "id:f1", path: "/tv/Show/Season 1/ep1.mkv", size: 123, status: "ok", data: probe(4096, "HEVC"), error: "", probedAt: 1 });
+  try {
+    const res = await post("/api/strm/media", { taskId: "r-main", paths: ["Show/Season 1/ep1.strm", "Show/Season 1/ep2.strm", "Show/x.part", "nope.strm"] });
+    assert.equal(res.statusCode, 200, res.body);
+    const { media } = res.json<StrmMediaResult>();
+    assert.deepEqual(Object.keys(media), ["Show/Season 1/ep1.strm"]);
+    assert.equal(media["Show/Season 1/ep1.strm"].videoCodec, "HEVC");
+    assert.equal(media["Show/Season 1/ep1.strm"].source, "probe");
+    const file = (await get(`/api/strm/file?${q({ taskId: "r-main", path: "Show/Season 1/ep1.strm" })}`)).json<StrmFileInfo>();
+    assert.deepEqual([file.media?.resolution, file.media?.videoCodec, file.media?.audioCodec, file.media?.channels], ["1080p", "HEVC", "AAC", "2.0"]);
+    const none = (await get(`/api/strm/file?${q({ taskId: "r-main", path: "Show/Season 1/ep2.strm" })}`)).json<StrmFileInfo>();
+    assert.equal(none.media, undefined);
+    assert.equal((await post("/api/strm/media", { taskId: "r-main", paths: [] })).statusCode, 400);
+    assert.equal((await post("/api/strm/media", { taskId: "r-main", paths: Array.from({ length: 501 }, (_, i) => `${i}.strm`) })).statusCode, 400);
+  } finally {
+    __test_resetMediaProbes();
   }
 });

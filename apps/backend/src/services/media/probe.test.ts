@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MediaInfoResult } from "mediainfo.js";
-import { probeView, mainAudio, probeFromResult, probeKey, probeSummary, probeTags, resolutionLabel } from "./probe.js";
+import { probeView, mainAudio, mediaBrief, probeFromResult, probeKey, probeSummary, probeTags, resolutionLabel } from "./probe.js";
 import type { ProbeSource } from "./mediainfo.js";
 
 const result = (tracks: Array<Record<string, unknown>>): MediaInfoResult => ({ media: { "@ref": "", track: tracks } }) as unknown as MediaInfoResult;
@@ -106,4 +106,47 @@ test("原盘 ISO 从镜像中点取样：按 2048 字节扇区对齐、读的偏
   await iso.source.read(10, 5);
   assert.deepEqual(reads, [4_999_178]);
   assert.equal(probeView({ size: 4096, read: src.read }, "/x.iso").sampleOffset, 0, "太小的 ISO 不取样");
+});
+
+test("mediaBrief：主音轨 / Atmos / 字幕语言去重、读文件头是 probe，Emby 回填（bytesRead 0）是 emby，截断照带", () => {
+  const p = probeFromResult(
+    result([
+      { "@type": "General", Format: "Matroska", Duration: "5400" },
+      video({ Format: "HEVC", Width: "3840", Height: "2160", FrameRate: "23.976", BitDepth: "10", BitRate: "25000000", HDR_Format: "Dolby Vision", HDR_Format_Compatibility: "HDR10" }),
+      audio({ Format: "AAC", Channels: "2", Language: "zh" }),
+      audio({ Format: "MLP FBA", Format_Commercial_IfAny: "Dolby TrueHD with Dolby Atmos", Channels: "8", Language: "en", Default: "Yes" }),
+      { "@type": "Text", Format: "UTF-8", Language: "zh" },
+      { "@type": "Text", Format: "PGS", Language: "zh" },
+      { "@type": "Text", Format: "PGS", Language: "en" },
+      { "@type": "Text", Format: "PGS" },
+    ]),
+    4096,
+    true,
+  )!;
+  assert.deepEqual(mediaBrief(p), {
+    audioCount: 2,
+    subtitleLanguages: ["zh", "en"],
+    source: "probe",
+    resolution: "2160p",
+    width: 3840,
+    height: 2160,
+    videoCodec: "HEVC",
+    bitDepth: 10,
+    frameRate: 23.976,
+    hdr: "DV",
+    bitrateKbps: 25000,
+    audioCodec: "TrueHD",
+    channels: "7.1",
+    atmos: true,
+    audioLanguage: "en",
+    container: "Matroska",
+    durationMs: 5400000,
+    truncated: true,
+  });
+  const emby = mediaBrief({ ...p, bytesRead: 0, truncated: undefined });
+  assert.equal(emby.source, "emby");
+  assert.equal(emby.truncated, undefined);
+  // 没有音轨 / 字幕的也站得住
+  const bare = mediaBrief({ audio: [], subtitles: [], bytesRead: 10 });
+  assert.deepEqual(bare, { audioCount: 0, subtitleLanguages: [], source: "probe" });
 });

@@ -201,3 +201,12 @@ export function matchTextOf(hit: { title: string; tags?: readonly string[] }): s
   const parts = [hit.title, ...(hit.tags ?? [])];
   return [...parts.map(plainKey), ...parts.map(runsKey)].join("|");
 }
+
+/**
+ * 收藏夹单元的标签：目录名认不出就看样本文件名；「第 N 季」不算（季另外列，样本文件里的只是其中一季）。
+ * 作品分组（library-units.ts）和单元视图（library/works.ts）共用，口径才一致
+ */
+export function unitTags(rawName: string, sampleFile: string): string[] {
+  const nameTags = titleTags(rawName);
+  return (nameTags.length > 0 || !sampleFile ? nameTags : titleTags(sampleFile)).filter((t) => !/^第 .+ 季$/.test(t));
+}

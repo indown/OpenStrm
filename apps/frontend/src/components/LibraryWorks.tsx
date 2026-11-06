@@ -16,11 +16,13 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusBadge } from "@/components/status-badge";
 import { ViewChip } from "@/components/view-chip";
 import { WorkPoster } from "@/components/work-poster";
+import { Flag } from "@/components/media-flags";
 import { LibraryWorkDialog, seasonsLabel } from "@/components/LibraryWorkDialog";
 import { api } from "@/lib/api";
 import { usePolling } from "@/hooks/use-polling";
 import { apiErrorMessage } from "@/lib/axios";
 import { LIBRARY_CHANGED_EVENT } from "@/lib/library";
+import { posterMarks } from "@/lib/media-flags";
 
 const PAGE = 60;
 const POLL_MS = 5000;
@@ -38,6 +40,7 @@ const SORTS: Array<{ key: LibraryWorksSort; label: string }> = [
 function WorkCard({ work, onOpen }: { work: LibraryWork; onOpen: () => void }) {
   const unidentified = work.tmdbId == null;
   const meta = [work.year, work.seasons.length > 0 ? seasonsLabel(work.seasons) : "", work.versions > 1 ? `${work.versions} 个版本` : ""].filter(Boolean).join(" · ");
+  const marks = posterMarks(work.tags);
   return (
     <button type="button" onClick={onOpen} className="group min-w-0 text-left" title={work.title}>
       <div className="relative">
@@ -54,6 +57,13 @@ function WorkCard({ work, onOpen }: { work: LibraryWork; onOpen: () => void }) {
           <StatusBadge tone="success" className="absolute bottom-1.5 left-1.5 bg-background/85 backdrop-blur" title="本地已经有了，或者从收藏夹存过">
             已有
           </StatusBadge>
+        )}
+        {marks.length > 0 && (
+          <span className="absolute right-1.5 bottom-1.5 flex gap-1" title={`各版本标题里写的：${marks.map((m) => m.title ?? m.label).join(" / ")}`}>
+            {marks.map((m) => (
+              <Flag key={m.label} flag={m} className="bg-background/85 backdrop-blur" />
+            ))}
+          </span>
         )}
       </div>
       <div className="mt-1.5 space-y-0.5">

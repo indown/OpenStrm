@@ -3,9 +3,9 @@
  * 在文件名没有对应标签时回退到这里的结果（文件名有的以文件名为准，发布组的写法更贴近用户习惯）。
  * 标签口径和 parse-name.ts 的词表一致：2160p / 1080p、HEVC / H.264 / AV1、DDP / AC3 / DTS-HD / TrueHD、DV / HDR10+ / HDR10 / HLG。
  */
-import type { MediaProbeTags } from "@openstrm/shared";
+import type { MediaBrief, MediaProbeTags } from "@openstrm/shared";
 import type { MediaInfoResult } from "mediainfo.js";
-import { getMediaProbes, putMediaProbe, type MediaProbeRow } from "../../db/repositories/media-probes.js";
+import { getMediaProbes, getMediaProbesByPaths, putMediaProbe, type MediaProbeRow } from "../../db/repositories/media-probes.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import type { DriveProvider } from "../drive/types.js";
 import { analyzeSource, openRangeSource, PROBE_LIMITS, ProbeBudgetError, type AnalyzeOutcome, type ProbeSource, type RangeLink } from "./mediainfo.js";
@@ -200,6 +200,34 @@ export function probeTags(p: MediaProbe): MediaProbeTags {
 }
 
 
+/** 给界面的精简版：主音轨、字幕语言去重、来源按 bytesRead 分（Emby 回填的是 0） */
+export function mediaBrief(p: MediaProbe): MediaBrief {
+  const a = mainAudio(p);
+  const brief: MediaBrief = {
+    audioCount: p.audio.length,
+    subtitleLanguages: [...new Set(p.subtitles.map((s) => s.language).filter((l): l is string => !!l))],
+    source: p.bytesRead > 0 ? "probe" : "emby",
+  };
+  const resolution = resolutionLabel(p.video?.width, p.video?.height);
+  if (resolution) brief.resolution = resolution;
+  if (p.video?.width) brief.width = p.video.width;
+  if (p.video?.height) brief.height = p.video.height;
+  if (p.video?.codec) brief.videoCodec = p.video.codec;
+  if (p.video?.bitDepth) brief.bitDepth = p.video.bitDepth;
+  if (p.video?.frameRate) brief.frameRate = p.video.frameRate;
+  if (p.video?.hdr) brief.hdr = p.video.hdr;
+  if (p.video?.bitrateKbps) brief.bitrateKbps = p.video.bitrateKbps;
+  if (a?.codec) brief.audioCodec = a.codec;
+  const channels = a ? channelsLabel(a.channels) : "";
+  if (channels) brief.channels = channels;
+  if (a?.atmos) brief.atmos = true;
+  if (a?.language) brief.audioLanguage = a.language;
+  if (p.container) brief.container = p.container;
+  if (p.durationMs) brief.durationMs = p.durationMs;
+  if (p.truncated) brief.truncated = true;
+  return brief;
+}
+
 /** 一行给人看的：HEVC · 2160p · DV · DDP Atmos 5.1 · 字幕 chi/eng */
 export function probeSummary(p: MediaProbe): string {
   const parts: string[] = [];
@@ -311,9 +339,9 @@ export async function probeDriveFile(provider: DriveProvider, accountName: strin
   }
 }
 
-/** 一批文件的缓存标签（预览开始时填进单元；不碰网盘） */
-export function cachedProbeTags(accountName: string, targets: ProbeTarget[]): Map<string, MediaProbeTags> {
-  const out = new Map<string, MediaProbeTags>();
+/** 一批文件的缓存结果（预览开始时填进单元；不碰网盘）：键是网盘绝对路径，大小对不上的不算 */
+export function cachedProbes(accountName: string, targets: ProbeTarget[]): Map<string, MediaProbe> {
+  const out = new Map<string, MediaProbe>();
   if (targets.length === 0) return out;
   const rows = getMediaProbes(accountName, targets.flatMap(keysOf));
   for (const t of targets) {
@@ -321,9 +349,32 @@ export function cachedProbeTags(accountName: string, targets: ProbeTarget[]): Ma
       const row = rows.get(key);
       if (!row || row.status !== "ok" || !row.data) continue;
       if (t.size !== undefined && row.size > 0 && row.size !== t.size) continue;
-      out.set(t.path, probeTags(row.data));
+      out.set(t.path, row.data);
       break;
     }
   }
   return out;
+}
+
+/**
+ * 按网盘绝对路径找缓存（strm 页用，手里只有路径没有 id）：同一路径有两行时取读过文件头的，再取新的。
+ * 按 id 记的行里 path 是探测当时的路径，文件被整理挪过之后按新路径查不到；Emby 回填的会按新路径再写一行
+ */
+export function cachedProbesByPath(accountName: string, paths: string[]): Map<string, MediaProbe> {
+  const out = new Map<string, MediaProbe>();
+  if (paths.length === 0) return out;
+  const best = new Map<string, MediaProbeRow>();
+  for (const row of getMediaProbesByPaths(accountName, [...new Set(paths)])) {
+    if (row.status !== "ok" || !row.data) continue;
+    const had = best.get(row.path);
+    const better = !had || (row.data.bytesRead > 0 && !(had.data!.bytesRead > 0)) || (row.data.bytesRead > 0 === had.data!.bytesRead > 0 && row.probedAt > had.probedAt);
+    if (better) best.set(row.path, row);
+  }
+  for (const [path, row] of best) out.set(path, row.data!);
+  return out;
+}
+
+/** 一批文件的缓存标签 */
+export function cachedProbeTags(accountName: string, targets: ProbeTarget[]): Map<string, MediaProbeTags> {
+  return new Map([...cachedProbes(accountName, targets)].map(([path, probe]) => [path, probeTags(probe)]));
 }

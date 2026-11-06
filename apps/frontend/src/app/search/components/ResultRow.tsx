@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { StatusBadge } from "@/components/status-badge";
+import { MediaFlags } from "@/components/media-flags";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,6 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { LinkCheckState } from "@/hooks/use-link-check";
 import { copyToClipboard } from "@/lib/clipboard";
+import { flagsFromTags } from "@/lib/media-flags";
 import { LINK_STATE, displayTags, fmtAgo, sourceLabel } from "@/lib/resource";
 import { cn } from "@/lib/utils";
 
@@ -223,22 +225,7 @@ export const ResultRow = memo(function ResultRow({
               提取码 <span className="font-mono text-foreground">{hit.password}</span>
             </span>
           )}
-          {tags.length > 0 && (
-            <span className="flex flex-wrap items-center gap-1" title={tags.join(" · ")}>
-              {tags.slice(0, TAGS_SHOWN).map((t) => (
-                <span
-                  key={t}
-                  className={cn(
-                    "rounded border px-1 text-[11px] leading-4",
-                    activeTags.has(t) ? "border-brand/40 bg-brand/10 text-brand" : "text-muted-foreground",
-                  )}
-                >
-                  {t}
-                </span>
-              ))}
-              {tags.length > TAGS_SHOWN && <span className="text-[11px]">+{tags.length - TAGS_SHOWN}</span>}
-            </span>
-          )}
+          {tags.length > 0 && <MediaFlags flags={flagsFromTags(tags, activeTags)} max={TAGS_SHOWN} title={tags.join(" · ")} />}
           {hit.followed === "active" && (
             <StatusBadge tone="info" title="这个分享已经在追更了：再转存会多存一份，也不用再订追更">
               已在追更

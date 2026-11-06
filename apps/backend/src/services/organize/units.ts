@@ -10,7 +10,7 @@
  *   - 标题末尾不补零的数字（`某剧10`）在季目录里、或同名的兄弟已经有集数时当集数；整个标题就是数字的（`129 4K.mp4`）
  *     在季目录里、或上级就是这部作品的目录时当集数（`promoteEpisodeNumbers`）。
  */
-import type { MediaProbeTags, OrganizeFileKind } from "@openstrm/shared";
+import type { MediaBrief, MediaProbeTags, OrganizeFileKind } from "@openstrm/shared";
 import { stripInvisible } from "../../lib/text.js";
 import { isArtDirName, isEditionOnlyName, isExtrasDirName, normalizeTitle, numericTitle, parseMediaName, seasonDirNumber, trailingNumber, type ParsedName, type TrailingNumber } from "./parse-name.js";
 import { applyRules, type DirectSpec, type ParsedRule } from "./rules.js";
@@ -42,6 +42,8 @@ export interface UnitFile {
   direct?: DirectSpec;
   /** 探测出来的标签（缓存里有、或这次预览里探过）：文件名里没有对应标签时模板回退用 */
   probe?: MediaProbeTags;
+  /** 和 probe 同一来源的实测媒体信息：界面画旗标、判文件名冲突用 */
+  media?: MediaBrief;
 }
 
 export interface Unit {

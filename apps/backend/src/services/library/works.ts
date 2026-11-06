@@ -20,7 +20,7 @@ import { getById, healthOf } from "../../db/repositories/media-library.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { parseShareRef } from "../drive/registry.js";
 import { normalizeTitle } from "../organize/parse-name.js";
-import { titleTags } from "../pansou/tags.js";
+import { unitTags } from "../pansou/tags.js";
 import { ownedOfUnit, ownedOfWork, type LocalOwned } from "./owned.js";
 import { crumbsForNode } from "./search.js";
 
@@ -43,6 +43,7 @@ function groupToWork(g: units.WorkGroup): LibraryWork {
     addedAt: g.addedAt,
     ...(g.genres.length ? { genres: g.genres } : {}),
     ...(g.countries.length ? { countries: g.countries } : {}),
+    ...(g.tags.length ? { tags: g.tags } : {}),
   };
 }
 
@@ -61,6 +62,7 @@ function unitToWork(u: units.UnitRow): LibraryWork {
     size: u.size,
     seasons: u.seasons,
     addedAt: u.createdAt,
+    ...(unitTags(u.rawName, u.sampleFile).length ? { tags: unitTags(u.rawName, u.sampleFile) } : {}),
   };
 }
 
@@ -251,7 +253,6 @@ export function unitView(u: units.UnitRow): LibraryUnit | null {
   if (!source) return null;
   const node = getNode(u.sourceId, u.nodeId);
   const kind = parseShareRef(source.shareUrl)?.kind;
-  const nameTags = titleTags(u.rawName);
   const item = (n: NonNullable<typeof node>) => ({ id: n.nodeId, name: n.name, isDir: n.isDir, parentId: n.parentId || "0", ...(n.token ? { token: n.token } : {}) });
   const saveItems = u.ownsDir
     ? node
@@ -276,8 +277,7 @@ export function unitView(u: units.UnitRow): LibraryUnit | null {
     videoCount: u.videoCount,
     size: u.size,
     sampleFile: u.sampleFile,
-    // 季另外列（seasons）：样例文件名里的「第 1 季」只是其中一季，别当成整个单元的
-    tags: (nameTags.length > 0 || !u.sampleFile ? nameTags : titleTags(u.sampleFile)).filter((t) => !/^第 .+ 季$/.test(t)),
+    tags: unitTags(u.rawName, u.sampleFile),
     status: u.status,
     work:
       u.tmdbId != null && u.mediaType && (u.status === "done" || u.status === "manual")

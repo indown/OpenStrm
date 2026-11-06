@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/status-badge";
+import { MediaFlags } from "@/components/media-flags";
+import { flagsFromHdhive } from "@/lib/media-flags";
 import { Button } from "@/components/ui/button";
 import {
   Loader2,
@@ -121,20 +123,7 @@ function ResourceCard({
           {remark}
         </div>
       )}
-      <div className="flex flex-wrap gap-1 text-xs text-muted-foreground">
-        {res.video_resolution?.map((r) => (
-          <span key={`r-${r}`} className="px-1.5 py-0.5 rounded bg-muted">{r}</span>
-        ))}
-        {res.source?.map((s) => (
-          <span key={`s-${s}`} className="px-1.5 py-0.5 rounded bg-muted">{s}</span>
-        ))}
-        {res.subtitle_language?.map((l) => (
-          <span key={`sl-${l}`} className="px-1.5 py-0.5 rounded bg-muted">字幕:{l}</span>
-        ))}
-        {res.subtitle_type?.map((t) => (
-          <span key={`st-${t}`} className="px-1.5 py-0.5 rounded bg-muted">{t}</span>
-        ))}
-      </div>
+      <MediaFlags flags={flagsFromHdhive(res)} className="flex" />
 
       {hasUrl ? (
         <div className="mt-1 rounded border bg-muted/40 p-2 flex flex-col gap-1 text-xs">

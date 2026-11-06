@@ -8,7 +8,7 @@ import { HttpError } from "../../lib/http-error.js";
 import { providerForTask } from "../drive/registry.js";
 import type { DriveProvider } from "../drive/types.js";
 import { retryableItem, revertWorkItem } from "./failures.js";
-import { unitActive, ORGANIZE_LIMITS, handPicked, jobs, computeStats, planStates, WORK_ACTIONS, activeItemFilter, planFingerprint, releaseHeldCopies, applicability, revertability, failureGroups } from "./run-state.js";
+import { unitActive, ORGANIZE_LIMITS, handPicked, jobs, computeStats, planStates, WORK_ACTIONS, activeItemFilter, planFingerprint, releaseHeldCopies, applicability, revertability, failureGroups, decorateUnitsWithMedia } from "./run-state.js";
 import { afterApply } from "./apply.js";
 import { afterRevert } from "./revert.js";
 
@@ -95,7 +95,7 @@ export function getRunDetail(runId: string): OrganizeRunDetail {
   const items = listItems(runId);
   return {
     ...summaryOf(run, units, items),
-    units: units.map(lightUnit),
+    units: decorateUnitsWithMedia(runId, units.map(lightUnit)),
     counts: unitCounts(units, items),
     dirCount: items.filter((it) => it.unitKey === "").length,
     skippedDirs: skippedDirsOf(run),

@@ -84,6 +84,7 @@ before(async () => {
   await writeAuthPassword("organize-itest-pw");
   drive.tree.addFile("/movies/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv");
   drive.tree.addFile("/movies/probe/Dune.Part.Two.2024.mkv", { size: 1000 });
+  drive.tree.addFile("/movies/probe-conflict/Dune.Part.Two.2024.1080p.x264.mkv", { size: 1000 });
   setDriveProviderFactory((a) => (a.name === "acc" ? drive : null));
   setOrganizeDeps({ tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true), notify: async () => true, retryDelayMs: 5 });
 
@@ -407,7 +408,7 @@ test("命名来源：naming=local 建的 run 记着来源、不要 TMDB；没有
   await untilStatus(plain.id, ["ready"]);
 });
 
-test("探测编码：key / keys / missing 至少给一个 400、没有的单元 404；探完项上带 probe、清单按标签重新规划；本地结构的清单 400", async () => {
+test("探测编码：key / keys / missing 至少给一个 400、没有的单元 404；探完项上带 media、单元带汇总、清单按标签重新规划；文件名和实测对不上带 conflicts；本地结构的清单 400", async () => {
   __test_resetMediaProbes();
   const result = {
     media: {
@@ -423,6 +424,8 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     const run = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe" }, 201);
     const ready = await untilStatus(run.id, ["ready"]);
     const unit = ready.units.find((u) => u.match?.tmdbId === 693134)!;
+    // 还没探：汇总照样有（按文件名口径），只是什么都没认出来
+    assert.deepEqual(unit.media, { videos: 1, probed: 0, resolution: [], videoCodec: [], bitDepth: [], hdr: [], audio: [], conflicts: 0 });
     assert.equal((await app.inject({ method: "POST", url: `/api/organize/runs/${run.id}/probe`, headers: auth, payload: {} })).statusCode, 400);
     assert.equal((await app.inject({ method: "POST", url: `/api/organize/runs/${run.id}/probe`, headers: auth, payload: { key: "nope" } })).statusCode, 404);
     const r = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${run.id}/probe`, { key: unit.key });
@@ -431,7 +434,19 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     const { items } = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${run.id}/items?unit=${encodeURIComponent(unit.key)}`);
     const movie = items.find((i) => i.srcPath.endsWith(".mkv"))!;
     assert.equal(r.files[0].path, movie.srcPath);
-    assert.deepEqual(movie.probe, { resolution: "2160p", videoCodec: "HEVC", audio: "DDP 5.1", hdr: "HDR10" });
+    assert.deepEqual(movie.media, { resolution: "2160p", width: 3840, height: 2160, videoCodec: "HEVC", hdr: "HDR10", audioCodec: "DDP", channels: "5.1", audioCount: 1, subtitleLanguages: [], source: "probe" });
+    assert.equal(movie.conflicts, undefined, "文件名没写标签，没有冲突");
+    const probedDetail = await json<OrganizeRunDetail>("GET", `/api/organize/runs/${run.id}`);
+    assert.deepEqual(probedDetail.units.find((u) => u.key === unit.key)?.media, {
+      videos: 1,
+      probed: 1,
+      resolution: [{ value: "2160p", count: 1 }],
+      videoCodec: [{ value: "HEVC", count: 1 }],
+      bitDepth: [],
+      hdr: [{ value: "HDR10", count: 1 }],
+      audio: [{ value: "DDP 5.1", count: 1 }],
+      conflicts: 0,
+    });
     assert.ok(movie.dstPath.endsWith("沙丘：第二部 (2024) - 2160p.mkv"), movie.dstPath);
     const again = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${run.id}/probe`, { keys: [unit.key] });
     assert.equal(again.probed + again.failed, 0, "缺的标签已经有探测结果了，不用再探");
@@ -454,8 +469,24 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     assert.ok(suffixed.probed >= 1, `带后缀的 {audio:.} 也要探：${JSON.stringify(suffixed)}`);
     const sceneItems = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${scene.id}/items?unit=${encodeURIComponent(sceneUnit.key)}`);
     const sceneMovie = sceneItems.items.find((i) => i.srcPath.endsWith(".mkv"))!;
-    assert.equal(sceneMovie.probe?.audio, "DDP 5.1");
+    assert.equal(sceneMovie.media?.audioCodec, "DDP");
     assert.ok(sceneMovie.dstPath.endsWith("沙丘：第二部.DDP.5.1.mkv"), sceneMovie.dstPath);
+    // 文件名写 1080p x264、实测 2160p HEVC：项上带两条冲突；单元汇总按文件名口径（模板也按它命名），conflicts 计 1
+    replaceAppSettings({ ...readAppSettings(), organize: {} });
+    __test_resetMediaProbes();
+    const conflict = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe-conflict" }, 201);
+    const conflictReady = await untilStatus(conflict.id, ["ready"]);
+    const conflictUnit = conflictReady.units.find((u) => u.match?.tmdbId === 693134)!;
+    await json<OrganizeProbeResult>("POST", `/api/organize/runs/${conflict.id}/probe`, { key: conflictUnit.key });
+    const conflictItems = await json<{ items: OrganizeItem[] }>("GET", `/api/organize/runs/${conflict.id}/items?unit=${encodeURIComponent(conflictUnit.key)}`);
+    const conflictMovie = conflictItems.items.find((i) => i.srcPath.endsWith(".mkv"))!;
+    assert.deepEqual(conflictMovie.conflicts, [
+      { kind: "resolution", named: "1080p", probed: "2160p" },
+      { kind: "videoCodec", named: "x264", probed: "HEVC" },
+    ]);
+    const conflictDetail = await json<OrganizeRunDetail>("GET", `/api/organize/runs/${conflict.id}`);
+    const conflictMedia = conflictDetail.units.find((u) => u.key === conflictUnit.key)?.media;
+    assert.deepEqual([conflictMedia?.probed, conflictMedia?.resolution, conflictMedia?.videoCodec, conflictMedia?.conflicts], [1, [{ value: "1080p", count: 1 }], [{ value: "H.264", count: 1 }], 1]);
     const local = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh", naming: "local" }, 201);
     await untilStatus(local.id, ["ready"]);
     const bad = await app.inject({ method: "POST", url: `/api/organize/runs/${local.id}/probe`, headers: auth, payload: { missing: true } });

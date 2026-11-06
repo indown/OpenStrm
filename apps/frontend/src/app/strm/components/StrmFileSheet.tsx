@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { FileCog, Loader2, ShieldCheck, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { StrmFileInfo } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { StatusBadge } from "@/components/status-badge";
+import { MediaFlags } from "@/components/media-flags";
 import { Spinner } from "@/components/loading";
 import { api } from "@/lib/api";
+import { briefDetails, flagsFromBrief } from "@/lib/media-flags";
 import { PARSE_REASON_LABEL, baseName, parentOf, strmErrorMessage, type RequestDelete } from "@/lib/strm";
 
 type Props = {
@@ -148,6 +150,23 @@ export function StrmFileSheet({ taskId, path, onOpenChange, onDelete, onDeleted 
                     <p className="text-xs text-destructive">
                       无法解析{info.reason ? `：${PARSE_REASON_LABEL[info.reason]}` : ""}
                     </p>
+                  )}
+                </Field>
+                <Field label="媒体信息">
+                  {info.media ? (
+                    <div className="space-y-1.5">
+                      <MediaFlags grouped flags={flagsFromBrief(info.media)} />
+                      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+                        {briefDetails(info.media).map((d) => (
+                          <Fragment key={d.label}>
+                            <dt className="text-muted-foreground">{d.label}</dt>
+                            <dd className="break-all">{d.value}</dd>
+                          </Fragment>
+                        ))}
+                      </dl>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">还没有这个文件的探测信息：到整理页按作品点「探测编码」，或者等 Emby 播放过后回填。</p>
                   )}
                 </Field>
                 {!info.matches && (

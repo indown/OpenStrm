@@ -21,6 +21,7 @@ import { isLocalUnitKey, type LocalUnit } from "./local-naming.js";
 import type { EpisodeFill, ScopeRoot } from "./plan.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
 import { AUDIO_EXTS, type ScopeEntry, type Unit } from "./units.js";
+import { unitMedia } from "./media-info.js";
 
 /** 整理挪完之后，复制待办的目标目录按新路径重算（层级跟着源走） */
 export const copyLayout = (base: string, rootPath: string | undefined, srcPath: string): string => dstDirFor(base, rootPath, srcPath).dstDir;
@@ -307,6 +308,17 @@ export function mergeEntries(state: PlanState, extra: ScopeEntry[]): void {
 
 /** 内存里的 run 状态：单元结构（Unit）不落库，改匹配重新规划时要用；进程重启后 run 只能看和执行，不能再改 */
 export const planStates = new Map<string, PlanState>();
+
+/** 单元上带媒体信息汇总（作品卡片的旗标）：只在预览的单元结构还在内存里时有，不落库 */
+export function decorateUnitsWithMedia(runId: string, units: OrganizeUnit[]): OrganizeUnit[] {
+  const state = planStates.get(runId);
+  if (!state) return units;
+  return units.map((row) => {
+    const unit = state.units.get(row.key);
+    const media = unit ? unitMedia(unit) : undefined;
+    return media ? { ...row, media } : row;
+  });
+}
 
 /**
  * 清单内容的指纹：人点头的是哪一版，执行的就是哪一版（智能体执行前核对）。只看会改变执行结果的东西——

@@ -134,6 +134,70 @@ export interface MediaProbeTags {
   hdr?: string;
 }
 
+/**
+ * 给界面画旗标用的精简媒体信息：读文件头或 Emby 回填得到的实测值（文件名解析出来的不算，那是上传者写的）。
+ * 完整结果在 media_probes 里，这里只挑旗标和悬停要用的
+ */
+export interface MediaBrief {
+  /** 2160p / 1080p … */
+  resolution?: string;
+  width?: number;
+  height?: number;
+  /** HEVC / H.264 / AV1 … */
+  videoCodec?: string;
+  bitDepth?: number;
+  frameRate?: number;
+  /** DV / HDR10+ / HDR10 / HLG / HDR */
+  hdr?: string;
+  /** 主音轨（标了默认的，否则第一条） */
+  audioCodec?: string;
+  /** 7.1 / 5.1 / 2.0 */
+  channels?: string;
+  atmos?: boolean;
+  audioLanguage?: string;
+  audioCount: number;
+  /** 字幕语言，去重、按出现顺序 */
+  subtitleLanguages: string[];
+  container?: string;
+  durationMs?: number;
+  bitrateKbps?: number;
+  /** probe 是读文件头探到的，emby 是 Emby 分析过回填的 */
+  source: "probe" | "emby";
+  /** 读到预算上限就停了：标签照样齐，时长 / 靠后的字幕可能缺 */
+  truncated?: boolean;
+}
+
+/** 文件名里的标签和实测对不上（services/organize/media-info.ts 判） */
+export interface MediaConflict {
+  kind: "resolution" | "videoCodec" | "hdr";
+  /** 文件名写的 */
+  named: string;
+  /** 实测的 */
+  probed: string;
+}
+
+export interface MediaValueCount {
+  value: string;
+  count: number;
+}
+
+/**
+ * 一个作品单元的媒体信息汇总（作品卡片上画旗标用）：各项取值的分布按出现次数降序，只有一种取值就是全部一致。
+ * 取值是模板口径（文件名优先、探测兜底），bitDepth 只有实测值。只在预览的单元结构还在内存里时带
+ */
+export interface OrganizeUnitMedia {
+  videos: number;
+  /** 有实测信息（读文件头 / Emby 回填）的视频数 */
+  probed: number;
+  resolution: MediaValueCount[];
+  videoCodec: MediaValueCount[];
+  bitDepth: MediaValueCount[];
+  hdr: MediaValueCount[];
+  audio: MediaValueCount[];
+  /** 文件名和实测对不上的视频数 */
+  conflicts: number;
+}
+
 /** 探测编码的结果（POST /api/organize/runs/:id/probe） */
 export interface OrganizeProbeResult {
   /** 读到了的视频数（含直接用缓存的） */
@@ -335,6 +399,8 @@ export interface OrganizeUnit {
   kinds: Record<string, OrganizeKindOverride>;
   /** 缺的集：季号 → 集号（只算单元里出现过的季，按 TMDB 每季集数和已播到哪一集算；电影和没识别的是空对象） */
   missing: Record<string, number[]>;
+  /** 媒体信息汇总（只在预览的单元结构还在内存里时带，不落库） */
+  media?: OrganizeUnitMedia;
 }
 
 /** 文件类型改判：video 当正片、extra 当花絮 */
@@ -369,8 +435,10 @@ export interface OrganizeItem {
   curPath: string;
   /** 网盘监控按「整理自己做的」跳过了几条事件 */
   hits: number;
-  /** 这个文件探测出来的标签（只在预览的单元结构还在内存里时带） */
-  probe?: MediaProbeTags;
+  /** 这个文件的实测媒体信息（只在预览的单元结构还在内存里时带） */
+  media?: MediaBrief;
+  /** 文件名里的标签和实测对不上的地方 */
+  conflicts?: MediaConflict[];
 }
 
 /**

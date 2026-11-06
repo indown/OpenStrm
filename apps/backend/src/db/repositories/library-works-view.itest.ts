@@ -218,3 +218,14 @@ test("listWorks 在缓存上筛、排、切：排序复用比较器，给出去�
   units.saveIdentified("A", "u3", identified(3, "movie", { title: "第0季", year: "1999" }), now);
   assert.deepEqual(listWorks({ ...q, sort: "title" }).works.map((w) => w.title), ["第0季", "第2季", "第10季"], "单元变了排好的数组跟着重排");
 });
+
+test("作品的 tags 是各版本目录名 / 样本文件名里认出的标签并起来；「第 N 季」不算；增量维护和重建一致", () => {
+  seedTwoSources();
+  units.replaceUnits("A", [built("u1", { rawName: "沙丘2.Dune.Part.Two.2024.2160p.DV.DDP5.1", sampleFile: "x.mkv" })], now);
+  units.replaceUnits("B", [built("u4", { rawName: "沙丘2", sampleFile: "沙丘2.1080p.第一季.中字.mkv" })], now);
+  units.saveIdentified("A", "u1", identified(10), now);
+  units.saveIdentified("B", "u4", identified(10), now);
+  assert.deepEqual([...(worksView().groups.get("movie:10")?.tags ?? [])].sort(), ["1080p", "4K", "中字", "杜比视界"]);
+  assert.deepEqual(listWorks({ view: "all", sort: "title", offset: 0, limit: 10 }).works.find((w) => w.key === "movie:10")?.tags?.slice().sort(), ["1080p", "4K", "中字", "杜比视界"]);
+  assertFresh("tags 也要和重建一致");
+});

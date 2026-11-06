@@ -9,7 +9,7 @@ import { openSse } from "../../lib/sse.js";
 import { parse } from "../../lib/validate.js";
 import { requireAgentScope } from "../../services/agent/access.js";
 import { providerForTask } from "../../services/drive/registry.js";
-import { deletePaths, listDir, readStrm, regenerate, rewrite, scan, search, STRM_LIMITS, verify, verify$ } from "../../services/strm/manage.js";
+import { deletePaths, listDir, mediaOf, readStrm, regenerate, rewrite, scan, search, STRM_LIMITS, verify, verify$ } from "../../services/strm/manage.js";
 import { POSTER_LIMITS, postersAcrossTasks, resolvePosters, statImage } from "../../services/strm/poster.js";
 
 /**
@@ -31,6 +31,7 @@ const searchQuery = z.object({
   limit: z.coerce.number().int().min(1).max(STRM_LIMITS.SEARCH_MAX).default(STRM_LIMITS.SEARCH_DEFAULT),
 });
 const deleteBody = z.object({ taskId, paths: z.array(z.string().min(1)).min(1, "paths is required").max(STRM_LIMITS.DELETE_MAX) });
+const mediaBody = z.object({ taskId, paths: z.array(z.string().min(1)).min(1, "paths is required").max(STRM_LIMITS.MEDIA_MAX) });
 const scanBody = z.object({ taskId, path: optionalPath });
 const rewriteBody = z.object({ taskId, path: optionalPath, dryRun: z.boolean().default(false) });
 const regenerateBody = z.object({ taskId, path: requiredPath, mode: z.enum(["fill", "rebuild"]).default("fill") });
@@ -60,6 +61,12 @@ export default async function (fastify: FastifyInstance) {
   fastify.get("/api/strm/file", agent("read"), async (request) => {
     const q = parse(fileQuery, request.query, "query");
     return readStrm(loadTask(q.taskId), q.path);
+  });
+
+  /** 一批 strm 指向的网盘文件的实测媒体信息（整理页探测过或 Emby 回填过的才有）：列表行上画旗标用 */
+  fastify.post("/api/strm/media", agent("read"), async (request) => {
+    const body = parse(mediaBody, request.body);
+    return mediaOf(loadTask(body.taskId), body.paths);
   });
 
   /** 背景海报：一批目录各拿一张，拿不到的不在结果里；known 是有线索的目录。纯装饰，任何一步失败都只是没有海报 */

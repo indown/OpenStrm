@@ -40,6 +40,21 @@ export function getMediaProbes(accountName: string, keys: string[]): Map<string,
   return out;
 }
 
+/** 按网盘绝对路径找（strm 页用）：path 列没有索引，表就几千行，IN 够用。同一路径可能有两行（按 id 记的 + Emby 回填的），都回 */
+export function getMediaProbesByPaths(accountName: string, paths: string[]): MediaProbeRow[] {
+  const out: MediaProbeRow[] = [];
+  for (let i = 0; i < paths.length; i += 400) {
+    const chunk = paths.slice(i, i + 400);
+    const rows = db
+      .select()
+      .from(mediaProbes)
+      .where(and(eq(mediaProbes.accountName, accountName), inArray(mediaProbes.path, chunk)))
+      .all();
+    for (const r of rows) out.push({ accountName: r.accountName, key: r.key, path: r.path, size: r.size, status: r.status === "ok" ? "ok" : "failed", data: r.status === "ok" ? parseData(r.data) : null, error: r.error, probedAt: r.probedAt });
+  }
+  return out;
+}
+
 export function putMediaProbe(row: MediaProbeRow): void {
   const values = { accountName: row.accountName, key: row.key, path: row.path, size: row.size, status: row.status, data: JSON.stringify(row.data ?? {}), error: row.error, probedAt: row.probedAt };
   db.insert(mediaProbes)

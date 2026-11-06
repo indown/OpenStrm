@@ -4,15 +4,17 @@ import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { AlertTriangle, Ban, CheckCheck, ChevronDown, ChevronRight, ExternalLink, Film, Loader2, MoreHorizontal, PenLine, RefreshCw, ScanSearch, Search, Telescope, Tv } from "lucide-react";
-import type { MediaProbeTags, OrganizeConflictChoice, OrganizeEpisodePin, OrganizeItem, OrganizeKindOverride, OrganizeMediaType, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
+import type { OrganizeConflictChoice, OrganizeEpisodePin, OrganizeItem, OrganizeKindOverride, OrganizeMediaType, OrganizeNaming, OrganizeRunStage, OrganizeUnit, OrganizeUnitCounts, OrganizeUnitPatch } from "@openstrm/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/status-badge";
+import { MediaFlags } from "@/components/media-flags";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ACTION_META, CONFIDENCE_META, CONFLICT_CHOICES, CONFLICT_LABEL, ERROR_KIND_META, baseName, dirName, formatMissing } from "@/lib/organize";
 import { topCandidates } from "./EditUnitDialog";
 import { keywordFromName, searchHref } from "@/lib/resource";
+import { briefTitle, flagsFromBrief, flagsFromUnitMedia, unitMediaTitle } from "@/lib/media-flags";
 import { useRunItems } from "./helpers";
 
 const NO_COUNTS: OrganizeUnitCounts = { total: 0, changing: 0, conflicts: 0, skipped: 0, keep: 0, failed: 0, done: 0, reverted: 0, excluded: 0 };
@@ -246,9 +248,6 @@ export function UnitList({
   );
 }
 
-/** 探测出来的标签一行：2160p HEVC DV DDP */
-const probeLine = (p: MediaProbeTags): string => [p.resolution, p.videoCodec, p.hdr, p.audio].filter(Boolean).join(" ");
-
 function UnitCard({
   runId,
   unit,
@@ -342,6 +341,11 @@ function UnitCard({
               </span>
             )}
           </div>
+          {unit.media && (
+            <div>
+              <MediaFlags grouped flags={flagsFromUnitMedia(unit.media)} title={unitMediaTitle(unit.media)} />
+            </div>
+          )}
           <div className="break-all text-xs text-muted-foreground">
             原：{unit.rootPath || "（任务根目录）"}
             {!local && unit.rootPath && unit.rawName !== baseName(unit.rootPath) ? ` · ${unit.rawName}` : ""}
@@ -817,7 +821,11 @@ function ItemsTable({
                 <td className="px-2 py-2">
                   <div className="break-all">{baseName(it.srcPath)}</div>
                   <div className="break-all text-muted-foreground">{dirName(it.srcPath)}</div>
-                  {it.probe && <div className="text-muted-foreground">探测到 {probeLine(it.probe)}</div>}
+                  {it.media && (
+                    <div className="py-0.5">
+                      <MediaFlags grouped flags={flagsFromBrief(it.media, it.conflicts)} title={briefTitle(it.media)} />
+                    </div>
+                  )}
                   {pins[it.srcPath] && <div className="text-muted-foreground">钉在 {pinText(pins[it.srcPath])}</div>}
                   {renames[it.srcPath] && <div className="break-all text-muted-foreground">改名为 {renames[it.srcPath]}</div>}
                   {kinds[it.srcPath] && <div className="text-muted-foreground">{kinds[it.srcPath] === "video" ? "改判为正片" : "改判为花絮"}</div>}

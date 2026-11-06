@@ -33,7 +33,7 @@ import {
   patchUnits,
   planFingerprint,
   probeUnits,
-  decorateItemsWithProbes,
+  decorateItemsWithMedia,
   readyRunsWithin,
   repreviewRun,
   revertRun,
@@ -223,7 +223,7 @@ export default async function (fastify: FastifyInstance) {
   fastify.get("/api/organize/runs/:id/items", { preHandler: [fastify.authenticate], config: { agentScope: "read", agentToolset: "organize" } }, async (request) => {
     const { id } = parse(idParamsSchema, request.params, "params");
     const q = parse(itemsQuerySchema, request.query, "query");
-    return { items: decorateItemsWithProbes(id, listRunItems(id, q)) };
+    return { items: decorateItemsWithMedia(id, listRunItems(id, q)) };
   });
 
   /** 预览里探测编码（mediainfo.js 读文件头）：填进标签、重新规划；返回每个文件读到了什么 */

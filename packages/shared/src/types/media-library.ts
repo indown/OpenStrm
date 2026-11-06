@@ -198,6 +198,8 @@ export interface LibraryWork {
   /** TMDB 类型编号、国家 / 地区代码（认出来以后从详情补的，还没补上时没有） */
   genres?: number[];
   countries?: string[];
+  /** 各版本标题里认出的标签并起来（4K / 杜比视界 / 中字 …），海报角标用；没有就不带 */
+  tags?: string[];
 }
 
 export type LibraryWorksView = "all" | "movie" | "tv" | "low" | "none";

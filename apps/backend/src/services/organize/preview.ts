@@ -24,7 +24,8 @@ import { hintFor, hintSource } from "./hints.js";
 import { duplicatePathFor, isStagingDir } from "../strm/staging.js";
 import { type UnitPlanInput, finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan, missingEpisodes } from "./plan.js";
 import { indexLocalStrm, mapLocalStrm, planLocalUnit, toSyntheticUnit } from "./local-naming.js";
-import { cachedProbeTags, probeDriveFile, probeSummary, probeTags, type ProbeTarget } from "../media/probe.js";
+import { cachedProbes, mediaBrief, probeDriveFile, probeSummary, probeTags, type ProbeTarget } from "../media/probe.js";
+import { mediaConflicts } from "./media-info.js";
 import { isTaskRunning } from "../task/registry.js";
 import { parseRules } from "./rules.js";
 import { resolveOrganizeSettings } from "./settings.js";
@@ -765,10 +766,13 @@ function videoFilesOf(state: PlanState, keys?: Iterable<string>): UnitFile[] {
 /** 预览开始时把缓存里的探测结果填进单元文件（不碰网盘） */
 function attachProbes(state: PlanState, accountName: string): void {
   const files = videoFilesOf(state);
-  const tags = cachedProbeTags(accountName, files.map((f) => probeTargetOf(state, f)));
+  const probes = cachedProbes(accountName, files.map((f) => probeTargetOf(state, f)));
   for (const f of files) {
-    const t = tags.get(absOf(state.task, f.path));
-    if (t) f.probe = t;
+    const probe = probes.get(absOf(state.task, f.path));
+    if (probe) {
+      f.probe = probeTags(probe);
+      f.media = mediaBrief(probe);
+    }
   }
 }
 
@@ -787,6 +791,7 @@ async function autoProbe(job: Job, state: PlanState, provider: DriveProvider, si
     const r = await probeDriveFile(provider, provider.account.name, probeTargetOf(state, f), { signal });
     if (r.status === "ok" && r.probe) {
       f.probe = probeTags(r.probe);
+      f.media = mediaBrief(r.probe);
       ok++;
       if (r.cached) cached++;
     } else failed++;
@@ -833,6 +838,7 @@ export async function probeUnits(runId: string, sel: ProbeSelection, opts: { ret
       const unitKey = ownerOf.get(f) ?? "";
       if (r.status === "ok" && r.probe) {
         f.probe = probeTags(r.probe);
+        f.media = mediaBrief(r.probe);
         out.probed++;
         if (r.cached) out.cached++;
         touched.add(unitKey);
@@ -873,16 +879,18 @@ function itemsFingerprints(items: OrganizeItem[]): Map<string, string> {
   return new Map([...by].map(([k, v]) => [k, v.sort().join("\n")]));
 }
 
-/** 项上带探测标签（只在预览的单元结构还在内存里时有） */
-export function decorateItemsWithProbes(runId: string, items: OrganizeItem[]): OrganizeItem[] {
+/** 项上带实测媒体信息和文件名冲突（只在预览的单元结构还在内存里时有） */
+export function decorateItemsWithMedia(runId: string, items: OrganizeItem[]): OrganizeItem[] {
   const state = planStates.get(runId);
   if (!state) return items;
-  const byAbs = new Map<string, MediaProbeTags>();
-  for (const u of state.units.values()) for (const f of u.files) if (f.probe) byAbs.set(absOf(state.task, f.path), f.probe);
+  const byAbs = new Map<string, UnitFile>();
+  for (const u of state.units.values()) for (const f of u.files) if (f.media) byAbs.set(absOf(state.task, f.path), f);
   if (byAbs.size === 0) return items;
   return items.map((it) => {
-    const probe = byAbs.get(it.srcPath);
-    return probe ? { ...it, probe } : it;
+    const f = byAbs.get(it.srcPath);
+    if (!f?.media) return it;
+    const conflicts = mediaConflicts(f.parsed.tags, f.media);
+    return { ...it, media: f.media, ...(conflicts.length > 0 ? { conflicts } : {}) };
   });
 }
 

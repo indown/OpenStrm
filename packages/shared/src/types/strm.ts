@@ -3,6 +3,8 @@
  * 所有 path 都是 POSIX 风格、相对任务 targetPath 的路径，"" 表示任务根目录。
  */
 
+import type { MediaBrief } from "./organize.js";
+
 export type StrmEntryKind = "dir" | "strm" | "download" | "part" | "other";
 
 export interface StrmEntry {
@@ -50,6 +52,13 @@ export interface StrmFileInfo {
   actualRemotePath: string | null;
   matches: boolean;
   reason?: StrmParseReason;
+  /** 这个网盘文件的实测媒体信息（整理页探测过或 Emby 回填过才有） */
+  media?: MediaBrief;
+}
+
+/** POST /api/strm/media：一批 strm 的实测媒体信息，键是相对任务 targetPath 的路径；没有的不在里面 */
+export interface StrmMediaResult {
+  media: Record<string, MediaBrief>;
 }
 
 export type StrmIssueType =

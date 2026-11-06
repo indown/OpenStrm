@@ -420,6 +420,8 @@ export function RunView({
   const previewFailed = units.length === 0 && run.stage === "apply" && (run.status === "failed" || run.status === "cancelled");
   const mirrorLeft = run.stats.failedByKind.mirror;
   const unsure = run.naming === "local" ? 0 : units.filter((u) => u.selected && (!u.match || u.match.confidence !== "high")).length;
+  /** 探测覆盖率：勾着的作品里读过文件头 / Emby 回填过的视频数（单元汇总只在预览还在内存里时有） */
+  const coverage = run.naming === "local" ? null : units.reduce((acc, u) => (u.selected && u.media ? { probed: acc.probed + u.media.probed, videos: acc.videos + u.media.videos } : acc), { probed: 0, videos: 0 });
   const task = tasks?.find((t) => t.id === run.taskId) ?? null;
   const origin = task ? task.originPath.replace(/\/+$/, "") : "";
   const full = (p: string) => (origin ? `${origin}/${p}` : p);
@@ -583,6 +585,24 @@ export function RunView({
             {reverting && run.stats.notReverted > 0 && <StatusBadge tone="danger" className="tabular-nums">{run.stats.notReverted} 项没退回</StatusBadge>}
             {mirrorLeft > 0 && <StatusBadge tone="warning" className="tabular-nums">{mirrorLeft} 项本地未同步</StatusBadge>}
             {unsure > 0 && run.status === "ready" && <StatusBadge tone="warning" className="tabular-nums">{unsure} 部识别把握不大</StatusBadge>}
+            {coverage && coverage.videos > 0 && run.status === "ready" && (
+              coverage.probed < coverage.videos && editable ? (
+                <button
+                  type="button"
+                  disabled={locked}
+                  onClick={() => void probeMissing(units.filter((u) => u.selected).map((u) => u.key))}
+                  title="读每个视频的文件头拿真实的分辨率 / 编码 / 音频 / HDR。点一下：勾着的作品里，文件名缺模板要用的标签的视频都探一遍（读过的有缓存，上次没读到的不再读）"
+                >
+                  <StatusBadge tone="neutral" className="tabular-nums hover:opacity-80">
+                    探测过 {coverage.probed} / {coverage.videos} 个视频
+                  </StatusBadge>
+                </button>
+              ) : (
+                <StatusBadge tone="neutral" className="tabular-nums" title="勾着的作品里每个视频都读过文件头或由 Emby 回填">
+                  探测过 {coverage.probed} / {coverage.videos} 个视频
+                </StatusBadge>
+              )
+            )}
           </div>
         )}
 

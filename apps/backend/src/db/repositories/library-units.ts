@@ -7,6 +7,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-
 import { db } from "../client.js";
 import { librarySaves, libraryShares, libraryUnits, mediaLibrary } from "../schema.js";
 import { notifyLibraryChange, type UnitKeyState } from "./library-changes.js";
+import { unitTags } from "../../services/pansou/tags.js";
 
 type Row = typeof libraryUnits.$inferSelect;
 
@@ -416,6 +417,8 @@ export interface WorkGroup {
   addedAt: number;
   genres: number[];
   countries: string[];
+  /** 各版本的标签（目录名 / 样本文件名里认出的 4K / 杜比视界 / 中字 …）并起来、去重 */
+  tags: string[];
 }
 
 const CONF_RANK = sql<number>`max(case when ${libraryUnits.status} = 'manual' or ${libraryUnits.confidence} = 'high' then 3 when ${libraryUnits.confidence} = 'medium' then 2 when ${libraryUnits.confidence} = 'low' then 1 else 0 end)`;
@@ -441,6 +444,7 @@ export function workGroups(only?: { mediaType: "movie" | "tv"; tmdbId: number })
       addedAt: sql<number>`max(${libraryUnits.createdAt})`,
       genres: sql<string | null>`max(${libraryUnits.genres})`,
       countries: sql<string | null>`max(${libraryUnits.countries})`,
+      names: sql<string | null>`json_group_array(json_array(${libraryUnits.rawName}, ${libraryUnits.sampleFile}))`,
     })
     .from(libraryUnits)
     .innerJoin(mediaLibrary, eq(mediaLibrary.id, libraryUnits.sourceId))
@@ -472,6 +476,7 @@ export function workGroups(only?: { mediaType: "movie" | "tv"; tmdbId: number })
       addedAt: r.addedAt ?? 0,
       genres: parseJson<number[]>(r.genres ?? "[]", []),
       countries: parseJson<string[]>(r.countries ?? "[]", []),
+      tags: [...new Set(parseJson<Array<[string, string]>>(r.names ?? "[]", []).flatMap(([raw, sample]) => unitTags(raw ?? "", sample ?? "")))],
     }));
 }
 

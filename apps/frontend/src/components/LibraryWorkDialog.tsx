@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { StatusBadge } from "@/components/status-badge";
+import { MediaFlags } from "@/components/media-flags";
 import { ShareDetailDialog } from "@/components/ShareDetailDialog";
 import { SaveToDriveDialog, type SaveToTaskChoice } from "@/components/SaveToDriveDialog";
 import { MatchDialog, type MatchTarget } from "@/components/MatchDialog";
@@ -23,6 +24,7 @@ import { api } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/axios";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatSize } from "@/lib/format";
+import { flagsFromTags } from "@/lib/media-flags";
 import { displayTags } from "@/lib/resource";
 import { notifyFollowResult, notifySaveToTaskResult } from "@/lib/save-result";
 import { cn } from "@/lib/utils";
@@ -89,11 +91,7 @@ function UnitRow({
           {unit.videoCount > 0 && <span className="tabular-nums">{unit.videoCount} 个视频</span>}
           {unit.seasons.length > 0 && <span>{seasonsLabel(unit.seasons)}</span>}
           {!unit.ownsDir && <span title="分类目录里散放的文件：转存这几个文件">散放的文件</span>}
-          {tags.map((t) => (
-            <span key={t} className="rounded border px-1 text-[11px] leading-4">
-              {t}
-            </span>
-          ))}
+          <MediaFlags flags={flagsFromTags(tags)} />
           <ShareHealthBadge health={unit.health} />
         </div>
         {unit.sampleFile && (

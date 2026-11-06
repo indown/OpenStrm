@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import type { StrmDeleteResult, StrmEntry } from "@openstrm/shared";
+import type { MediaBrief, StrmDeleteResult, StrmEntry } from "@openstrm/shared";
 import { api, type TaskRow } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/axios";
 import { DELETE_CHUNK, joinPath, parentOf, strmErrorMessage, type RequestDelete } from "@/lib/strm";
@@ -193,6 +193,37 @@ export function useStrmBrowser() {
     return q ? base.filter((e) => e.name.toLowerCase().includes(q)) : base;
   }, [mode, results, entries, query]);
 
+  /* ------------------------------ 媒体信息 ------------------------------ */
+  // 列出来的 strm 按 200 一批问一次实测媒体信息（整理页探测过或 Emby 回填过的才有），按路径记着不重复问；
+  // 旗标只是锦上添花，拿不到就不画，不报错
+  const [media, setMedia] = useState<Record<string, MediaBrief>>({});
+  const mediaAsked = useRef(new Set<string>());
+  useEffect(() => {
+    mediaAsked.current = new Set();
+    setMedia({});
+  }, [taskId]);
+  useEffect(() => {
+    if (!taskId) return;
+    const want = visible.filter((e) => !e.isDir && e.kind === "strm" && !mediaAsked.current.has(e.path)).map((e) => e.path);
+    if (want.length === 0) return;
+    for (const p of want) mediaAsked.current.add(p);
+    let alive = true;
+    void (async () => {
+      for (let i = 0; i < want.length; i += 200) {
+        try {
+          const res = await api.strm.media(taskId, want.slice(i, i + 200));
+          if (!alive) return;
+          if (Object.keys(res.media).length > 0) setMedia((m) => ({ ...m, ...res.media }));
+        } catch {
+          /* 没有旗标而已 */
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [taskId, visible]);
+
   const allSelected = visible.length > 0 && visible.every((e) => selected.has(e.path));
 
   const toggleOne = useCallback((p: string, on: boolean) => {
@@ -302,6 +333,7 @@ export function useStrmBrowser() {
     entries,
     exists,
     visible,
+    media,
     loaded,
     loading,
     refreshing,

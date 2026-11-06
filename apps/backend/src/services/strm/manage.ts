@@ -50,6 +50,9 @@ import { RemoteDirNotFoundError, type DriveProvider } from "../drive/types.js";
 import { episodeKey, inspectStrm, isForeignStrm, showDirOf } from "./inspect.js";
 import { extOf, extSet, stripStrmExt, toStrmPath } from "./naming.js";
 import { hasReleaseNoise } from "../organize/parse-name.js";
+import { cachedProbesByPath, mediaBrief } from "../media/probe.js";
+import { normalizePath } from "../drive/types.js";
+import type { StrmMediaResult } from "@openstrm/shared";
 
 const log = moduleLogger("strm-manage");
 
@@ -68,6 +71,8 @@ export const STRM_LIMITS = {
   /** 逐个目录问网盘的上限（每个目录 1 次解析 + 至少 1 次列目录）；超过就改成拉一次整棵子树比对 */
   VERIFY_DIRS: 60,
   DELETE_MAX: 500,
+  /** 一次要媒体信息的 strm 数：列表一页顶多几百条 */
+  MEDIA_MAX: 500,
 } as const;
 
 /* ------------------------------- 依赖注入 ------------------------------- */
@@ -333,7 +338,45 @@ export async function readStrm(task: TaskDefinition, rel: string): Promise<StrmF
     matches: i.matches,
   };
   if (i.reason) info.reason = i.reason;
+  const remote = remoteAbsOf(i);
+  if (remote) {
+    const probe = cachedProbesByPath(task.account, [remote]).get(remote);
+    if (probe) info.media = mediaBrief(probe);
+  }
   return info;
+}
+
+/** strm 指向的网盘绝对路径：解析得出的优先，解析不出用应有的；都没有就 null */
+function remoteAbsOf(i: Pick<ReturnType<typeof inspectStrm>, "actualRemote" | "expectedRemote">): string | null {
+  const r = i.actualRemote || i.expectedRemote;
+  return r ? normalizePath(`/${r}`) : null;
+}
+
+/**
+ * 一批 strm 指向的网盘文件的实测媒体信息（整理页探测过、或 Emby 播放后回填过的才有）：读每个 strm 的内容定位网盘路径，
+ * 按账号 + 路径查探测缓存。读不到的、不是 strm 的、没缓存的都不在结果里；不碰网盘
+ */
+export async function mediaOf(task: TaskDefinition, rels: string[]): Promise<StrmMediaResult> {
+  const wanted = [...new Set(rels)].filter((r) => extOf(r) === ".strm");
+  const remoteOf = new Map<string, string>();
+  await mapLimit(wanted, 16, async (rel) => {
+    try {
+      const mp = await resolveManagedPath(task, rel);
+      const content = await readTextCapped(mp.full, STRM_LIMITS.MAX_STRM_BYTES);
+      if (content === null) return;
+      const remote = remoteAbsOf(inspectStrm(task, mp.rel, content));
+      if (remote) remoteOf.set(mp.rel, remote);
+    } catch {
+      /* 不存在、是目录、越界：这一条就是没有 */
+    }
+  });
+  const probes = cachedProbesByPath(task.account, [...remoteOf.values()]);
+  const media: StrmMediaResult["media"] = {};
+  for (const [rel, remote] of remoteOf) {
+    const probe = probes.get(remote);
+    if (probe) media[rel] = mediaBrief(probe);
+  }
+  return { media };
 }
 
 export async function search(task: TaskDefinition, q: string, limit: number = STRM_LIMITS.SEARCH_DEFAULT): Promise<StrmSearchResult> {
