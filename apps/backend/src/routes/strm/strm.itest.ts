@@ -835,3 +835,56 @@ test("媒体信息：按 strm 指向的网盘路径查探测缓存，同一路�
     __test_resetMediaProbes();
   }
 });
+
+test("媒体信息：开了路径编码的任务按解码后的路径查；段首尾的空白照原样；文件名对不上的、兄弟任务的 strm 不查；同一路径两行大小不同取新的", async () => {
+  __test_resetMediaProbes();
+  const enc: TaskDefinition = { id: "r-enc", account: "acc", accountType: "115", originPath: "tv", targetPath: "strm-itest/enc", strmPrefix: "http://h/d", enablePathEncoding: true };
+  // 和 r-main 共用输出目录的兄弟任务（OpenList 账号）
+  const twin: TaskDefinition = { ...tOl, id: "r-twin", targetPath: "strm-itest/tv" };
+  replaceTasks([t115, tOl, tPoster, enc, twin]);
+  const ENC_ROOT = path.join(DATA_DIR, "strm-itest", "enc");
+  // 内容和写出来的一字不差（目录名有空格，文件名没有：内容只有目录段带 %20，解析时原样留着）
+  writeUnder(ENC_ROOT, "Show Name (2024)/Season 1/Show.Name.S01E01.strm", "http://h/d/tv/Show%20Name%20(2024)/Season%201/Show.Name.S01E01.mkv");
+  // 括号编码成 %28 %29 的旧内容：和应有的不一样，要按解析出来的路径解码后查
+  writeUnder(ENC_ROOT, "Show Name (2024)/Season 1/Show.Name.S01E02.strm", "http://h/d/tv/Show%20Name%20%282024%29/Season%201/Show.Name.S01E02.mkv");
+  write("Show/Season 1 /ep5.strm", "/mnt/pan/tv/Show/Season 1 /ep5.mkv");
+  write("Show/Season 1/ep6.strm", "/mnt/pan/tv/Show/Season 1/ep7.mkv");
+  write("Show/Season 1/ep8.strm", "/mnt/ol/x/Show/Season 1/ep8.mkv");
+  write("Show/Season 1/ep9.strm", "/mnt/pan/tv/Show/Season 1/ep9.mkv");
+  const probe = (bytesRead: number, codec: string, height = 1080) => ({ video: { codec, width: height === 2160 ? 3840 : 1920, height }, audio: [{ codec: "AAC", channels: 2 }], subtitles: [], bytesRead });
+  const row = (key: string, p: string, data: ReturnType<typeof probe>, size = 1, probedAt = 1) => putMediaProbe({ accountName: "acc", key, path: p, size, status: "ok", data, error: "", probedAt });
+  row("id:e1", "/tv/Show Name (2024)/Season 1/Show.Name.S01E01.mkv", probe(4096, "HEVC"));
+  row("id:e2", "/tv/Show Name (2024)/Season 1/Show.Name.S01E02.mkv", probe(4096, "AV1"));
+  row("id:e5", "/tv/Show/Season 1 /ep5.mkv", probe(4096, "HEVC"));
+  // ep6.strm 指向 ep7：指到的和应有的都有缓存，都不能拿来充数
+  row("id:e6", "/tv/Show/Season 1/ep6.mkv", probe(4096, "HEVC"));
+  row("id:e7", "/tv/Show/Season 1/ep7.mkv", probe(4096, "HEVC"));
+  // ep8.strm 是兄弟任务的：不按前缀对不上的兜底去查本账号的 ep8
+  row("id:e8", "/tv/Show/Season 1/ep8.mkv", probe(4096, "HEVC"));
+  // ep9：旧的读过文件头（1080p H.264、大小 100），新的 Emby 回填（2160p HEVC、大小 200）——大小不同是换过文件了，取新的
+  row("id:e9", "/tv/Show/Season 1/ep9.mkv", probe(4096, "H.264"), 100, 1);
+  row("path:/tv/Show/Season 1/ep9.mkv", "/tv/Show/Season 1/ep9.mkv", probe(0, "HEVC", 2160), 200, 2);
+  try {
+    const encRes = await post("/api/strm/media", { taskId: "r-enc", paths: ["Show Name (2024)/Season 1/Show.Name.S01E01.strm", "Show Name (2024)/Season 1/Show.Name.S01E02.strm"] });
+    assert.equal(encRes.statusCode, 200, encRes.body);
+    const encMedia = encRes.json<StrmMediaResult>().media;
+    assert.equal(encMedia["Show Name (2024)/Season 1/Show.Name.S01E01.strm"]?.videoCodec, "HEVC", "内容一字不差：按本地路径查");
+    assert.equal(encMedia["Show Name (2024)/Season 1/Show.Name.S01E02.strm"]?.videoCodec, "AV1", "解析出来的路径解码后查");
+    const res = await post("/api/strm/media", { taskId: "r-main", paths: ["Show/Season 1 /ep5.strm", "Show/Season 1/ep6.strm", "Show/Season 1/ep8.strm", "Show/Season 1/ep9.strm"] });
+    assert.equal(res.statusCode, 200, res.body);
+    const { media } = res.json<StrmMediaResult>();
+    assert.deepEqual(Object.keys(media).sort(), ["Show/Season 1 /ep5.strm", "Show/Season 1/ep9.strm"]);
+    assert.deepEqual([media["Show/Season 1/ep9.strm"].resolution, media["Show/Season 1/ep9.strm"].videoCodec, media["Show/Season 1/ep9.strm"].source], ["2160p", "HEVC", "emby"]);
+    const file6 = (await get(`/api/strm/file?${q({ taskId: "r-main", path: "Show/Season 1/ep6.strm" })}`)).json<StrmFileInfo>();
+    assert.equal(file6.reason, "name-mismatch");
+    assert.equal(file6.media, undefined, "file 接口同样不充数");
+    const file8 = (await get(`/api/strm/file?${q({ taskId: "r-main", path: "Show/Season 1/ep8.strm" })}`)).json<StrmFileInfo>();
+    assert.equal(file8.media, undefined, "兄弟任务的 strm 不查");
+  } finally {
+    __test_resetMediaProbes();
+    replaceTasks([t115, tOl, tPoster]);
+    fs.rmSync(ENC_ROOT, { recursive: true, force: true });
+    fs.rmSync(path.join(ROOT, "Show", "Season 1 "), { recursive: true, force: true });
+    for (const f of ["ep6", "ep8", "ep9"]) fs.rmSync(path.join(ROOT, "Show", "Season 1", `${f}.strm`), { force: true });
+  }
+});

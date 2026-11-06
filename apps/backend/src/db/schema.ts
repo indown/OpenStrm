@@ -724,5 +724,9 @@ export const mediaProbes = sqliteTable(
     error: text("error").notNull().default(""),
     probedAt: integer("probed_at").notNull().default(sql`(unixepoch())`),
   },
-  (t) => ({ pk: primaryKey({ columns: [t.accountName, t.key] }) }),
+  (t) => ({
+    pk: primaryKey({ columns: [t.accountName, t.key] }),
+    /** strm 页按 strm 指向的网盘路径查（getMediaProbesByPaths） */
+    pathIdx: index("media_probes_account_path_idx").on(t.accountName, t.path),
+  }),
 );

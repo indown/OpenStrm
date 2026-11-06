@@ -10,7 +10,7 @@
  *   - 标题末尾不补零的数字（`某剧10`）在季目录里、或同名的兄弟已经有集数时当集数；整个标题就是数字的（`129 4K.mp4`）
  *     在季目录里、或上级就是这部作品的目录时当集数（`promoteEpisodeNumbers`）。
  */
-import type { MediaBrief, MediaProbeTags, OrganizeFileKind } from "@openstrm/shared";
+import type { MediaBrief, MediaProbeTags, OrganizeFileKind, OrganizeKindOverride } from "@openstrm/shared";
 import { stripInvisible } from "../../lib/text.js";
 import { isArtDirName, isEditionOnlyName, isExtrasDirName, normalizeTitle, numericTitle, parseMediaName, seasonDirNumber, trailingNumber, type ParsedName, type TrailingNumber } from "./parse-name.js";
 import { applyRules, type DirectSpec, type ParsedRule } from "./rules.js";
@@ -44,6 +44,14 @@ export interface UnitFile {
   probe?: MediaProbeTags;
   /** 和 probe 同一来源的实测媒体信息：界面画旗标、判文件名冲突用 */
   media?: MediaBrief;
+}
+
+/**
+ * 这个文件按花絮处理吗：人改判了（单元上的 kinds）听人的，否则看目录和名字。
+ * 规划（plan.ts）、作品的媒体汇总、探测编码的目标都按这一个口径，花絮不套模板，探了也没处用
+ */
+export function asExtraFile(file: Pick<UnitFile, "inExtrasDir" | "parsed">, override?: OrganizeKindOverride): boolean {
+  return override === "extra" || (override !== "video" && (file.inExtrasDir || file.parsed.isExtra === true));
 }
 
 export interface Unit {

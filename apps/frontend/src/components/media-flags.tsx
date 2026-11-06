@@ -19,7 +19,14 @@ const FAMILY_CLASS: Record<FlagFamily, string> = {
   warn: "border-warning/30 bg-warning/12 font-sans tracking-normal normal-case text-warning",
 };
 
-const GROUPS: Array<{ key: string; families: FlagFamily[]; Icon?: typeof Monitor; label: string }> = [
+interface FlagGroup {
+  key: string;
+  families: FlagFamily[];
+  Icon?: typeof Monitor;
+  label: string;
+}
+
+const GROUPS: FlagGroup[] = [
   { key: "picture", families: ["video", "hdr"], Icon: Monitor, label: "画面" },
   { key: "audio", families: ["audio"], Icon: AudioLines, label: "声音" },
   { key: "subs", families: ["subs"], Icon: Captions, label: "字幕" },
@@ -27,6 +34,9 @@ const GROUPS: Array<{ key: string; families: FlagFamily[]; Icon?: typeof Monitor
   { key: "plain", families: ["plain"], label: "" },
   { key: "warn", families: ["warn"], label: "" },
 ];
+
+/** 不分组就是一组、没有图标 */
+const ALL: FlagGroup = { key: "all", families: ["video", "hdr", "audio", "subs", "source", "plain", "warn"], label: "" };
 
 export function Flag({ flag, className }: { flag: MediaFlag; className?: string }) {
   return (
@@ -50,19 +60,9 @@ export function MediaFlags({ flags, grouped = false, max, className, title }: { 
   const more = flags.length - shown.length;
   const all = title ?? (more > 0 ? flags.map((f) => f.label).join(" · ") : undefined);
   const key = (f: MediaFlag, i: number) => `${f.family}-${f.label}-${i}`;
-  if (!grouped) {
-    return (
-      <span className={cn("inline-flex flex-wrap items-center gap-1", className)} title={all}>
-        {shown.map((f, i) => (
-          <Flag key={key(f, i)} flag={f} />
-        ))}
-        {more > 0 && <span className="text-[11px] text-muted-foreground">+{more}</span>}
-      </span>
-    );
-  }
-  const groups = GROUPS.map((g) => ({ ...g, flags: shown.filter((f) => g.families.includes(f.family)) })).filter((g) => g.flags.length > 0);
+  const groups = (grouped ? GROUPS : [ALL]).map((g) => ({ ...g, flags: shown.filter((f) => g.families.includes(f.family)) })).filter((g) => g.flags.length > 0);
   return (
-    <span className={cn("inline-flex flex-wrap items-center gap-x-3 gap-y-1", className)} title={all}>
+    <span className={cn("inline-flex flex-wrap items-center", grouped ? "gap-x-3 gap-y-1" : "gap-1", className)} title={all}>
       {groups.map((g) => (
         <span key={g.key} className="inline-flex flex-wrap items-center gap-1">
           {g.Icon && <g.Icon className="mr-0.5 size-3.5 shrink-0 text-muted-foreground" aria-label={g.label} />}

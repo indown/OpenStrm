@@ -47,8 +47,8 @@ import { writeStrm } from "../download/rate-limited.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
 import { isTaskRunning } from "../task/registry.js";
 import { RemoteDirNotFoundError, type DriveProvider } from "../drive/types.js";
-import { episodeKey, inspectStrm, isForeignStrm, showDirOf } from "./inspect.js";
-import { extOf, extSet, stripStrmExt, toStrmPath } from "./naming.js";
+import { episodeKey, inspectStrm, isForeignStrm, showDirOf, type StrmInspection } from "./inspect.js";
+import { decodeSegments, extOf, extSet, stripStrmExt, toStrmPath } from "./naming.js";
 import { hasReleaseNoise } from "../organize/parse-name.js";
 import { cachedProbesByPath, mediaBrief } from "../media/probe.js";
 import { normalizePath } from "../drive/types.js";
@@ -338,7 +338,7 @@ export async function readStrm(task: TaskDefinition, rel: string): Promise<StrmF
     matches: i.matches,
   };
   if (i.reason) info.reason = i.reason;
-  const remote = remoteAbsOf(i);
+  const remote = remoteAbsOf(task, i, content, sameRootSiblings(task, listTasks()));
   if (remote) {
     const probe = cachedProbesByPath(task.account, [remote]).get(remote);
     if (probe) info.media = mediaBrief(probe);
@@ -346,32 +346,59 @@ export async function readStrm(task: TaskDefinition, rel: string): Promise<StrmF
   return info;
 }
 
-/** strm 指向的网盘绝对路径：解析得出的优先，解析不出用应有的；都没有就 null */
-function remoteAbsOf(i: Pick<ReturnType<typeof inspectStrm>, "actualRemote" | "expectedRemote">): string | null {
-  const r = i.actualRemote || i.expectedRemote;
-  return r ? normalizePath(`/${r}`) : null;
+/**
+ * strm 指向的网盘绝对路径，查探测缓存用。和整理页写缓存时的路径（run-state.ts 的 absOf）同一口径：originPath 归一、后面的段原样，
+ * 段首尾的空白留着（normalizePath 会削掉，削了就查不到了）。
+ *   - 内容和应有的一字不差：按本地路径算；解析得出的按任务的编码开关解码（整理页记的是解码后的路径）；
+ *   - 只有前缀对不上（换过前缀 / 挂载路径）才用应有的兜底；文件名对不上的是指向了别的文件，拿应有的那个文件的信息充数会张冠李戴；
+ *   - 共用输出目录的兄弟任务的 strm 不是这个账号的文件，不查
+ */
+function remoteAbsOf(task: TaskDefinition, i: StrmInspection, content: string, siblings: TaskDefinition[]): string | null {
+  if (siblings.length > 0 && isForeignStrm(content, task, siblings)) return null;
+  let r = i.matches || i.reason === "prefix-mismatch" ? i.expectedRemote : i.actualRemote;
+  if (!r) return null;
+  if (task.enablePathEncoding && r !== i.expectedRemote) r = decodeSegments(r);
+  const rawOrigin = task.originPath.replace(/^\/+|\/+$/g, "");
+  const rel = r === rawOrigin ? "" : r.startsWith(`${rawOrigin}/`) ? r.slice(rawOrigin.length + 1) : null;
+  if (rel === null) return `/${r.split("/").filter(Boolean).join("/")}`;
+  const origin = normalizePath(task.originPath);
+  return rel ? `${origin === "/" ? "" : origin}/${rel.replace(/^\/+/, "")}` : origin;
+}
+
+/** 根之下的一个路径，只做词法检查（normalizeRel 拒绝 `..`），不像 resolveManagedPath 那样每个都 realpath 两次 */
+function underRoot(root: ManagedPath, relInput: string): ManagedPath | null {
+  const rel = normalizeRel(relInput);
+  const full = rel ? path.join(root.root, ...rel.split("/")) : root.root;
+  if (full !== root.root && !full.startsWith(root.root + path.sep)) return null;
+  return { ...root, full, rel };
 }
 
 /**
  * 一批 strm 指向的网盘文件的实测媒体信息（整理页探测过、或 Emby 播放后回填过的才有）：读每个 strm 的内容定位网盘路径，
- * 按账号 + 路径查探测缓存。读不到的、不是 strm 的、没缓存的都不在结果里；不碰网盘
+ * 按账号 + 路径查探测缓存。读不到的、不是 strm 的、兄弟任务的、没缓存的都不在结果里；不碰网盘。
+ * 一页几百个文件，每个都走 resolveManagedPath 的两次 realpath 在网络盘上要几百毫秒：根解析一次，每个文件只做词法检查——
+ * 这里只读 strm 的内容当查缓存的键、什么都不写，经符号链接读到越界的文本也只是查不到
  */
 export async function mediaOf(task: TaskDefinition, rels: string[]): Promise<StrmMediaResult> {
+  const media: StrmMediaResult["media"] = {};
   const wanted = [...new Set(rels)].filter((r) => extOf(r) === ".strm");
+  if (wanted.length === 0) return { media };
+  const root = await resolveManagedPath(task, "");
+  const siblings = sameRootSiblings(task, listTasks());
   const remoteOf = new Map<string, string>();
   await mapLimit(wanted, 16, async (rel) => {
     try {
-      const mp = await resolveManagedPath(task, rel);
+      const mp = underRoot(root, rel);
+      if (!mp) return;
       const content = await readTextCapped(mp.full, STRM_LIMITS.MAX_STRM_BYTES);
       if (content === null) return;
-      const remote = remoteAbsOf(inspectStrm(task, mp.rel, content));
+      const remote = remoteAbsOf(task, inspectStrm(task, mp.rel, content), content, siblings);
       if (remote) remoteOf.set(mp.rel, remote);
     } catch {
       /* 不存在、是目录、越界：这一条就是没有 */
     }
   });
   const probes = cachedProbesByPath(task.account, [...remoteOf.values()]);
-  const media: StrmMediaResult["media"] = {};
   for (const [rel, remote] of remoteOf) {
     const probe = probes.get(remote);
     if (probe) media[rel] = mediaBrief(probe);

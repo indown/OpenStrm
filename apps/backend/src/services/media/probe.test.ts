@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MediaInfoResult } from "mediainfo.js";
-import { probeView, mainAudio, mediaBrief, probeFromResult, probeKey, probeSummary, probeTags, resolutionLabel } from "./probe.js";
+import { probeView, mainAudio, mediaBrief, probeFromResult, probeKey, probeSummary, probeTags, resolutionLabel, type MediaProbe } from "./probe.js";
 import type { ProbeSource } from "./mediainfo.js";
 
 const result = (tracks: Array<Record<string, unknown>>): MediaInfoResult => ({ media: { "@ref": "", track: tracks } }) as unknown as MediaInfoResult;
@@ -76,6 +76,8 @@ test("没有视频轨就是 null；没有音轨的标签里没有 audio；高度
 });
 
 test("分辨率标签按高度，宽屏 / 竖版按宽度兜底", () => {
+  assert.equal(resolutionLabel(7680, 4320), "4320p");
+  assert.equal(resolutionLabel(7680, 3200), "4320p", "2.4:1 的 8K 高度只有 3200");
   assert.equal(resolutionLabel(3840, 2160), "2160p");
   assert.equal(resolutionLabel(3840, 1600), "2160p", "2.4:1 的 4K 高度只有 1600");
   assert.equal(resolutionLabel(1920, 1080), "1080p");
@@ -149,4 +151,17 @@ test("mediaBrief：主音轨 / Atmos / 字幕语言去重、读文件头是 prob
   // 没有音轨 / 字幕的也站得住
   const bare = mediaBrief({ audio: [], subtitles: [], bytesRead: 10 });
   assert.deepEqual(bare, { audioCount: 0, subtitleLanguages: [], source: "probe" });
+});
+
+test("mediaBrief：und / zxx 这种占位语言码不算语言（Emby 照抄 ffprobe 的 tag），别的照常", () => {
+  const p: MediaProbe = {
+    video: { codec: "H.264", width: 1920, height: 1080 },
+    audio: [{ codec: "AAC", channels: 2, language: "und", isDefault: true }],
+    subtitles: [{ codec: "subrip", language: "und" }, { codec: "subrip", language: "zxx" }, { codec: "subrip", language: "zh" }, { codec: "subrip", language: "en" }],
+    bytesRead: 0,
+  };
+  const b = mediaBrief(p);
+  assert.equal(b.audioLanguage, undefined);
+  assert.deepEqual(b.subtitleLanguages, ["zh", "en"]);
+  assert.equal(mediaBrief({ ...p, audio: [{ codec: "AAC", channels: 2, language: "eng" }] }).audioLanguage, "eng");
 });

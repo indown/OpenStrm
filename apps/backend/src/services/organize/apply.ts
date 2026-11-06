@@ -3,6 +3,7 @@
  */
 import type { OrganizeItem, OrganizeRun, OrganizeSkipResult, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
 import { bumpAttempts, getRun, listItems, listRunsByStatus, listUnits, recallMatch, rememberMatch, repathMatches, updateItem, updateItems, updateRun } from "../../db/repositories/organize.js";
+import { repathMediaProbes } from "../../db/repositories/media-probes.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { isAbortError } from "../../lib/errors.js";
@@ -477,6 +478,8 @@ export function afterApply(task: TaskDefinition, provider: DriveProvider, units:
   }
   // 复制队列按文件跟：整理最常见的是「一集挪进作品目录、顺手改名」，所在目录没腾空，目录级映射里没有它
   const fileMoves = movedFiles(task, items, "done");
+  // 探测缓存里记的路径也跟着文件走：strm 页按 strm 指向的新路径查缓存，不跟就查不到
+  repathMediaProbes(provider.account.name, fileMoves.map((m) => ({ from: absOf(task, m.from), to: absOf(task, m.to) })));
   if (mappings.length === 0 && fileMoves.length === 0) return;
   const rewritten =
     (mappings.length > 0 ? rewriteFollowSubPaths(task.id, mappings).length + rewriteOfflineSubPaths(task.id, mappings).length : 0) +

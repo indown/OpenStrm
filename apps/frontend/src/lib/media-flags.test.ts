@@ -4,26 +4,28 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MediaBrief, OrganizeUnitMedia } from "@openstrm/shared";
-import { audioFlags, briefDetails, briefTitle, displayCodec, displayResolution, flagsFromBrief, flagsFromHdhive, flagsFromTags, flagsFromUnitMedia, langLabel, posterMarks, subtitleLabel, unitMediaTitle } from "./media-flags";
+import { audioFlags, briefDetails, briefTitle, displayResolution, flagsFromBrief, flagsFromHdhive, flagsFromTags, flagsFromUnitMedia, langLabel, posterMarks, subtitleLabel, unitMediaTitle } from "./media-flags";
 
 const brief = (extra: Partial<MediaBrief> = {}): MediaBrief => ({ audioCount: 1, subtitleLanguages: [], source: "probe", ...extra });
-const unit = (extra: Partial<OrganizeUnitMedia> = {}): OrganizeUnitMedia => ({ videos: 1, probed: 1, resolution: [], videoCodec: [], bitDepth: [], hdr: [], audio: [], conflicts: 0, ...extra });
+const unit = (extra: Partial<OrganizeUnitMedia> = {}): OrganizeUnitMedia => ({ videos: 1, probed: 1, lacking: 0, resolution: [], videoCodec: [], bitDepth: [], hdr: [], audio: [], conflicts: 0, ...extra });
 
-test("显示口径：2160p 写成 4K，编码写法归一，语言代码一个字，字幕超过三种折成 +N", () => {
+test("显示口径：2160p 写成 4K，语言代码一个字，字幕超过三种折成 +N", () => {
   assert.deepEqual(["2160p", "4320p", "1080p"].map(displayResolution), ["4K", "8K", "1080p"]);
-  assert.deepEqual(["x265", "H.265", "HEVC", "x264", "AVC", "AV1"].map(displayCodec), ["HEVC", "HEVC", "HEVC", "H.264", "H.264", "AV1"]);
   assert.deepEqual(["zh", "zh-Hans-CN", "eng", "xx"].map(langLabel), ["中", "中", "英", "xx"]);
   assert.equal(subtitleLabel(["zh", "en"]), "中 / 英");
   assert.equal(subtitleLabel(["zh-Hans-CN", "zh-Hant-TW", "en"]), "中 / 英", "简繁都是中，按显示名去重");
   assert.equal(subtitleLabel(["zh", "en", "ja", "ko", "fr"]), "中 / 英 / 日 +2");
 });
 
-test("音频标签拆旗：Atmos 单独一枚，EAC3 归成 DDP", () => {
+test("音频标签拆旗：Atmos 单独一枚；写法已经是后端归一过的，这里不再改", () => {
   assert.deepEqual(audioFlags("DDP 5.1 Atmos"), [
     { label: "DDP 5.1", family: "audio" },
     { label: "Atmos", family: "audio" },
   ]);
-  assert.deepEqual(audioFlags("EAC3 5.1"), [{ label: "DDP 5.1", family: "audio" }]);
+  assert.deepEqual(audioFlags("DTS-HD TrueHD 7.1 Atmos"), [
+    { label: "DTS-HD TrueHD 7.1", family: "audio" },
+    { label: "Atmos", family: "audio" },
+  ]);
   assert.deepEqual(audioFlags("Atmos"), [{ label: "Atmos", family: "audio" }]);
 });
 
@@ -49,10 +51,13 @@ test("文件表：实测信息按画面 / HDR / 声音 / 字幕出旗，冲突�
   assert.deepEqual(flagsFromBrief(brief({ videoCodec: "H.264", bitDepth: 8, audioCodec: "AAC" })).map((f) => f.label), ["H.264", "AAC"]);
 });
 
-test("悬停全文：来源、宽高、帧率、码率、时长、音轨数、字幕、截断", () => {
-  const media = brief({ width: 3840, height: 2160, frameRate: 23.976, bitrateKbps: 78000, durationMs: 6720000, container: "Matroska", audioCount: 4, subtitleLanguages: ["zh", "en"], truncated: true });
-  assert.equal(briefTitle(media), "读文件头探测 · 3840×2160 · 23.976 fps · 78.0 Mbps · 1 小时 52 分 · Matroska · 4 条音轨 · 字幕 zh / en · 只读了文件头的一部分，时长 / 靠后的字幕可能缺");
-  assert.equal(briefTitle(brief({ source: "emby", bitrateKbps: 640, durationMs: 42 * 60000 })), "Emby 分析回填 · 640 kbps · 42 分");
+test("悬停全文：和详情面板同一份数据，一行一项（画面里带编码 / 位深 / HDR，音轨里带主音轨）", () => {
+  const media = brief({ width: 3840, height: 2160, videoCodec: "HEVC", bitDepth: 10, hdr: "DV", frameRate: 23.976, bitrateKbps: 78000, durationMs: 6720000, container: "Matroska", audioCodec: "TrueHD", channels: "7.1", atmos: true, audioLanguage: "en", audioCount: 4, subtitleLanguages: ["zh", "en"], truncated: true });
+  assert.equal(
+    briefTitle(media),
+    ["来源：读文件头探测", "画面：3840×2160 · HEVC · 10bit · DV · 23.976 fps", "视频码率：78.0 Mbps", "时长：1 小时 52 分", "容器：Matroska", "音轨：4 条，主音轨 TrueHD 7.1 Atmos en", "字幕：zh / en", "备注：只读了文件头的一部分，时长 / 靠后的字幕可能缺"].join("\n"),
+  );
+  assert.equal(briefTitle(brief({ source: "emby", bitrateKbps: 640, durationMs: 42 * 60000 })), "来源：Emby 分析回填\n视频码率：640 kbps\n时长：42 分\n音轨：1 条");
 });
 
 test("作品卡片：只有一种取值且全部视频都有就一枚，不然每种带 ×N；音频只在齐全时拆 Atmos；冲突计数一枚 warn", () => {
@@ -68,7 +73,7 @@ test("作品卡片：只有一种取值且全部视频都有就一枚，不然�
     videoCodec: [{ value: "HEVC", count: 7 }],
     bitDepth: [{ value: "10bit", count: 4 }],
     audio: [
-      { value: "EAC3 5.1 Atmos", count: 7 },
+      { value: "DDP 5.1 Atmos", count: 7 },
       { value: "AAC 2.0", count: 3 },
     ],
     conflicts: 2,

@@ -172,6 +172,7 @@ export function resolutionLabel(width: number | undefined, height: number | unde
   const h = height ?? 0;
   const w = width ?? 0;
   if (!h && !w) return undefined;
+  if (h >= 4000 || w >= 7000) return "4320p";
   if (h >= 2000 || w >= 3800) return "2160p";
   if (h >= 1000 || w >= 1900) return "1080p";
   if (h >= 700 || w >= 1260) return "720p";
@@ -200,12 +201,16 @@ export function probeTags(p: MediaProbe): MediaProbeTags {
 }
 
 
-/** 给界面的精简版：主音轨、字幕语言去重、来源按 bytesRead 分（Emby 回填的是 0） */
+/** ISO 639 的占位码：und 是没标语言、zxx 是没有语言内容（纯音乐）；Emby 照抄 ffprobe 的 tag，写出来没意义 */
+const PLACEHOLDER_LANG = /^(und|zxx)$/i;
+const langOf = (l: string | undefined): string | undefined => (l && !PLACEHOLDER_LANG.test(l) ? l : undefined);
+
+/** 给界面的精简版：主音轨、字幕语言去重（占位码不算）、来源按 bytesRead 分（Emby 回填的是 0） */
 export function mediaBrief(p: MediaProbe): MediaBrief {
   const a = mainAudio(p);
   const brief: MediaBrief = {
     audioCount: p.audio.length,
-    subtitleLanguages: [...new Set(p.subtitles.map((s) => s.language).filter((l): l is string => !!l))],
+    subtitleLanguages: [...new Set(p.subtitles.map((s) => langOf(s.language)).filter((l): l is string => !!l))],
     source: p.bytesRead > 0 ? "probe" : "emby",
   };
   const resolution = resolutionLabel(p.video?.width, p.video?.height);
@@ -221,7 +226,8 @@ export function mediaBrief(p: MediaProbe): MediaBrief {
   const channels = a ? channelsLabel(a.channels) : "";
   if (channels) brief.channels = channels;
   if (a?.atmos) brief.atmos = true;
-  if (a?.language) brief.audioLanguage = a.language;
+  const lang = langOf(a?.language);
+  if (lang) brief.audioLanguage = lang;
   if (p.container) brief.container = p.container;
   if (p.durationMs) brief.durationMs = p.durationMs;
   if (p.truncated) brief.truncated = true;
@@ -356,9 +362,19 @@ export function cachedProbes(accountName: string, targets: ProbeTarget[]): Map<s
   return out;
 }
 
+const readHeader = (r: MediaProbeRow): boolean => (r.data?.bytesRead ?? 0) > 0;
+
+/** 同一路径的两行哪个更可信：两行记的大小都有、又不一样，是先后两个文件（原来那个被换掉了），取新的；否则取读过文件头的，再取新的 */
+function betterByPath(a: MediaProbeRow, b: MediaProbeRow): boolean {
+  if (a.size > 0 && b.size > 0 && a.size !== b.size) return a.probedAt > b.probedAt;
+  if (readHeader(a) !== readHeader(b)) return readHeader(a);
+  return a.probedAt > b.probedAt;
+}
+
 /**
- * 按网盘绝对路径找缓存（strm 页用，手里只有路径没有 id）：同一路径有两行时取读过文件头的，再取新的。
- * 按 id 记的行里 path 是探测当时的路径，文件被整理挪过之后按新路径查不到；Emby 回填的会按新路径再写一行
+ * 按网盘绝对路径找缓存（strm 页用，手里只有路径没有 id）：同一路径可能有两行（按 id 记的 + Emby 回填的），按 betterByPath 取。
+ * 按 id 记的行里 path 是探测当时的路径：整理执行 / 撤销挪过的文件跟着改（apply.ts / revert.ts 的 repathMediaProbes），
+ * 别的途径挪的按新路径查不到，等 Emby 播放后按新路径回填
  */
 export function cachedProbesByPath(accountName: string, paths: string[]): Map<string, MediaProbe> {
   const out = new Map<string, MediaProbe>();
@@ -367,8 +383,7 @@ export function cachedProbesByPath(accountName: string, paths: string[]): Map<st
   for (const row of getMediaProbesByPaths(accountName, [...new Set(paths)])) {
     if (row.status !== "ok" || !row.data) continue;
     const had = best.get(row.path);
-    const better = !had || (row.data.bytesRead > 0 && !(had.data!.bytesRead > 0)) || (row.data.bytesRead > 0 === had.data!.bytesRead > 0 && row.probedAt > had.probedAt);
-    if (better) best.set(row.path, row);
+    if (!had || betterByPath(row, had)) best.set(row.path, row);
   }
   for (const [path, row] of best) out.set(path, row.data!);
   return out;

@@ -1,7 +1,8 @@
 /**
  * 媒体旗标：探测结果 / 文件名标签 / 搜索标题标签统一成一排小旗（components/media-flags.tsx 画）。
  * 分家上色：画面（分辨率 / 编码 / 位深）、HDR、声音、字幕、片源；别的（季集 / 体积 / 完结）不上色。
- * 显示口径：2160p 写成 4K，HEVC / H.265 / x265 归成 HEVC，EAC3 / DD+ 归成 DDP。
+ * 显示口径：2160p 写成 4K、语言代码一个字。编码 / 音频写法的归一（x265 → HEVC、EAC3 → DDP、声道 Atmos 的顺序）在后端做
+ * （services/organize/media-info.ts 和 media/probe.ts），这里拿到的已经是统一写法。
  * 这里只有纯函数，方便单测；方案见 .claude/plans/media-flags.md
  */
 import type { MediaBrief, MediaConflict, MediaValueCount, OrganizeUnitMedia } from "@openstrm/shared";
@@ -19,21 +20,6 @@ export interface MediaFlag {
 
 export const displayResolution = (v: string): string => (/^2160p$/i.test(v) ? "4K" : /^4320p$/i.test(v) ? "8K" : v);
 
-/** 视频编码写法归一（显示用）；认不出的原样 */
-export function displayCodec(v: string): string {
-  const c = v.toLowerCase().replace(/[\s.-]/g, "");
-  if (c === "x265" || c === "h265" || c === "hevc") return "HEVC";
-  if (c === "x264" || c === "h264" || c === "avc") return "H.264";
-  return v;
-}
-
-/** 音频编码写法归一（显示用） */
-export function displayAudioCodec(v: string): string {
-  const c = v.toLowerCase().replace(/[\s.-]/g, "");
-  if (c === "eac3" || c === "dd+" || c === "ddp") return "DDP";
-  return v;
-}
-
 const LANG_LABEL: Record<string, string> = { zh: "中", chi: "中", zho: "中", en: "英", eng: "英", ja: "日", jpn: "日", ko: "韩", kor: "韩", fr: "法", fra: "法", fre: "法", de: "德", ger: "德", deu: "德", es: "西", spa: "西", it: "意", ita: "意", ru: "俄", rus: "俄", pt: "葡", por: "葡", th: "泰", tha: "泰", vi: "越", vie: "越", ar: "阿", ara: "阿", hi: "印地", hin: "印地" };
 
 /** 语言代码 → 一个字（zh-Hans-CN 也按 zh）；认不出的原样 */
@@ -47,14 +33,11 @@ export const subtitleLabel = (langs: readonly string[]): string => {
 
 const HDR_TITLE: Record<string, string> = { DV: "Dolby Vision（多半带 HDR10 兼容层）", "HDR10+": "HDR10+", HDR10: "HDR10", HLG: "HLG", HDR: "HDR（PQ 曲线，没有静态元数据）" };
 
-/** 把 `DDP 5.1 Atmos` / `DTS-HD MA TrueHD 7.1 Atmos` 这种音频标签拆成旗标：Atmos 单独一枚 */
+/** 把 `DDP 5.1 Atmos` / `DTS-HD TrueHD 7.1 Atmos` 这种音频标签拆成旗标：Atmos 单独一枚 */
 export function audioFlags(audio: string): MediaFlag[] {
   const words = audio.split(/\s+/).filter(Boolean);
   const atmos = words.some((w) => /^atmos$/i.test(w));
-  const rest = words
-    .filter((w) => !/^atmos$/i.test(w))
-    .map(displayAudioCodec)
-    .join(" ");
+  const rest = words.filter((w) => !/^atmos$/i.test(w)).join(" ");
   const out: MediaFlag[] = [];
   if (rest) out.push({ label: rest, family: "audio" });
   if (atmos) out.push({ label: "Atmos", family: "audio" });
@@ -68,10 +51,10 @@ export function flagsFromBrief(media: MediaBrief | undefined, conflicts: readonl
   if (!media) return [];
   const out: MediaFlag[] = [];
   if (media.resolution) out.push({ label: displayResolution(media.resolution), family: "video", title: media.width && media.height ? `${media.width}×${media.height}` : media.resolution });
-  if (media.videoCodec) out.push({ label: displayCodec(media.videoCodec), family: "video" });
+  if (media.videoCodec) out.push({ label: media.videoCodec, family: "video" });
   if (media.bitDepth && media.bitDepth > 8) out.push({ label: `${media.bitDepth}bit`, family: "video" });
   if (media.hdr) out.push({ label: media.hdr, family: "hdr", title: HDR_TITLE[media.hdr] });
-  if (media.audioCodec) out.push({ label: [displayAudioCodec(media.audioCodec), media.channels].filter(Boolean).join(" "), family: "audio" });
+  if (media.audioCodec) out.push({ label: [media.audioCodec, media.channels].filter(Boolean).join(" "), family: "audio" });
   if (media.atmos) out.push({ label: "Atmos", family: "audio" });
   if (media.audioLanguage) out.push({ label: langLabel(media.audioLanguage), family: "audio", title: `主音轨语言 ${media.audioLanguage}` });
   if (media.subtitleLanguages.length > 0) out.push({ label: subtitleLabel(media.subtitleLanguages), family: "subs", title: `字幕 ${media.subtitleLanguages.join(" / ")}` });
@@ -84,26 +67,15 @@ const durationLabel = (ms: number): string => {
   return min >= 60 ? `${Math.floor(min / 60)} 小时 ${min % 60} 分` : `${min} 分`;
 };
 
-/** 文件表那行的悬停全文：来源、宽高、帧率、码率、时长、容器、音轨数、字幕、截断 */
-export function briefTitle(media: MediaBrief): string {
-  const parts = [media.source === "emby" ? "Emby 分析回填" : "读文件头探测"];
-  if (media.width && media.height) parts.push(`${media.width}×${media.height}`);
-  if (media.frameRate) parts.push(`${Number(media.frameRate.toFixed(3))} fps`);
-  if (media.bitrateKbps) parts.push(media.bitrateKbps >= 1000 ? `${(media.bitrateKbps / 1000).toFixed(1)} Mbps` : `${media.bitrateKbps} kbps`);
-  if (media.durationMs) parts.push(durationLabel(media.durationMs));
-  if (media.container) parts.push(media.container);
-  if (media.audioCount > 1) parts.push(`${media.audioCount} 条音轨`);
-  if (media.subtitleLanguages.length > 0) parts.push(`字幕 ${media.subtitleLanguages.join(" / ")}`);
-  if (media.truncated) parts.push("只读了文件头的一部分，时长 / 靠后的字幕可能缺");
-  return parts.join(" · ");
-}
+/** 文件表那行 / strm 行的悬停全文：和详情面板同一份数据（briefDetails），一行一项 */
+export const briefTitle = (media: MediaBrief): string => briefDetails(media).map((d) => `${d.label}：${d.value}`).join("\n");
 
-/** strm 详情面板的「媒体信息」块：一行一项，和 briefTitle 同一份数据 */
+/** strm 详情面板的「媒体信息」块：来源、画面、码率、时长、容器、音轨（含主音轨）、字幕、截断备注；没有的项不出现 */
 export function briefDetails(media: MediaBrief): Array<{ label: string; value: string }> {
   const out: Array<{ label: string; value: string }> = [{ label: "来源", value: media.source === "emby" ? "Emby 分析回填" : "读文件头探测" }];
   const picture = [
     media.width && media.height ? `${media.width}×${media.height}` : "",
-    media.videoCodec ? displayCodec(media.videoCodec) : "",
+    media.videoCodec ?? "",
     media.bitDepth && media.bitDepth > 8 ? `${media.bitDepth}bit` : "",
     media.hdr ?? "",
     media.frameRate ? `${Number(media.frameRate.toFixed(3))} fps` : "",
@@ -113,7 +85,7 @@ export function briefDetails(media: MediaBrief): Array<{ label: string; value: s
   if (media.durationMs) out.push({ label: "时长", value: durationLabel(media.durationMs) });
   if (media.container) out.push({ label: "容器", value: media.container });
   if (media.audioCount > 0) {
-    const main = [media.audioCodec ? displayAudioCodec(media.audioCodec) : "", media.channels ?? "", media.atmos ? "Atmos" : "", media.audioLanguage ?? ""].filter(Boolean).join(" ");
+    const main = [media.audioCodec ?? "", media.channels ?? "", media.atmos ? "Atmos" : "", media.audioLanguage ?? ""].filter(Boolean).join(" ");
     out.push({ label: "音轨", value: `${media.audioCount} 条${main ? `，主音轨 ${main}` : ""}` });
   }
   if (media.subtitleLanguages.length > 0) out.push({ label: "字幕", value: media.subtitleLanguages.join(" / ") });
@@ -131,18 +103,16 @@ export function posterMarks(tags: readonly string[] | undefined): MediaFlag[] {
   return out;
 }
 
-/** 作品卡片那行：某项只有一种取值且全部视频都有就一枚，不然每种一枚带 ×N；音频只在一种取值且齐全时才拆出 Atmos */
+/** 作品卡片那行：某项只有一种取值且全部正片都有就一枚，不然每种一枚带 ×N；音频只在一种取值且齐全时才拆出 Atmos */
 export function flagsFromUnitMedia(media: OrganizeUnitMedia | undefined): MediaFlag[] {
   if (!media) return [];
   const full = (list: MediaValueCount[]) => list.length === 1 && list[0].count === media.videos;
   const spread = (list: MediaValueCount[], family: FlagFamily, label: (v: string) => string = (v) => v, title?: (v: string) => string | undefined): MediaFlag[] =>
     list.map((e) => ({ label: full(list) ? label(e.value) : `${label(e.value)} ×${e.count}`, family, ...(title?.(e.value) ? { title: title(e.value) } : {}) }));
-  const audio = full(media.audio)
-    ? audioFlags(media.audio[0].value)
-    : media.audio.map((e) => ({ label: `${e.value.split(/\s+/).map(displayAudioCodec).join(" ")} ×${e.count}`, family: "audio" as const }));
+  const audio = full(media.audio) ? audioFlags(media.audio[0].value) : spread(media.audio, "audio");
   return [
     ...spread(media.resolution, "video", displayResolution),
-    ...spread(media.videoCodec, "video", displayCodec),
+    ...spread(media.videoCodec, "video"),
     ...spread(media.bitDepth, "video"),
     ...spread(media.hdr, "hdr", (v) => v, (v) => HDR_TITLE[v]),
     ...audio,

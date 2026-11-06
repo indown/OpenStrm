@@ -90,9 +90,14 @@ export function useStrmBrowser() {
     entriesRef.current = entries;
   }, [entries]);
 
+  /** 问过媒体信息的 strm 路径（见下面「媒体信息」）；在这里声明是因为 load 要清它 */
+  const mediaAsked = useRef(new Set<string>());
+
   const load = useCallback(async () => {
     if (!taskId) return;
     const seq = ++seqRef.current;
+    // 重新拉目录（刷新、换目录）：问过的媒体信息忘掉，列出来再问一遍——整理页探过 / Emby 回填过的这时才会出现
+    mediaAsked.current = new Set();
     setLoading(true);
     setRefreshing(true);
     try {
@@ -194,34 +199,39 @@ export function useStrmBrowser() {
   }, [mode, results, entries, query]);
 
   /* ------------------------------ 媒体信息 ------------------------------ */
-  // 列出来的 strm 按 200 一批问一次实测媒体信息（整理页探测过或 Emby 回填过的才有），按路径记着不重复问；
-  // 旗标只是锦上添花，拿不到就不画，不报错
-  const [media, setMedia] = useState<Record<string, MediaBrief>>({});
-  const mediaAsked = useRef(new Set<string>());
+  // 列出来的 strm 按 200 一批问一次实测媒体信息（整理页探测过或 Emby 回填过的才有）。问成了的按路径记着不重复问，
+  // 在问的也记着（筛一下、列表变一下不会重复发），没问成的（超时、5xx）下次列到再问；换任务全忘掉，换目录 / 刷新在 load 里忘掉。
+  // 旗标只是锦上添花，拿不到就不画，不报错。用 Map 不用对象：根目录下条目的路径就是名字，叫 constructor 的目录会撞上对象原型
+  const [media, setMedia] = useState<ReadonlyMap<string, MediaBrief>>(() => new Map());
+  const mediaPending = useRef(new Set<string>());
+  const mediaTask = useRef(taskId);
   useEffect(() => {
+    mediaTask.current = taskId;
     mediaAsked.current = new Set();
-    setMedia({});
+    mediaPending.current = new Set();
+    setMedia(new Map());
   }, [taskId]);
   useEffect(() => {
     if (!taskId) return;
-    const want = visible.filter((e) => !e.isDir && e.kind === "strm" && !mediaAsked.current.has(e.path)).map((e) => e.path);
+    const want = visible.filter((e) => !e.isDir && e.kind === "strm" && !mediaAsked.current.has(e.path) && !mediaPending.current.has(e.path)).map((e) => e.path);
     if (want.length === 0) return;
-    for (const p of want) mediaAsked.current.add(p);
-    let alive = true;
+    for (const p of want) mediaPending.current.add(p);
     void (async () => {
       for (let i = 0; i < want.length; i += 200) {
+        const batch = want.slice(i, i + 200);
         try {
-          const res = await api.strm.media(taskId, want.slice(i, i + 200));
-          if (!alive) return;
-          if (Object.keys(res.media).length > 0) setMedia((m) => ({ ...m, ...res.media }));
+          const res = await api.strm.media(taskId, batch);
+          if (mediaTask.current !== taskId) return;
+          for (const p of batch) mediaAsked.current.add(p);
+          const got = Object.entries(res.media);
+          if (got.length > 0) setMedia((m) => new Map([...m, ...got]));
         } catch {
-          /* 没有旗标而已 */
+          /* 没有旗标而已；下次列到再问 */
+        } finally {
+          for (const p of batch) mediaPending.current.delete(p);
         }
       }
     })();
-    return () => {
-      alive = false;
-    };
   }, [taskId, visible]);
 
   const allSelected = visible.length > 0 && visible.every((e) => selected.has(e.path));

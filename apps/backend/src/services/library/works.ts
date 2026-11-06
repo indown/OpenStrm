@@ -48,6 +48,7 @@ function groupToWork(g: units.WorkGroup): LibraryWork {
 }
 
 function unitToWork(u: units.UnitRow): LibraryWork {
+  const tags = unitTags(u.rawName, u.sampleFile);
   return {
     key: units.unitWorkKey(u.sourceId, u.unitKey),
     tmdbId: null,
@@ -62,7 +63,7 @@ function unitToWork(u: units.UnitRow): LibraryWork {
     size: u.size,
     seasons: u.seasons,
     addedAt: u.createdAt,
-    ...(unitTags(u.rawName, u.sampleFile).length ? { tags: unitTags(u.rawName, u.sampleFile) } : {}),
+    ...(tags.length ? { tags } : {}),
   };
 }
 

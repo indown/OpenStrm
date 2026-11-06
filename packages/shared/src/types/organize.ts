@@ -183,12 +183,16 @@ export interface MediaValueCount {
 
 /**
  * 一个作品单元的媒体信息汇总（作品卡片上画旗标用）：各项取值的分布按出现次数降序，只有一种取值就是全部一致。
- * 取值是模板口径（文件名优先、探测兜底），bitDepth 只有实测值。只在预览的单元结构还在内存里时带
+ * 取值是模板口径（文件名优先、探测兜底）再归一（4K → 2160p、x265 → HEVC、EAC3 → DDP；文件名写 SDR 的不出现在 hdr 里），
+ * bitDepth 只有实测值。只在预览的单元结构还在内存里时带
  */
 export interface OrganizeUnitMedia {
+  /** 正片数：花絮 / 样片（人改判的听人的）和取消勾选的不算 */
   videos: number;
   /** 有实测信息（读文件头 / Emby 回填）的视频数 */
   probed: number;
+  /** 文件名缺模板要用的标签、又没有实测信息的视频数：run 头部那枚「探测过 M / N」按钮探的就是它们，为 0 时按钮没用 */
+  lacking: number;
   resolution: MediaValueCount[];
   videoCodec: MediaValueCount[];
   bitDepth: MediaValueCount[];

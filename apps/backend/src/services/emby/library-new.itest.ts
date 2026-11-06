@@ -12,6 +12,7 @@ import { KEY } from "../../db/keys.js";
 import { listTasks, replaceTasks } from "../../db/repositories/tasks.js";
 import { __test_resetMediaProbes, countMediaProbes, getMediaProbes, putMediaProbe } from "../../db/repositories/media-probes.js";
 import { cachedProbeTags, probeTags } from "../media/probe.js";
+import { probeFromEmbyStreams } from "../media/emby-streams.js";
 import type { NotifyEvent } from "../notify.js";
 import {
   __test_resetEmbyNew,
@@ -374,4 +375,16 @@ test("预热：Emby 探不到的只问一次不反复问；关掉开关不问；
   busy = false;
   await tickEmbyNew();
   assert.deepEqual(pbiCalls, ["c-1"], "空下来那轮就问了");
+});
+
+test("Emby 自己的流只有 VideoRange + ExtendedVideoType（VideoRangeType 是 Jellyfin 的字段）：DolbyVision 认成 DV、None 不算 HDR、只有 VideoRange 的算 HDR", () => {
+  const hdrOf = (video: Record<string, unknown>) => probeFromEmbyStreams({ path: "/mnt/tv/A/A.S01E01.mkv", streams: [{ Type: "Video", Codec: "hevc", Width: 3840, Height: 2160, ...video }] })?.video?.hdr;
+  assert.equal(hdrOf({ VideoRange: "HDR", ExtendedVideoType: "DolbyVision" }), "DV");
+  assert.equal(hdrOf({ VideoRange: "HDR", ExtendedVideoType: "Hdr10Plus" }), "HDR10+");
+  assert.equal(hdrOf({ VideoRange: "HDR", ExtendedVideoType: "Hdr10" }), "HDR10");
+  assert.equal(hdrOf({ VideoRange: "HDR", ExtendedVideoType: "Hlg" }), "HLG");
+  assert.equal(hdrOf({ VideoRange: "SDR", ExtendedVideoType: "None" }), undefined);
+  assert.equal(hdrOf({ VideoRange: "HDR" }), "HDR", "只知道是 HDR：标 HDR，分不出是不是 DV（冲突判定对它网开一面）");
+  assert.equal(hdrOf({ VideoRange: "HDR", VideoRangeType: "DOVI" }), "DV");
+  assert.equal(hdrOf({ VideoRange: "SDR", VideoRangeType: "SDR" }), undefined);
 });

@@ -20,8 +20,8 @@ import { TmdbClient, type TmdbApi, type TmdbClientOptions } from "./identify.js"
 import { isLocalUnitKey, type LocalUnit } from "./local-naming.js";
 import type { EpisodeFill, ScopeRoot } from "./plan.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
-import { AUDIO_EXTS, type ScopeEntry, type Unit } from "./units.js";
-import { unitMedia } from "./media-info.js";
+import { AUDIO_EXTS, asExtraFile, type ScopeEntry, type Unit, type UnitFile } from "./units.js";
+import { probeVarsOf, unitMedia } from "./media-info.js";
 
 /** 整理挪完之后，复制待办的目标目录按新路径重算（层级跟着源走） */
 export const copyLayout = (base: string, rootPath: string | undefined, srcPath: string): string => dstDirFor(base, rootPath, srcPath).dstDir;
@@ -310,12 +310,20 @@ export function mergeEntries(state: PlanState, extra: ScopeEntry[]): void {
 export const planStates = new Map<string, PlanState>();
 
 /** 单元上带媒体信息汇总（作品卡片的旗标）：只在预览的单元结构还在内存里时有，不落库 */
+/** 媒体汇总 / 探测编码的目标里不算的文件：花絮、样片（人改判了听人的）和取消勾选的。单元行上记的是绝对路径，文件上的是相对任务目录的 */
+export function mediaSkipOf(task: TaskDefinition, row: Pick<OrganizeUnit, "kinds" | "excluded"> | undefined): (f: UnitFile) => boolean {
+  const kinds = new Map(Object.entries(row?.kinds ?? {}).map(([p, k]) => [relOf(task, p), k]));
+  const excluded = new Set((row?.excluded ?? []).map((p) => relOf(task, p)));
+  return (f) => excluded.has(f.path) || asExtraFile(f, kinds.get(f.path));
+}
+
 export function decorateUnitsWithMedia(runId: string, units: OrganizeUnit[]): OrganizeUnit[] {
   const state = planStates.get(runId);
   if (!state) return units;
+  const wanted = probeVarsOf(state.org);
   return units.map((row) => {
     const unit = state.units.get(row.key);
-    const media = unit ? unitMedia(unit) : undefined;
+    const media = unit ? unitMedia(unit, { skip: mediaSkipOf(state.task, row), wanted }) : undefined;
     return media ? { ...row, media } : row;
   });
 }

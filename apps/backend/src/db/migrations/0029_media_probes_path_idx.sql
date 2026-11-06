@@ -1,0 +1,1 @@
+CREATE INDEX `media_probes_account_path_idx` ON `media_probes` (`account_name`,`path`);

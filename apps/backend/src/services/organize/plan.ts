@@ -22,7 +22,7 @@ import { isNamedAfter, normalizeTitle, trailingNumber } from "./parse-name.js";
 import type { ResolvedOrganizeSettings } from "./settings.js";
 import { pickCategory } from "./settings.js";
 import { episodeToken, idTagFor, pad2, pad3, renderTemplate, type TemplateVars } from "./template.js";
-import type { Unit, UnitFile } from "./units.js";
+import { asExtraFile, type Unit, type UnitFile } from "./units.js";
 
 export interface PlannedItem {
   unitKey: string;
@@ -338,11 +338,8 @@ export function planUnit(input: UnitPlanInput, ctx: PlanContext): UnitPlan {
     const name = r?.how === "custom" ? r.name?.trim() : undefined;
     return name ? withExt(name, file.ext) : undefined;
   };
-  /** 这个文件按花絮处理吗：人改判了听人的，否则看目录和名字 */
-  const asExtra = (file: UnitFile): boolean => {
-    const k = input.kinds?.get(file.path);
-    return k === "extra" || (k !== "video" && (file.inExtrasDir || file.parsed.isExtra === true));
-  };
+  /** 这个文件按花絮处理吗：人改判了听人的，否则看目录和名字（units.ts 的 asExtraFile，和媒体汇总 / 探测目标同一口径） */
+  const asExtra = (file: UnitFile): boolean => asExtraFile(file, input.kinds?.get(file.path));
   /** 用户给这个文件改的名字套在算出来的目标上：目录照旧，没写扩展名就补上 */
   const renamed = (file: UnitFile, dst: string): string => {
     const name = input.renames?.get(file.path)?.trim();

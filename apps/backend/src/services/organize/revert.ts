@@ -3,6 +3,7 @@
  */
 import type { OrganizeItem, OrganizeRun, OrganizeUnit, TaskDefinition } from "@openstrm/shared";
 import { bumpAttempts, getRun, listItems, listLeftoverDirs, listRunsByStatus, listUnits, repathMatches, updateItem, updateRun } from "../../db/repositories/organize.js";
+import { repathMediaProbes } from "../../db/repositories/media-probes.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { isAbortError } from "../../lib/errors.js";
@@ -294,6 +295,8 @@ export function afterRevert(task: TaskDefinition, provider: DriveProvider, units
     .map((m) => ({ from: m.to, to: m.from, root: m.root }))
     .sort((a, b) => b.from.length - a.from.length);
   const fileMoves = movedFiles(task, items, "reverted");
+  // 探测缓存里的路径跟着退回去（和 afterApply 对称）
+  repathMediaProbes(provider.account.name, fileMoves.map((m) => ({ from: absOf(task, m.from), to: absOf(task, m.to) })));
   if (back.length === 0 && fileMoves.length === 0) return;
   if (back.length > 0) {
     rewriteFollowSubPaths(task.id, back);

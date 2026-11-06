@@ -12,7 +12,7 @@ import axios, { type AxiosResponse } from "axios";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AccountInfo, AppSettings, OrganizeItem, OrganizeProbeResult, OrganizeRun, OrganizeRunDetail, OrganizeRunSummary, OrganizeTemplatePreview, OrganizeUnit, TaskDefinition, OrganizeSkip } from "@openstrm/shared";
 import type { MediaInfoResult } from "mediainfo.js";
-import { __test_resetMediaProbes, putMediaProbe } from "../../db/repositories/media-probes.js";
+import { __test_resetMediaProbes, getMediaProbes, putMediaProbe } from "../../db/repositories/media-probes.js";
 import { setProbeDeps } from "../../services/media/probe.js";
 import { registerErrorHandling } from "../../plugins/error-handler.js";
 import { authPlugin } from "../../plugins/auth.js";
@@ -85,6 +85,9 @@ before(async () => {
   drive.tree.addFile("/movies/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv");
   drive.tree.addFile("/movies/probe/Dune.Part.Two.2024.mkv", { size: 1000 });
   drive.tree.addFile("/movies/probe-conflict/Dune.Part.Two.2024.1080p.x264.mkv", { size: 1000 });
+  drive.tree.addFile("/movies/probe-extras/Dune.Part.Two.2024.2160p.x265.mkv", { size: 1000 });
+  drive.tree.addFile("/movies/probe-extras/Dune.Part.Two.2024.Trailer.1080p.x264.mkv", { size: 1000 });
+  drive.tree.addFile("/movies/probe-extras/Sample/dune.part.two.2024.sample.mkv", { size: 1000 });
   setDriveProviderFactory((a) => (a.name === "acc" ? drive : null));
   setOrganizeDeps({ tmdb: (_s, opts) => new StubTmdb(opts?.fresh === true), notify: async () => true, retryDelayMs: 5 });
 
@@ -134,12 +137,23 @@ test("建 run → 详情 → 改匹配 → 执行 → 撤销 → 删除", async 
   assert.equal(unit.match?.title, "沙丘");
   assert.equal(unit.dstRoot, "沙丘 (2021) [tmdbid=438631]");
 
+  // 这个文件探测过（按 id 记的）、Emby 也回填过（按路径记的）：执行后两行的路径都跟着文件走，撤销再跟回来
+  __test_resetMediaProbes();
+  const before = "/movies/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv";
+  const moved = "/movies/沙丘 (2021) [tmdbid=438631]/沙丘 (2021) - 2160p.mkv";
+  const dune = { video: { codec: "HEVC", width: 3840, height: 2160 }, audio: [], subtitles: [], bytesRead: 1 };
+  putMediaProbe({ accountName: "acc", key: "id:dune", path: before, size: 0, status: "ok", data: dune, error: "", probedAt: 1 });
+  putMediaProbe({ accountName: "acc", key: `path:${before}`, path: before, size: 0, status: "ok", data: { ...dune, bytesRead: 0 }, error: "", probedAt: 2 });
+
   const applying = await json<OrganizeRun>("POST", `/api/organize/runs/${run.id}/apply`);
   assert.equal(applying.status, "applying");
   const done = await untilStatus(run.id, ["done"]);
   assert.equal(done.run.stats.failed, 0);
   assert.ok(drive.tree.get("/movies/沙丘 (2021) [tmdbid=438631]/沙丘 (2021) - 2160p.mkv"));
   assert.equal(done.revertable.ok, true);
+  assert.equal(getMediaProbes("acc", ["id:dune"]).get("id:dune")?.path, moved, "按 id 记的缓存行跟着文件改路径");
+  assert.equal(getMediaProbes("acc", [`path:${moved}`]).get(`path:${moved}`)?.path, moved, "按路径记的行连键一起换");
+  assert.equal(getMediaProbes("acc", [`path:${before}`]).size, 0);
   // 记住了：记忆接口能看到、能删
   const matches = await json<{ matches: Array<{ srcPath: string }> }>("GET", "/api/organize/matches?account=acc");
   assert.equal(matches.matches.length, 1);
@@ -150,6 +164,9 @@ test("建 run → 详情 → 改匹配 → 执行 → 撤销 → 删除", async 
   const reverted = await untilStatus(run.id, ["reverted"]);
   assert.equal(reverted.run.status, "reverted");
   assert.ok(drive.tree.get("/movies/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv"));
+  assert.equal(getMediaProbes("acc", ["id:dune"]).get("id:dune")?.path, before, "撤销后路径跟回来");
+  assert.equal(getMediaProbes("acc", [`path:${before}`]).get(`path:${before}`)?.path, before);
+  __test_resetMediaProbes();
 
   await json("DELETE", `/api/organize/runs/${run.id}`);
   await json("GET", `/api/organize/runs/${run.id}`, undefined, 404);
@@ -424,8 +441,8 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     const run = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe" }, 201);
     const ready = await untilStatus(run.id, ["ready"]);
     const unit = ready.units.find((u) => u.match?.tmdbId === 693134)!;
-    // 还没探：汇总照样有（按文件名口径），只是什么都没认出来
-    assert.deepEqual(unit.media, { videos: 1, probed: 0, resolution: [], videoCodec: [], bitDepth: [], hdr: [], audio: [], conflicts: 0 });
+    // 还没探：汇总照样有（按文件名口径），只是什么都没认出来；默认模板用了 {resolution}，这个文件名没写，算缺标签
+    assert.deepEqual(unit.media, { videos: 1, probed: 0, lacking: 1, resolution: [], videoCodec: [], bitDepth: [], hdr: [], audio: [], conflicts: 0 });
     assert.equal((await app.inject({ method: "POST", url: `/api/organize/runs/${run.id}/probe`, headers: auth, payload: {} })).statusCode, 400);
     assert.equal((await app.inject({ method: "POST", url: `/api/organize/runs/${run.id}/probe`, headers: auth, payload: { key: "nope" } })).statusCode, 404);
     const r = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${run.id}/probe`, { key: unit.key });
@@ -440,6 +457,7 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     assert.deepEqual(probedDetail.units.find((u) => u.key === unit.key)?.media, {
       videos: 1,
       probed: 1,
+      lacking: 0,
       resolution: [{ value: "2160p", count: 1 }],
       videoCodec: [{ value: "HEVC", count: 1 }],
       bitDepth: [],
@@ -487,6 +505,15 @@ test("探测编码：key / keys / missing 至少给一个 400、没有的单元 
     const conflictDetail = await json<OrganizeRunDetail>("GET", `/api/organize/runs/${conflict.id}`);
     const conflictMedia = conflictDetail.units.find((u) => u.key === conflictUnit.key)?.media;
     assert.deepEqual([conflictMedia?.probed, conflictMedia?.resolution, conflictMedia?.videoCodec, conflictMedia?.conflicts], [1, [{ value: "1080p", count: 1 }], [{ value: "H.264", count: 1 }], 1]);
+    // 花絮 / 样片不是正片：汇总只数正片，探测目标也不含它们（文件名里的 2160p / x265 已归一成 2160p / HEVC）
+    __test_resetMediaProbes();
+    const extras = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "probe-extras" }, 201);
+    const extrasReady = await untilStatus(extras.id, ["ready"]);
+    const extrasUnit = extrasReady.units.find((u) => u.match?.tmdbId === 693134)!;
+    assert.deepEqual(extrasUnit.media, { videos: 1, probed: 0, lacking: 0, resolution: [{ value: "2160p", count: 1 }], videoCodec: [{ value: "HEVC", count: 1 }], bitDepth: [], hdr: [], audio: [], conflicts: 0 });
+    const extrasProbe = await json<OrganizeProbeResult>("POST", `/api/organize/runs/${extras.id}/probe`, { key: extrasUnit.key });
+    assert.equal(extrasProbe.probed, 1, `只探正片：${JSON.stringify(extrasProbe)}`);
+    assert.ok(extrasProbe.files[0].path.endsWith("/Dune.Part.Two.2024.2160p.x265.mkv"));
     const local = await json<OrganizeRun>("POST", "/api/organize/runs", { taskId: "t1", subPath: "refresh", naming: "local" }, 201);
     await untilStatus(local.id, ["ready"]);
     const bad = await app.inject({ method: "POST", url: `/api/organize/runs/${local.id}/probe`, headers: auth, payload: { missing: true } });

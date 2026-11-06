@@ -209,7 +209,7 @@ function StrmContent() {
     onCopy: () => void copyRow(row),
     onArchive: () => void archiveRow(row),
     copyBlocked: task?.copyBlocked ?? null,
-    media: b.media[row.path],
+    media: b.media.get(row.path),
   });
 
   const task = b.task;

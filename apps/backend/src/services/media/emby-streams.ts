@@ -22,15 +22,21 @@ export interface EmbyStreamSource {
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
-/** Emby 的 VideoRangeType（DOVI / HDR10 / HDR10Plus / HLG …）换成我们的标签 */
-function hdrOfEmby(rangeType: string | undefined, range: string | undefined): string | undefined {
-  const t = (rangeType ?? "").toLowerCase();
-  if (t.includes("dovi") || t.includes("dolby")) return "DV";
-  if (t.includes("hdr10plus") || t.includes("hdr10+")) return "HDR10+";
-  if (t.includes("hdr10")) return "HDR10";
-  if (t.includes("hlg")) return "HLG";
-  if (t && t !== "sdr") return hdrOf(rangeType, undefined, undefined) ?? "HDR";
-  return (range ?? "").toLowerCase() === "hdr" ? "HDR" : undefined;
+/**
+ * Emby 的 ExtendedVideoType（DolbyVision / Hdr10 / Hdr10Plus / Hlg / None）或 Jellyfin 式的 VideoRangeType（DOVI / HDR10 / HDR10Plus / HLG / SDR）
+ * 换成我们的标签；两个都没有就只能按 VideoRange 说是不是 HDR（分不出 DV）
+ */
+function hdrOfEmby(rangeType: string | undefined, extendedType: string | undefined, range: string | undefined): string | undefined {
+  const t = [rangeType, extendedType]
+    .map((v) => (v ?? "").toLowerCase())
+    .filter((v) => v && v !== "sdr" && v !== "none")
+    .join(" ");
+  if (!t) return (range ?? "").toLowerCase() === "hdr" ? "HDR" : undefined;
+  if (/dovi|dolby/.test(t)) return "DV";
+  if (/hdr10plus|hdr10\+/.test(t)) return "HDR10+";
+  if (/hdr10/.test(t)) return "HDR10";
+  if (/hlg/.test(t)) return "HLG";
+  return hdrOf(t, undefined, undefined) ?? "HDR";
 }
 
 /** 一个媒体源的流 → 探测结果；没有视频流就是 null */
@@ -49,7 +55,7 @@ export function probeFromEmbyStreams(source: EmbyStreamSource): MediaProbe | nul
       height: num(video.Height),
       frameRate: num(video.RealFrameRate) ?? num(video.AverageFrameRate),
       bitDepth: num(video.BitDepth),
-      hdr: hdrOfEmby(str(video.VideoRangeType), str(video.VideoRange)),
+      hdr: hdrOfEmby(str(video.VideoRangeType), str(video.ExtendedVideoType), str(video.VideoRange)),
       bitrateKbps: vBitrate !== undefined ? Math.round(vBitrate / 1000) : undefined,
     },
     audio: audio.map((a) => {

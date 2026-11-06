@@ -2,7 +2,7 @@
  * 预览：建 run → 列范围 → 分单元 → 识别（TMDB）→ 规划 → 落库；预览里改单元 / 换匹配；换匹配弹框的 TMDB 搜索。
  */
 import { randomUUID } from "node:crypto";
-import type { OrganizeKindOverride, OrganizeEpisodePin, OrganizeProbeResult, MediaProbeTags, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
+import type { OrganizeKindOverride, OrganizeEpisodePin, OrganizeProbeResult, OrganizeNaming, OrganizeCandidate, OrganizeConflictResolution, OrganizeHint, OrganizeItem, OrganizeMatch, OrganizeMatchMemory, OrganizeMediaType, OrganizeRun, OrganizeRunMode, OrganizeRunStats, OrganizeSeasonInfo, OrganizeTrigger, OrganizeUnit, OrganizeUnitPatch, TaskDefinition } from "@openstrm/shared";
 import { getAll as listLibraryEntries } from "../../db/repositories/media-library.js";
 import { getRun, getRunHints, getUnit, insertRun, listItems, listRunsByStatus, listUnits, recallMatch, replaceItems, replaceUnits, updateRun, updateUnit, type NewItem, listSkips } from "../../db/repositories/organize.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
@@ -25,16 +25,15 @@ import { duplicatePathFor, isStagingDir } from "../strm/staging.js";
 import { type UnitPlanInput, finalizeItems, planUnit, type EpisodeFill, type PlannedItem, type ScopeRoot, type UnitPlan, missingEpisodes } from "./plan.js";
 import { indexLocalStrm, mapLocalStrm, planLocalUnit, toSyntheticUnit } from "./local-naming.js";
 import { cachedProbes, mediaBrief, probeDriveFile, probeSummary, probeTags, type ProbeTarget } from "../media/probe.js";
-import { mediaConflicts } from "./media-info.js";
+import { lacksProbeTags, mediaConflicts, probeVarsOf } from "./media-info.js";
 import { isTaskRunning } from "../task/registry.js";
 import { parseRules } from "./rules.js";
 import { resolveOrganizeSettings } from "./settings.js";
 import { isNamedAfter, looksLikeReleaseDir } from "./parse-name.js";
 import { looksLikeFileName } from "../drive/walk.js";
 import { type UnitFile, buildUnits, type ScopeEntry, type Unit } from "./units.js";
-import { log, ORGANIZE_LIMITS, handPicked, deps, type Job, beginOp, jobLog, setProgress, baseOf, dirOf, joinRel, absOf, relOf, videoExtsOf, computeStats, runStartedAt, startJob, type PlanState, planContext, mergePreferId, mergeEntries, planStates, releaseHeldCopies, accountTasks } from "./run-state.js";
+import { log, ORGANIZE_LIMITS, handPicked, deps, type Job, beginOp, jobLog, setProgress, baseOf, dirOf, joinRel, absOf, relOf, videoExtsOf, computeStats, runStartedAt, startJob, type PlanState, planContext, mergePreferId, mergeEntries, planStates, releaseHeldCopies, accountTasks, mediaSkipOf } from "./run-state.js";
 import { applyRun } from "./apply.js";
-import { templateVarNames } from "./template.js";
 
 /* ------------------------------- 建 run ------------------------------- */
 
@@ -745,22 +744,24 @@ async function previewLocal(
 
 /* ------------------------------- 探测编码（mediainfo.js） ------------------------------- */
 
-const PROBE_VARS: Array<keyof MediaProbeTags> = ["resolution", "videoCodec", "audio", "hdr"];
-
-/** 模板里用到了哪些可以探测出来的标签：按解析器收变量名，`{audio:.}` 这种带后缀 / 兜底链的写法也算（按字面找 `{audio}` 会漏掉发布组写法里的音频） */
-function probeVarsOf(org: PlanState["org"]): Array<keyof MediaProbeTags> {
-  const names = new Set([...templateVarNames(org.templates.movie), ...templateVarNames(org.templates.tv)]);
-  return PROBE_VARS.filter((v) => names.has(v));
-}
-
 const probeTargetOf = (state: PlanState, file: UnitFile): ProbeTarget => ({ path: absOf(state.task, file.path), id: file.id, size: file.size });
 
-/** 文件名里缺模板要用的标签、探测结果里也没有 */
-const lacksProbeTags = (file: UnitFile, wanted: Array<keyof MediaProbeTags>): boolean => wanted.some((v) => !file.parsed.tags[v] && !file.probe?.[v]);
+const unitsOf = (state: PlanState, keys?: Iterable<string>): Unit[] => (keys ? [...keys].map((k) => state.units.get(k)).filter((u): u is Unit => !!u) : [...state.units.values()]);
 
+/** 单元里的全部视频（填缓存用：花絮有缓存也照样挂上，文件表要画旗标） */
 function videoFilesOf(state: PlanState, keys?: Iterable<string>): UnitFile[] {
-  const units = keys ? [...keys].map((k) => state.units.get(k)).filter((u): u is Unit => !!u) : [...state.units.values()];
-  return units.flatMap((u) => u.files.filter((f) => f.kind === "video"));
+  return unitsOf(state, keys).flatMap((u) => u.files.filter((f) => f.kind === "video"));
+}
+
+/**
+ * 要探测的视频：正片。花絮 / 样片不探（不套模板，探了也没处用；人改判的听人的），取消勾选的不探；
+ * 和作品汇总的 videos / lacking 同一口径，头部「探测过 M / N」按钮探的就是这些。预览自动探测时单元行还没落库，只看目录和名字
+ */
+function probeCandidatesOf(state: PlanState, keys: Iterable<string> | undefined, rows: ReadonlyMap<string, OrganizeUnit>): UnitFile[] {
+  return unitsOf(state, keys).flatMap((u) => {
+    const skip = mediaSkipOf(state.task, rows.get(u.key));
+    return u.files.filter((f) => f.kind === "video" && !skip(f));
+  });
 }
 
 /** 预览开始时把缓存里的探测结果填进单元文件（不碰网盘） */
@@ -780,7 +781,7 @@ function attachProbes(state: PlanState, accountName: string): void {
 async function autoProbe(job: Job, state: PlanState, provider: DriveProvider, signal: AbortSignal): Promise<void> {
   const wanted = probeVarsOf(state.org);
   if (wanted.length === 0) return;
-  const targets = videoFilesOf(state).filter((f) => lacksProbeTags(f, wanted));
+  const targets = probeCandidatesOf(state, undefined, new Map()).filter((f) => lacksProbeTags(f, wanted));
   if (targets.length === 0) return;
   let ok = 0;
   let cached = 0;
@@ -822,11 +823,12 @@ export async function probeUnits(runId: string, sel: ProbeSelection, opts: { ret
   const end = beginOp(runId);
   try {
     const wanted = probeVarsOf(state.org);
+    const rows = new Map(listUnits(runId).map((r) => [r.key, r]));
     let targets: UnitFile[];
-    if (sel.key) targets = videoFilesOf(state, [sel.key]);
+    if (sel.key) targets = probeCandidatesOf(state, [sel.key], rows);
     else {
-      const scope = sel.keys?.length ? sel.keys : listUnits(runId).filter((r) => r.selected).map((r) => r.key);
-      targets = wanted.length === 0 ? [] : videoFilesOf(state, scope).filter((f) => lacksProbeTags(f, wanted));
+      const scope = sel.keys?.length ? sel.keys : [...rows.values()].filter((r) => r.selected).map((r) => r.key);
+      targets = wanted.length === 0 ? [] : probeCandidatesOf(state, scope, rows).filter((f) => lacksProbeTags(f, wanted));
     }
     const ownerOf = new Map<UnitFile, string>();
     for (const u of state.units.values()) for (const f of u.files) ownerOf.set(f, u.key);
