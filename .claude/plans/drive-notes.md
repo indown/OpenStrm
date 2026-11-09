@@ -93,3 +93,10 @@
 ### 直链 403 先查 UA（2026-11-05）
 
 - 115 直链和取链时的 User-Agent 绑定：实验脚本里拿 `provider.downloadLink` 之后自己 `openRangeSource` 读，不带设置里的 `user-agent` 就一律 403，换文件、等两分钟都没用；带上就 206。看到 403 先查 UA，再怀疑同文件连接上限。
+
+### CD2 lab 实例（2026-11-09）
+
+- 镜像 `cloudnas/clouddrive2:latest`（2026-11-09 跑起来是 v1.1.3）：只挂 `-v …:/Config` 不够，还要 `-e CLOUDDRIVE_HOME=/Config`，不然登录状态 / 云盘授权 / API 令牌都留在容器层里，`docker rm` 就没了（这次的 lab 就是这样，收尾也就不用撤销令牌）。gRPC 是 19798 上的明文 h2c，浏览器登录页也在这个端口。
+- API 令牌按权限勾：「读」才能列目录 / forceRefresh；复制引擎要「复制」+「查看传输任务」，少了后者 `GetCopyTasks` 回 `PERMISSION_DENIED 7（get transfer tasks permission required）`，队列会改按目标目录核对；`GetAllCloudApis` 又是另一项权限，没勾就读不到事件监听状态。
+- CD2 对 115 开放平台自己会跟外部改动（撤销 11 秒后不刷新也列到了原名，多半是它的云盘事件监听），我们的 forceRefresh 对这种云盘多余但无害；对没有事件监听的云盘才有用，这次验不了。
+- 复制时目标目录里先是 `<名字>.clfstmp` + `.progress`，最终名出现才算完；单文件任务的 uploadedFiles 只有 0 / 1，进度没有中间值。115 开放平台直链下到 NAS 二十多 MB/s。
