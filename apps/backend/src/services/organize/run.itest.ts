@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
-import type { AccountInfo, AccountOpenlist, AppSettings, OrganizeRun, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AppSettings, OrganizeRun, TaskDefinition } from "@openstrm/shared";
 import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
 import { __test_resetOrganize, bumpOwnHit, deleteFinishedRunsBefore, findOwnOperation, insertRun, listItems, listRuns as listRunRows, listUnits, recallMatch, rememberMatch, replaceItems, updateItem, updateRun, addSkip, removeSkip } from "../../db/repositories/organize.js";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
@@ -27,7 +27,8 @@ import { FakeDrive, withoutWalk } from "../../test/fake-drive.js";
 import type { MediaInfoResult } from "mediainfo.js";
 import { __test_resetMediaProbes } from "../../db/repositories/media-probes.js";
 import { setProbeDeps } from "../media/probe.js";
-import { flushOpenlistRefresh, setOpenlistRefreshDeps, startOpenlistRefresh, stopOpenlistRefresh } from "../openlist/refresh.js";
+import { flushMountRefresh, setMountRefreshDeps, startMountRefresh, stopMountRefresh } from "../mount-cache/refresh.js";
+import { fakeMountTarget } from "../../test/fake-mount-target.js";
 import type { TmdbDetails, TmdbEpisode, TmdbSearchResult } from "../tmdb.js";
 import type { NotifyEvent } from "../notify.js";
 import type { TmdbApi } from "./identify.js";
@@ -2743,22 +2744,14 @@ test("不整理的目录：预览时挡在作品扫描之外，日志和详情�
 
 test("执行 / 撤销之后让 OpenList 刷新改过的目录：源和目标两边连同上级；腾空后删掉的源目录、撤销时删掉的新建目录不刷", async () => {
   const listed: string[] = [];
-  const olAccount: AccountOpenlist = { accountType: "openlist", name: "ol", account: "u", password: "p", url: "http://ol.local" };
-  setOpenlistRefreshDeps({
-    listDir: async (_acc, dir) => {
-      listed.push(dir);
-      return [];
-    },
-    config: () => ({ account: olAccount, mounts: { acc: "/quark" } }),
-    quietMs: 10,
-  });
-  startOpenlistRefresh();
+  setMountRefreshDeps({ targets: () => [fakeMountTarget({ mounts: { acc: "/quark" }, listed })], quietMs: 10 });
+  startMountRefresh();
   try {
     const run = await createRun({ taskId: "t1", subPath: "inbox" });
     await untilStatus(run.id, ["ready"]);
     await applyRun(run.id);
     await untilStatus(run.id, ["done"]);
-    await flushOpenlistRefresh();
+    await flushMountRefresh();
     const show = "/quark/tv/怒呛人生 (2023) [tmdbid=153312]";
     const movie = "/quark/tv/沙丘：第二部 (2024) [tmdbid=693134]";
     assert.deepEqual(new Set(listed), new Set(["/quark/tv", "/quark/tv/inbox", show, movie, `${show}/Season 01`]), "mkdir 项的父目录、文件两边的目录；不往上刷到根");
@@ -2767,14 +2760,14 @@ test("执行 / 撤销之后让 OpenList 刷新改过的目录：源和目标两�
     listed.length = 0;
     await revertRun(run.id);
     await untilStatus(run.id, ["reverted"]);
-    await flushOpenlistRefresh();
+    await flushMountRefresh();
     assert.deepEqual(
       new Set(listed),
       new Set(["/quark/tv", "/quark/tv/inbox", "/quark/tv/inbox/BEEF.S01.1080p"]),
       "退回来的源目录刷；撤销时删掉的作品目录 / 季目录不刷",
     );
   } finally {
-    stopOpenlistRefresh();
-    setOpenlistRefreshDeps(null);
+    stopMountRefresh();
+    setMountRefreshDeps(null);
   }
 });

@@ -704,7 +704,7 @@ function DirMenu({
         </DropdownMenuItem>
         <DropdownMenuItem disabled={Boolean(copyBlocked)} title={copyBlocked ?? undefined} onSelect={() => afterMenuClosed(onCopy)}>
           <Copy />
-          复制到 OpenList
+          复制到 OpenList / CD2
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => afterMenuClosed(onArchive)}>
           <Archive />
@@ -760,7 +760,7 @@ function StrmTableRow(p: RowProps) {
                   <Button variant="ghost" size="icon" className="size-8" title="查看" onClick={p.onOpen}>
                     <Eye className="size-4" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="size-8" title={p.copyBlocked ?? "复制到 OpenList"} disabled={Boolean(p.copyBlocked)} onClick={p.onCopy}>
+                  <Button variant="ghost" size="icon" className="size-8" title={p.copyBlocked ?? "复制到 OpenList / CD2"} disabled={Boolean(p.copyBlocked)} onClick={p.onCopy}>
                     <Copy className="size-4" />
                   </Button>
                   <Button variant="ghost" size="icon" className="size-8" title="归档到暂存区" onClick={p.onArchive}>
@@ -818,7 +818,7 @@ function StrmCard(p: RowProps) {
               <Eye className="size-4" />
               查看
             </Button>
-            <Button variant="ghost" size="icon" className="size-9" title={p.copyBlocked ?? "复制到 OpenList"} disabled={Boolean(p.copyBlocked)} onClick={p.onCopy}>
+            <Button variant="ghost" size="icon" className="size-9" title={p.copyBlocked ?? "复制到 OpenList / CD2"} disabled={Boolean(p.copyBlocked)} onClick={p.onCopy}>
               <Copy className="size-4" />
             </Button>
             <Button variant="ghost" size="icon" className="size-9" title="归档到暂存区" onClick={p.onArchive}>

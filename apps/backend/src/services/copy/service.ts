@@ -27,18 +27,12 @@ import { isAbortError, messageOf, networkErrorText } from "../../lib/errors.js";
 import { HttpError } from "../../lib/http-error.js";
 import { moduleLogger } from "../../lib/logger.js";
 import { createPollingLoop } from "../../lib/polling.js";
-import {
-  copyStateSucceeded,
-  openlistCopy,
-  openlistCopyTasks,
-  openlistListDir,
-  openlistMkdir,
-  OpenlistError,
-  type OpenlistTaskInfo,
-} from "../openlist/client.js";
+import { copyStateSucceeded, OpenlistError, type OpenlistTaskInfo } from "../openlist/client.js";
+import { cd2CopyEngine, openlistCopyEngine, type CopyEngine, type CopyTargetEntry } from "./engines.js";
+import { isCd2Missing } from "../cd2/client.js";
 import { notify, type NotifyEvent } from "../notify.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
-import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
+import { scheduleMountRefresh } from "../mount-cache/refresh.js";
 import { events } from "../events.js";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -61,6 +55,9 @@ import {
   toOpenlistPath,
   type CopyConfig,
   type CopyOptions,
+  copyEngineLabel,
+  copyEngineOf,
+  copyMountFieldLabel,
 } from "./paths.js";
 import {
   awaitingAfterRetry,
@@ -115,28 +112,14 @@ export const COPY_TRIGGER_LABEL: Record<CopyTrigger, string> = {
 /* ------------------------------- 依赖注入 ------------------------------- */
 
 /** OpenList 目标目录里的一条：核对复制全不全时比名字，文件再比大小（不知道大小的不比） */
-export interface OpenlistTargetEntry {
-  name: string;
-  isDir?: boolean;
-  size?: number;
-}
+/** 目标目录里的一条（名字、类型、大小），复制引擎列出来的 */
+export type OpenlistTargetEntry = CopyTargetEntry;
 
 interface Deps {
-  openlist: {
-    /** 刷新目录缓存并返回其中的条目名 */
-    listNames: (cfg: CopyConfig, dir: string) => Promise<string[]>;
-    /**
-     * 同上，但每条带类型和大小：事后处理源文件（copy/after.ts）核对目标里那份全不全时，文件还要比大小。
-     * 测试桩可以不给，那就只比名字（listOpenlistEntries 会按 listNames 补）
-     */
-    listEntries?: (cfg: CopyConfig, dir: string) => Promise<OpenlistTargetEntry[]>;
-    /** 建目标目录（OpenList 的 /fs/copy 不会自己建） */
-    mkdir: (cfg: CopyConfig, dir: string) => Promise<void>;
-    /** 提交复制；返回的任务和 names 一一对应 */
-    copy: (cfg: CopyConfig, srcDir: string, dstDir: string, names: string[]) => Promise<OpenlistTaskInfo[]>;
-    /** 复制任务的进行中 + 已结束列表 */
-    copyTasks: (cfg: CopyConfig) => Promise<{ undone: OpenlistTaskInfo[]; done: OpenlistTaskInfo[] }>;
-  };
+  /** OpenList 引擎（测试里往这上面打桩，和引擎设置无关） */
+  openlist: CopyEngine;
+  /** CloudDrive2 引擎 */
+  cd2: CopyEngine;
   notify: (event: NotifyEvent) => Promise<unknown>;
   settings: () => AppSettings;
   listTasks: () => TaskDefinition[];
@@ -159,13 +142,8 @@ interface Deps {
 }
 
 const realDeps: Deps = {
-  openlist: {
-    listNames: async (cfg, dir) => (await openlistListDir(cfg.account, dir, { refresh: true })).map((e) => e.name),
-    listEntries: async (cfg, dir) => (await openlistListDir(cfg.account, dir, { refresh: true })).map((e) => ({ name: e.name, isDir: e.is_dir, size: e.size })),
-    mkdir: (cfg, dir) => openlistMkdir(cfg.account, dir),
-    copy: (cfg, srcDir, dstDir, names) => openlistCopy(cfg.account, srcDir, dstDir, names),
-    copyTasks: (cfg) => openlistCopyTasks(cfg.account),
-  },
+  openlist: openlistCopyEngine,
+  cd2: cd2CopyEngine,
   notify,
   settings: readAppSettings,
   listTasks,
@@ -184,6 +162,9 @@ let deps: Deps = { ...realDeps };
 export function setCopyServiceDeps(partial: Partial<Deps> | null): void {
   deps = partial ? { ...realDeps, ...partial } : { ...realDeps };
 }
+
+/** 这份配置用哪个引擎：设置里选的（测试里桩在 openlist 上，不选 CD2 就走它） */
+const engineOf = (cfg: CopyConfig): CopyEngine => (cfg.engine === "cd2" ? deps.cd2 : deps.openlist);
 
 /**
  * 挪进归档、删本地 strm 这两步单独给「归档到暂存区」（copy/archive.ts）用：和复制后归档是同一个实现，桩也共用。
@@ -270,16 +251,19 @@ export function enqueueCopy(req: CopyRequest): CopyEnqueueResult {
       .filter((s) => s.path && s.path.trim());
     if (sources.length === 0) return { queued: 0, skipped: null };
 
+    const settings = deps.settings();
     let cfg: CopyConfig;
     try {
-      cfg = resolveCopyConfig(deps.settings());
+      cfg = resolveCopyConfig(settings);
     } catch (err) {
-      const why = `「复制到 OpenList」没配置好：${messageOf(err)}`;
+      const why = `「复制到 ${copyEngineLabel(copyEngineOf(settings))}」没配置好：${messageOf(err)}`;
       log.debug(`${req.account} 有 ${sources.length} 个新文件要复制，但${why}`);
       return { queued: 0, skipped: why };
     }
+    /** 状态里写明是谁在复制：引擎选了 CloudDrive2 的人看到「等着复制到 OpenList」会以为配错了 */
+    const who = copyEngineLabel(cfg.engine);
     if (!cfg.mounts[req.account]) {
-      const why = `账号 ${req.account} 没填「在 OpenList 里的挂载根」`;
+      const why = `账号 ${req.account} 没填${copyMountFieldLabel(cfg.engine)}`;
       log.debug(`${why}，这次的 ${sources.length} 个新文件不复制`);
       return { queued: 0, skipped: why };
     }
@@ -327,10 +311,10 @@ export function enqueueCopy(req: CopyRequest): CopyEnqueueResult {
         status: "pending",
         stage: "waiting",
         detail: flattened
-          ? "等着复制到 OpenList（路径不在任务目录下，平铺复制）"
+          ? `等着 ${who} 复制（路径不在任务目录下，平铺复制）`
           : req.holdForOrganize
             ? "等自动整理先在网盘上改完名再复制"
-            : "等着复制到 OpenList",
+            : `等着 ${who} 复制`,
         attempts: 0,
         waits: 0,
         misses: 0,
@@ -457,11 +441,13 @@ export function enqueueCopyFor(
 }
 
 /** OpenList 里某个目录的一层条目名（刷新缓存）。手动复制补齐时比对目标用；走 deps，测试能换成桩 */
-export const listOpenlistNames = (cfg: CopyConfig, dir: string): Promise<string[]> => deps.openlist.listNames(cfg, dir);
+export const listOpenlistNames = (cfg: CopyConfig, dir: string): Promise<string[]> => engineOf(cfg).listNames(cfg, dir);
 
 /** 同上，带类型和大小；桩只给了 listNames 的就只有名字 */
-export const listOpenlistEntries = async (cfg: CopyConfig, dir: string): Promise<OpenlistTargetEntry[]> =>
-  deps.openlist.listEntries ? deps.openlist.listEntries(cfg, dir) : (await deps.openlist.listNames(cfg, dir)).map((name) => ({ name }));
+export const listOpenlistEntries = async (cfg: CopyConfig, dir: string, opts?: { refresh?: boolean }): Promise<OpenlistTargetEntry[]> => {
+  const engine = engineOf(cfg);
+  return engine.listEntries ? engine.listEntries(cfg, dir, opts) : (await engine.listNames(cfg, dir)).map((name) => ({ name }));
+};
 
 /** 结果里去向的两个字段：afterCopy 是准的，deleteSource 是给一直读它的调用方留的 */
 export const withAfterCopy = (afterCopy: CopyAfterCopy): Pick<CopyOutcome, "afterCopy" | "deleteSource"> => ({ afterCopy, deleteSource: afterCopy === "delete" });
@@ -524,6 +510,7 @@ function flushNotifications(): void {
 
 /** OpenList 明确说「找不到」（不是连不上）：是挂载根填错了还是缓存没跟上，由 listSource 往上追着分 */
 export function isMissingDir(err: unknown): boolean {
+  if (isCd2Missing(err)) return true;
   return err instanceof OpenlistError && !err.transport && /not found|不存在|no such|object not found/i.test(err.message);
 }
 
@@ -571,7 +558,7 @@ async function tickPending(pending: CopyRecord[], due: CopyRecord[] = []): Promi
     }
     // 等着晚点再做去向的也做不了了（要先到 OpenList 核对复制全了没有）：收场
     for (const c of due) {
-      settleAfterRetry(c, `复制到 OpenList 的设置没了（${messageOf(err)}），${afterLabel(c)}不了`);
+      settleAfterRetry(c, `复制的设置没了（${messageOf(err)}），${afterLabel(c)}不了`);
       touched.add(c);
     }
     persist();
@@ -665,7 +652,7 @@ function sameTargetHold(c: CopyRecord, pending: CopyRecord[], claimed: Map<strin
  */
 async function listSource(cfg: CopyConfig, account: string, srcDir: string): Promise<{ names: string[] } | { missing: "mount" | "dir" }> {
   try {
-    return { names: await deps.openlist.listNames(cfg, srcDir) };
+    return { names: await engineOf(cfg).listNames(cfg, srcDir) };
   } catch (err) {
     if (!isMissingDir(err)) throw err;
   }
@@ -678,14 +665,14 @@ async function listSource(cfg: CopyConfig, account: string, srcDir: string): Pro
   }
   for (const dir of chain) {
     try {
-      await deps.openlist.listNames(cfg, dir);
+      await engineOf(cfg).listNames(cfg, dir);
     } catch (err) {
       if (!isMissingDir(err)) throw err;
       return { missing: dir === mount ? "mount" : "dir" };
     }
   }
   try {
-    return { names: await deps.openlist.listNames(cfg, srcDir) };
+    return { names: await engineOf(cfg).listNames(cfg, srcDir) };
   } catch (err) {
     if (!isMissingDir(err)) throw err;
     return { missing: srcDir === mount ? "mount" : "dir" };
@@ -694,6 +681,7 @@ async function listSource(cfg: CopyConfig, account: string, srcDir: string): Pro
 
 /** 阶段一：确认产物在 OpenList 里可见，然后成批提交复制 */
 async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRecord[], touched: Set<CopyRecord>, persist: () => void): Promise<void> {
+  const who = copyEngineLabel(cfg.engine);
   if (items.length === 0) return;
   const groups = new Map<string, { account: string; srcDir: string; dstDir: string; items: CopyRecord[] }>();
   /** 这一轮已经分进组的目标文件：同一个目标只让一个来源提交 */
@@ -712,7 +700,7 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
     origin.set(c.id, fullPathOf(c));
     const srcDir = toOpenlistPath(cfg.mounts, c.account, c.srcDir);
     if (!srcDir) {
-      finish(c, "failed", `账号 ${c.account} 没填「在 OpenList 里的挂载根」，不知道 ${c.srcDir} 在 OpenList 的哪里`);
+      finish(c, "failed", `账号 ${c.account} 没填「在 ${who} 里的挂载根」，不知道 ${c.srcDir} 在 ${who} 的哪里`);
       continue;
     }
     const held = overlapHold(c, pending) ?? sameTargetHold(c, pending, claimed);
@@ -736,12 +724,12 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
         const mount = cfg.mounts[g.account];
         if (listed.missing === "mount") {
           // 挂载根填错了：等多少轮也不会出现
-          for (const c of g.items) finish(c, "failed", `OpenList 里没有挂载根 ${mount}，检查一下账号 ${c.account} 的挂载根填对没有`);
+          for (const c of g.items) finish(c, "failed", `${who} 里没有挂载根 ${mount}，检查一下账号 ${c.account} 的挂载根填对没有`);
         } else {
           for (const c of g.items) {
             c.waits += 1;
-            if (c.waits >= MAX_WAITS) finish(c, "failed", `刷新后 OpenList 里始终找不到 ${g.srcDir}：网盘上这个目录可能被挪走或改名了`);
-            else c.detail = `OpenList 里还看不到 ${g.srcDir}（${c.waits}/${MAX_WAITS}）`;
+            if (c.waits >= MAX_WAITS) finish(c, "failed", `刷新后 ${who} 里始终找不到 ${g.srcDir}：网盘上这个目录可能被挪走或改名了`);
+            else c.detail = `${who} 里还看不到 ${g.srcDir}（${c.waits}/${MAX_WAITS}）`;
           }
         }
         persist();
@@ -752,10 +740,10 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
       const msg = messageOf(err);
       for (const c of g.items.filter((x) => here(x, g))) {
         c.attempts += 1;
-        if (c.attempts >= MAX_ATTEMPTS) finish(c, "failed", `读 OpenList 的 ${g.srcDir} 失败：${msg}`);
-        else c.detail = `读 OpenList 的 ${g.srcDir} 失败，稍后重试（${c.attempts}/${MAX_ATTEMPTS}）：${msg}`;
+        if (c.attempts >= MAX_ATTEMPTS) finish(c, "failed", `读 ${who} 的 ${g.srcDir} 失败：${msg}`);
+        else c.detail = `读 ${who} 的 ${g.srcDir} 失败，稍后重试（${c.attempts}/${MAX_ATTEMPTS}）：${msg}`;
       }
-      log.warn({ err }, `列 OpenList 目录失败：${g.srcDir}`);
+      log.warn({ err }, `列 ${who} 目录失败：${g.srcDir}`);
       persist();
       continue;
     }
@@ -768,8 +756,8 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
         continue;
       }
       c.waits += 1;
-      if (c.waits >= MAX_WAITS) finish(c, "failed", `刷新后 OpenList 的 ${g.srcDir} 里始终没有出现「${c.name}」`);
-      else c.detail = `等「${c.name}」出现在 OpenList（${c.waits}/${MAX_WAITS}）`;
+      if (c.waits >= MAX_WAITS) finish(c, "failed", `刷新后 ${who} 的 ${g.srcDir} 里始终没有出现「${c.name}」`);
+      else c.detail = `等「${c.name}」出现在 ${who}（${c.waits}/${MAX_WAITS}）`;
     }
     if (ready.length === 0) {
       persist();
@@ -779,7 +767,7 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
     // 目标目录里已经有同名的就不再复制一遍：overwrite 一直是 false，重复提交只会堆任务
     let existing: string[] = [];
     try {
-      existing = await deps.openlist.listNames(cfg, g.dstDir);
+      existing = await engineOf(cfg).listNames(cfg, g.dstDir);
     } catch {
       // 目标目录还不存在（下面会建）或一时读不到，都照常往下走
     }
@@ -829,7 +817,7 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
     const settled: CopyRecord[] = [];
     try {
       // /fs/copy 不会自己建目标目录，先建一次（已存在时 OpenList 自己会说，吞掉）
-      await deps.openlist.mkdir(cfg, g.dstDir).catch(() => {});
+      await engineOf(cfg).mkdir(cfg, g.dstDir).catch(() => {});
       // 建目录那一下也在等网络：期间被改了的这一轮不提交
       pinned.splice(0, pinned.length, ...pinned.filter((c) => here(c, g)));
       if (pinned.length === 0) {
@@ -839,7 +827,7 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
       // 先记成「复制中」再去提交：提交请求还在路上时整理来改路径，看到的已经是「提交了」，不会把这一条改得和提交的不一样
       for (const c of pinned) c.stage = "copying";
       const names = pinned.map((c) => c.name);
-      const tasks = await deps.openlist.copy(cfg, g.srcDir, g.dstDir, names);
+      const tasks = await engineOf(cfg).copy(cfg, g.srcDir, g.dstDir, names);
       const submittedAt = deps.now();
       /**
        * 只有「返回的任务数和提交的条目数一样」时才敢按下标认领——OpenList 只给需要排队的条目建任务，
@@ -860,19 +848,19 @@ async function submitReady(cfg: CopyConfig, items: CopyRecord[], pending: CopyRe
         }
         c.stage = "copying";
         c.copyTaskId = task?.id;
-        c.detail = task?.id ? "已提交 OpenList 复制" : "已提交 OpenList 复制（没认出任务号，按名字盯）";
+        c.detail = task?.id ? `已提交 ${who} 复制` : `已提交 ${who} 复制（没认出任务号，按名字盯）`;
       });
-      log.info(`已提交 OpenList 复制 ${pinned.length} 项：${g.srcDir} → ${g.dstDir}`);
+      log.info(`已提交 ${who} 复制 ${pinned.length} 项：${g.srcDir} → ${g.dstDir}`);
     } catch (err) {
       const msg = messageOf(err);
       for (const c of pinned) {
         // 没提交成：退回排队
         c.stage = "waiting";
         c.attempts += 1;
-        if (c.attempts >= MAX_ATTEMPTS) finish(c, "failed", `提交 OpenList 复制失败：${msg}`);
-        else c.detail = `提交 OpenList 复制失败，稍后重试（${c.attempts}/${MAX_ATTEMPTS}）：${msg}`;
+        if (c.attempts >= MAX_ATTEMPTS) finish(c, "failed", `提交 ${who} 复制失败：${msg}`);
+        else c.detail = `提交 ${who} 复制失败，稍后重试（${c.attempts}/${MAX_ATTEMPTS}）：${msg}`;
       }
-      log.warn({ err }, `提交 OpenList 复制失败：${g.srcDir} → ${g.dstDir}`);
+      log.warn({ err }, `提交 ${who} 复制失败：${g.srcDir} → ${g.dstDir}`);
     }
     // 后续动作放在 try 外面：它报错只该写进 detail，不能被上面那个「提交失败」的 catch 接住
     for (const c of settled) await afterCopied(c, cfg);
@@ -896,15 +884,40 @@ function taskKey(c: CopyRecord): string {
  * 全部离开 undone 后再到 done 里对成败（按 endedAt 滤掉陈年同名任务）。
  */
 async function pollSubmitted(cfg: CopyConfig, items: CopyRecord[], touched: Set<CopyRecord>, persist: () => void): Promise<void> {
+  const who = copyEngineLabel(cfg.engine);
   if (items.length === 0) return;
   for (const c of items) touched.add(c);
   let tasks: { undone: OpenlistTaskInfo[]; done: OpenlistTaskInfo[] };
   try {
-    tasks = await deps.openlist.copyTasks(cfg);
+    tasks = await engineOf(cfg).copyTasks(cfg);
   } catch (err) {
-    // 这一轮任务列表拿不到（OpenList 重启中、断网）：什么都不改，下轮再来
-    loop.noteError(messageOf(err));
-    log.warn({ err }, "读取 OpenList 复制任务列表失败，下轮再对");
+    // 这一轮任务列表拿不到（服务重启中、断网，或者 CD2 的 API 令牌没有「查看传输任务」权限——真机撞到，
+    // 那样每一轮都拿不到）：退而按目标目录核对，这一份在目标里出现了就算完成（CD2 复制中是 .clfstmp 临时名，
+    // 最终名出现就是复制完了）；核对不到的留着，说明里写清楚是任务列表读不到
+    const msg = messageOf(err);
+    loop.noteError(msg);
+    log.warn({ err }, `读取 ${who} 复制任务列表失败，改按目标目录核对`);
+    for (const c of items) {
+      if (c.status !== "pending") continue;
+      // null = 目标目录也读不到（多半是整个服务都连不上），说明里别说成「目标里没有」
+      let verdict: Awaited<ReturnType<typeof verifyCopied>> | null = null;
+      try {
+        verdict = await verifyCopied(c, cfg);
+      } catch {
+        // 目标目录也读不到：下轮再看
+      }
+      if (c.status !== "pending") continue;
+      if (verdict?.ok) {
+        finish(c, "done", `复制完成（${who} 的任务列表读不到，按目标目录核对到了这一份）`);
+        log.info(`复制完成：${joinPath(c.srcDir, c.name)} → ${c.dstDir}（任务列表读不到，按目标核对）`);
+        await afterCopied(c, cfg);
+      } else {
+        c.detail = verdict
+          ? `读不到 ${who} 的复制任务列表（${msg}），改按目标目录核对：${verdict.why}`
+          : `读不到 ${who} 的复制任务列表（${msg}），目标目录也读不到，下轮再看`;
+      }
+    }
+    persist();
     return;
   }
 
@@ -920,22 +933,40 @@ async function pollSubmitted(cfg: CopyConfig, items: CopyRecord[], touched: Set<
     if (active.length > 0) {
       c.misses = 0;
       const own = active.find((r) => r.id === c.copyTaskId) ?? active[0];
-      c.detail = active.length > 1 ? `OpenList 复制中，还剩 ${active.length} 个任务` : `OpenList 复制中 ${Math.round(own.progress)}%`;
+      c.detail = active.length > 1 ? `${who} 复制中，还剩 ${active.length} 个任务` : `${who} 复制中 ${Math.round(own.progress)}%`;
       continue;
     }
-    // 提交之前就躺在 done 列表里的同名任务不算这次的；OpenList 和本机的钟可能有偏差，放宽 10 分钟
+    // 提交之前就躺在 done 列表里的同名任务不算这次的；OpenList 和本机的钟可能有偏差，放宽 10 分钟。
+    // OpenList 的任务 id 全局唯一，按 id 命中的不用看时间（钟差再大也不会认错）；CD2 的 id 是「源→目标」，
+    // 上一轮同一条的旧任务 id 一模一样，按 id 命中的也得过这道时间，不然会拿旧结果当这次的
     const since = (c.submittedAt ?? c.addedAt) - 600_000;
-    const settled = mine(tasks.done).filter((r) => r.id === c.copyTaskId || r.endedAt == null || r.endedAt >= since);
+    const idTrusted = !engineOf(cfg).taskIdsReused;
+    const settled = mine(tasks.done).filter((r) => (idTrusted && r.id === c.copyTaskId) || r.endedAt == null || r.endedAt >= since);
     if (settled.length === 0) {
+      // 任务列表里没有它：先看目标里是不是已经有了——CD2 完成得快的任务可能已经不在列表里，OpenList 的任务被手动清掉也一样；
+      // 目标里核对到了就算完成，核对不到才记一次没找到
+      let there = false;
+      try {
+        there = (await verifyCopied(c, cfg)).ok;
+      } catch {
+        // 目标目录读不到：按没找到处理，下轮再看
+      }
+      if (c.status !== "pending") continue;
+      if (there) {
+        finish(c, "done", `复制完成（${who} 的任务列表里已经没有它，目标里核对到了这一份）`);
+        log.info(`复制完成：${joinPath(c.srcDir, c.name)} → ${c.dstDir}（按目标核对）`);
+        await afterCopied(c, cfg);
+        continue;
+      }
       c.misses += 1;
-      if (c.misses >= MAX_MISSES) finish(c, "failed", "OpenList 的任务列表里找不到这次复制（可能被手动清掉了）");
-      else c.detail = `OpenList 任务列表里暂时没找到这次复制（${c.misses}/${MAX_MISSES}）`;
+      if (c.misses >= MAX_MISSES) finish(c, "failed", `${who} 的任务列表里找不到这次复制（可能被手动清掉了）`);
+      else c.detail = `${who} 任务列表里暂时没找到这次复制（${c.misses}/${MAX_MISSES}）`;
       continue;
     }
     const failed = settled.filter((r) => !copyStateSucceeded(r.state));
     if (failed.length > 0) {
       const suffix = failed.length > 1 ? `（共 ${failed.length} 个任务失败）` : "";
-      finish(c, "failed", `OpenList 复制失败：${failed[0].error || "未知原因"}${suffix}`);
+      finish(c, "failed", `${who} 复制失败：${failed[0].error || "未知原因"}${suffix}`);
       continue;
     }
     finish(c, "done", "复制完成");
@@ -947,7 +978,7 @@ async function pollSubmitted(cfg: CopyConfig, items: CopyRecord[], touched: Set<
 
 /** 复制完了，但这一份在目标里到底全不全？删源之前必须先答上来 */
 async function verifyCopied(c: CopyRecord, cfg: CopyConfig): Promise<{ ok: true } | { ok: false; why: string }> {
-  const names = await deps.openlist.listNames(cfg, c.dstDir);
+  const names = await engineOf(cfg).listNames(cfg, c.dstDir);
   if (!names.includes(c.name)) return { ok: false, why: "目标里没看到这一份" };
   if (!c.isDir) return { ok: true };
   /**
@@ -956,7 +987,7 @@ async function verifyCopied(c: CopyRecord, cfg: CopyConfig): Promise<{ ok: true 
    */
   const [src, dst] = await Promise.all([
     deps.listDriveChildren(c.account, joinPath(c.srcDir, c.name)),
-    deps.openlist.listNames(cfg, joinPath(c.dstDir, c.name)),
+    engineOf(cfg).listNames(cfg, joinPath(c.dstDir, c.name)),
   ]);
   const missing = src.filter((n) => !dst.includes(n));
   if (missing.length > 0) return { ok: false, why: `目标里少了 ${missing.length} 项（${missing.slice(0, 3).join("、")}…）` };
@@ -1051,10 +1082,11 @@ async function afterCopied(c: CopyRecord, cfg: CopyConfig): Promise<void> {
 async function afterCopiedInner(c: CopyRecord, cfg: CopyConfig): Promise<void> {
   deps.embyRefresh();
 
-  // 目标目录落在哪个「用这个 OpenList 账号」的任务下：最长 originPath 胜，同 life/handlers 的规则
+  // 目标目录落在哪个「用这个 OpenList 账号」的任务下：最长 originPath 胜，同 life/handlers 的规则（CD2 引擎没有对应的账号，跳过）
   const full = joinPath(c.dstDir, c.name);
+  const olName = cfg.account?.name;
   const hit = deps.listTasks()
-    .filter((t) => t.account === cfg.account.name)
+    .filter((t) => olName !== undefined && t.account === olName)
     .map((t) => ({ task: t, rel: relativeTo(t.originPath, full) }))
     .filter((x): x is { task: TaskDefinition; rel: string } => x.rel !== null)
     .sort((a, b) => b.task.originPath.length - a.task.originPath.length)[0];
@@ -1174,7 +1206,7 @@ export async function applyAfterCopy(c: CopyRecord, cfg: CopyConfig, opts: { ret
       // 源目录在 OpenList 之外变了：让它刷新缓存，经挂载回源的别再看到已删 / 已挪走的文件。
       // 归档的还有落点那条目录链（to 是落进去的目录）：ensureDriveDir 可能新建了其中几层，任务目录以下每一层都报上去让父目录刷，
       // 落点本身用「落点/名字」报
-      scheduleOpenlistRefresh(c.account, result.kind === "archived" ? [src, ...archiveChainEntries(c.rootPath, result.to), joinPath(result.to, c.name)] : [src]);
+      scheduleMountRefresh(c.account, result.kind === "archived" ? [src, ...archiveChainEntries(c.rootPath, result.to), joinPath(result.to, c.name)] : [src]);
       return result;
     }
     if (outcome === "missing") return kept("源文件已不在原处", `，没${verb}`);
@@ -1284,7 +1316,7 @@ async function ensureDriveDir(provider: DriveProvider, base: string, segs: strin
 let lastTickAt: number | null = null;
 
 const loop = createPollingLoop({
-  name: "复制到 OpenList 的队列",
+  name: "复制队列",
   log,
   intervalMs: POLL_MS,
   tick: async () => {
@@ -1370,7 +1402,7 @@ function resetForRetry(c: CopyRecord, now: number): void {
   c.status = "pending";
   c.retried = true;
   c.stage = "waiting";
-  c.detail = "重新排队，等着复制到 OpenList";
+  c.detail = `重新排队，等着 ${copyEngineLabel(copyEngineOf(deps.settings()))} 复制`;
   c.attempts = 0;
   c.waits = 0;
   c.misses = 0;

@@ -304,12 +304,28 @@ export const settingsPatchSchema = z.looseObject({
   lifeMonitor: lifeMonitorSchema.optional(),
   openlistCopy: z
     .looseObject({
+      engine: z.enum(["openlist", "cd2"]).optional(),
       account: z.string().optional(),
       dstDir: copyTargetDirSchema.optional(),
       /** 网盘账号名 → 它在 OpenList 里的挂载根 */
       mounts: z.record(z.string(), z.string()).optional(),
       /** 旧字段，升级时会尽量换算成 mounts */
       srcDir: z.string().optional(),
+    })
+    .optional(),
+  cd2: z
+    .looseObject({
+      url: z
+        .string()
+        .trim()
+        .max(300)
+        .refine((v) => v === "" || /^(https?:\/\/)?[^\s/]+(:\d+)?\/?$/i.test(v), "填 CloudDrive2 的地址，比如 http://192.168.1.10:19798")
+        .optional(),
+      apiToken: z.string().optional(),
+      username: z.string().optional(),
+      password: z.string().optional(),
+      /** 网盘账号名 → 它在 CD2 里的路径（云盘名） */
+      mounts: z.record(z.string(), z.string()).optional(),
     })
     .optional(),
   organize: organizeSettingsSchema.optional(),

@@ -31,7 +31,7 @@ import {
 
 const join = (dir: string, name: string): string => (dir === "/" ? `/${name}` : `${dir}/${name}`);
 
-/** OpenList 明确说没有这个路径（不是连不上）；和 openlist/refresh.ts 共用一份判断 */
+/** OpenList 明确说没有这个路径（不是连不上）；和 mount-cache/openlist.ts 共用一份判断 */
 const isMissing = isOpenlistMissing;
 
 function modifiedAtOf(e: OpenlistFsEntry): number | undefined {

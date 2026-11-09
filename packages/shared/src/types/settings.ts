@@ -109,6 +109,7 @@ export type AppSettings = {
   lifeMonitor?: LifeMonitorSettings;
   /** 云下载完成后，让 OpenList 把产物复制到另一个存储（如挂载的本地磁盘） */
   openlistCopy?: OpenlistCopySettings;
+  cd2?: Cd2Settings;
   /** 整理与规范化命名：模板、id 标签、识别词、分类、自动整理默认策略 */
   organize?: OrganizeSettings;
   /** 检查更新 */
@@ -203,7 +204,11 @@ export type UpdateSettings = {
  *
  * account + dstDir + 这个网盘账号的挂载根，三样齐了这个账号才复制得了。
  */
+export type CopyEngine = "openlist" | "cd2";
+
 export type OpenlistCopySettings = {
+  /** 用哪个挂载层来复制：OpenList（默认）或 CloudDrive2。选 CD2 时账号、挂载映射都来自 CloudDrive2 那一节 */
+  engine?: CopyEngine;
   /** 用哪个 openlist 账号调 API（「账户」页里的账号名） */
   account?: string;
   /** 复制目标目录（另一个存储里的路径），如 /local/downloads */
@@ -218,4 +223,29 @@ export type OpenlistCopySettings = {
    * 升级时会尽量反推成 mounts 里的挂载根；推不出来就留着，只给「下到 115 默认目录」那条老路兜底
    */
   srcDir?: string;
+};
+
+/**
+ * CloudDrive2（CD2）：改动网盘后让它刷新目录缓存（和 OpenList 那条一样），经 CD2 挂载回源的不用等它的缓存过期。
+ * url、凭据（API 令牌或用户名 + 口令）、mounts 三样齐了才会动；默认空 = 什么都不做。
+ */
+export type Cd2Settings = {
+  /** gRPC 地址，如 http://192.168.1.10:19798（和 CD2 网页同端口） */
+  url?: string;
+  /** CD2 设置页生成的 API 令牌（推荐；开了两步验证的账号只能用它） */
+  apiToken?: string;
+  /** 没有令牌就用登录 CD2 的用户名和口令换 */
+  username?: string;
+  password?: string;
+  /** 网盘账号名 → 它在 CD2 里的路径（云盘名），如 `{ "115": "/115" }` */
+  mounts?: Record<string, string>;
+};
+
+/** 设置页「CloudDrive2」一节的「检查连接和路径」：三段各自成败 */
+export type Cd2CheckResult = {
+  system: { ok: boolean; message: string; loggedIn?: boolean; userName?: string };
+  auth: { ok: boolean; message: string };
+  mounts: Array<{ account: string; path: string; ok: boolean; message: string; entries?: number }>;
+  /** 复制引擎选 CD2 还需要的权限（查看传输任务）；凭据没过就没有这一段 */
+  copy?: { ok: boolean; message: string };
 };

@@ -41,7 +41,7 @@ import {
   type OfflineTask,
 } from "../cloud-115/offline.js";
 import { enqueueCopy, type CopyEnqueueResult, type CopyRequest } from "../copy/service.js";
-import { copyDstProblem, copyOptionsFor, normDir, relativeTo, resolveCopyConfig } from "../copy/paths.js";
+import { copyDstProblem, copyMountFieldLabel, copyOptionsFor, normDir, relativeTo, resolveCopyConfig } from "../copy/paths.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
 import { events } from "../events.js";
 import { effectiveAutoMode } from "../organize/auto.js";
@@ -340,7 +340,7 @@ export async function addOfflineTasks(opts: AddOfflineOptions): Promise<AddOffli
   if (forced && !copyOpts.enabled) {
     const cfg = resolveCopyConfig(settings);
     if (!cfg.mounts[account.name]) {
-      throw new HttpError(400, `账号 ${account.name} 还没填「在 OpenList 里的挂载根」，先到设置页的「复制到 OpenList」里填上`);
+      throw new HttpError(400, `账号 ${account.name} 还没填${copyMountFieldLabel(cfg.engine)}，先到设置页填上`);
     }
     // 配置齐了却还是 false：没有任务（copyOptionsFor 认任务），或者任务上、设置页、这次都没给目标目录
     copyDst = pickedDst || cfg.dstDir;

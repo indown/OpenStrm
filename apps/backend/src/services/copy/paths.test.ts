@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AppSettings } from "@openstrm/shared";
 import { HttpError } from "../../lib/http-error.js";
-import { baseName, checkCopyDstDir, copyDstProblem, copyOptionsFor, copySettingsGap, dstDirFor, isOpenlistRootInput, joinPath, normDir, normTargetDir, parentDir, relativeTo, toOpenlistPath } from "./paths.js";
+import { baseName, checkCopyDstDir, copyDstProblem, copyOptionsFor, copySettingsGap, dstDirFor, isOpenlistRootInput, joinPath, normDir, normTargetDir, parentDir, relativeTo, resolveCopyConfig, toOpenlistPath } from "./paths.js";
 
 test("checkCopyDstDir：这次指定的复制目标——没给回 undefined；这次不会复制、任务开着却说不复制、越界、不是路径各有各的 code", () => {
   const s = { openlistCopy: { account: "ol", dstDir: "/local/media", mounts: { a: "/115" } } } as unknown as AppSettings;
@@ -133,9 +133,9 @@ test("normTargetDir：目标目录填成 OpenList 根 / 算没填；isOpenlistRo
 
 test("copySettingsGap：目标目录填成 / 等于没填，并说清楚是 / 不算", () => {
   const rootDefault = withCopy({ account: "ol", dstDir: "/", mounts: { "115-a": "/115" } });
-  assert.equal(copySettingsGap("115-a", rootDefault), "没有目标目录：设置页填的是 OpenList 根 /，等于没填");
+  assert.equal(copySettingsGap("115-a", rootDefault), "没有目标目录：设置页填的是根 /，等于没填");
   assert.equal(copySettingsGap("115-a", rootDefault, "/hhd/tv"), null, "任务上填了具体目录就行");
-  assert.equal(copySettingsGap("115-a", rootDefault, "/"), "没有目标目录：任务上和设置页填的是 OpenList 根 /，等于没填");
+  assert.equal(copySettingsGap("115-a", rootDefault, "/"), "没有目标目录：任务上和设置页填的是根 /，等于没填");
   const s = withCopy({ account: "ol", dstDir: "/hhd", mounts: { "115-a": "/115" } });
   assert.equal(copySettingsGap("115-a", s, "/"), null, "任务上的 / 算没填，落回设置页的默认目标目录");
 });
@@ -148,14 +148,33 @@ test("copyOptionsFor：目标目录填成 / 的不往下传，给出去的都是
   const rootDefault = withCopy({ account: "ol", dstDir: "/", mounts: { "115-a": "/115" } });
   const off = copyOptionsFor({ account: "115-a", copyToOpenlist: { enabled: true } }, undefined, rootDefault);
   assert.equal(off.enabled, false);
-  assert.match(off.blocked ?? "", /OpenList 根 \/，等于没填/);
+  assert.match(off.blocked ?? "", /根 \/，等于没填/);
 });
 
 test("copyDstProblem：这一次指定成 / 的拒；填成 / 的也不算「只能在它下面选」的范围", () => {
   const s = withCopy({ account: "ol", dstDir: "/hhd", mounts: {} });
-  assert.match(copyDstProblem("/", null, s) ?? "", /不能是 OpenList 根/);
+  assert.match(copyDstProblem("/", null, s) ?? "", /不能是根 \//);
   assert.equal(copyDstProblem("/hhd/tv", null, s), null);
   const rootDefault = withCopy({ account: "ol", dstDir: "/", mounts: {} });
   assert.match(copyDstProblem("/115/tv", null, rootDefault) ?? "", /都没填/, "设置页填 / 不能让哪儿都成了范围");
   assert.match(copyDstProblem("/115/tv", { copyToOpenlist: { dstDir: "/hhd/tv" } }, rootDefault) ?? "", /只能是 \/hhd\/tv，/);
+});
+
+test("引擎选 CloudDrive2：缺什么看 CD2 那一节，不要 OpenList 账号；resolveCopyConfig 给 cd2 连接和它的映射", () => {
+  const base = withCopy({ engine: "cd2", dstDir: "/hdd/media" });
+  assert.match(copySettingsGap("115-a", base) ?? "", /CloudDrive2 一节还没填地址/);
+  const noCred: AppSettings = { ...base, cd2: { url: "http://cd2.local:19798", mounts: { "115-a": "/115" } } };
+  assert.match(copySettingsGap("115-a", noCred) ?? "", /还没填 API 令牌或用户名口令/);
+  const ok: AppSettings = { ...base, cd2: { url: "http://cd2.local:19798", apiToken: "tok", mounts: { "115-a": "/115/" } } };
+  assert.equal(copySettingsGap("115-a", ok), null, "OpenList 账号一个都没选也行");
+  assert.match(copySettingsGap("夸克", ok) ?? "", /账号 夸克 还没填「在 CD2 里的路径」/);
+  const cfg = resolveCopyConfig(ok);
+  assert.equal(cfg.engine, "cd2");
+  assert.equal(cfg.account, null);
+  assert.deepEqual(cfg.cd2, { url: "http://cd2.local:19798", apiToken: "tok" });
+  assert.deepEqual(cfg.mounts, { "115-a": "/115" }, "映射来自 CD2 那一节，归一过");
+  assert.equal(cfg.dstDir, "/hdd/media");
+  assert.throws(() => resolveCopyConfig(noCred), (err: unknown) => err instanceof HttpError && /API 令牌或用户名口令/.test(err.message));
+  // 没选引擎 = OpenList，照旧要账号
+  assert.match(copySettingsGap("115-a", withCopy({ dstDir: "/local" })) ?? "", /还没选 OpenList 账号/);
 });

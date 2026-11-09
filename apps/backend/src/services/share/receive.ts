@@ -11,10 +11,10 @@ import { driveErrorToHttp } from "../drive/errors.js";
 import { assertSameKind, providerForTask } from "../drive/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type ShareRef } from "../drive/types.js";
 import { COPY_TRIGGER_LABEL, enqueueCopyFor, type CopyOutcome } from "../copy/service.js";
-import { checkCopyDstDir, copyBlockerFor, copyOptionsFor } from "../copy/paths.js";
+import { checkCopyDstDir, copyBlockerFor, copyEngineLabel, copyEngineOf, copyOptionsFor } from "../copy/paths.js";
 import { releaseCopyHoldsById, type CopyTrigger } from "../copy/queue.js";
 import { events } from "../events.js";
-import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
+import { scheduleMountRefresh } from "../mount-cache/refresh.js";
 import { effectiveAutoMode } from "../organize/auto.js";
 import { generateStrmForSelected, type SelectedItem } from "../strm/share-strm.js";
 import { recordLibrarySave } from "../library/saves.js";
@@ -177,7 +177,7 @@ export async function saveSelectionToTask(opts: SaveSelectionOpts): Promise<Save
   // 这次明确勾了复制却复制不了：转存前就说清楚（同云下载），别转存完了才悄悄不复制
   if (opts.copy === true) {
     const why = copyBlockerFor(settings)(task);
-    if (why) throw new HttpError(400, `没法复制到 OpenList：${why}。先到设置页的「复制到 OpenList」里配好，或者这次不勾复制`);
+    if (why) throw new HttpError(400, `没法复制到 ${copyEngineLabel(copyEngineOf(settings))}：${why}。先到设置页配好，或者这次不勾复制`);
   }
   // 这次指定的复制目标：和 REST / 智能体 / 手动复制同一道校验（给了却不复制、越界都在动网盘之前拒）
   const copyDstDir = checkCopyDstDir(task, opts.copy, opts.copyDstDir, settings);
@@ -205,14 +205,14 @@ export async function saveSelectionToTask(opts: SaveSelectionOpts): Promise<Save
     if (opts.createdDir) {
       await dropCreatedDir(provider, task.originPath, subPath, opts.createdDir);
       // 建出来又删掉的目录，OpenList 这期间可能已经列到过：让它的父目录刷新
-      scheduleOpenlistRefresh(provider.account.name, [`/${task.originPath}/${opts.createdDir}`]);
+      scheduleMountRefresh(provider.account.name, [`/${task.originPath}/${opts.createdDir}`]);
     }
     throw driveErrorToHttp(err, "转存失败");
   }
   // 网盘上多了这些条目，OpenList 的目录缓存不知道：不管这次整不整理、同步还是后台模式，都让它刷新所在目录；
   // 为这次转存新建的目录也报上去（它的父目录才会刷）。不能只靠 files.landed——那个事件只在交给整理时才发
   // （真机：转存时选了不整理，OpenList 半小时都列不出新目录）
-  scheduleOpenlistRefresh(provider.account.name, [
+  scheduleMountRefresh(provider.account.name, [
     ...items.map((i) => `/${fullOriginPath}/${i.name}`),
     ...(opts.createdDir ? [`/${task.originPath}/${opts.createdDir}`] : []),
   ]);

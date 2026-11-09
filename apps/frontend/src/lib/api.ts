@@ -74,6 +74,8 @@ import type {
   TaskExecutionSummary,
   TelegramNotifySettings,
   UpdateStatus,
+  Cd2CheckResult,
+  Cd2Settings,
 } from "@openstrm/shared";
 
 /** 改标题弹框：这部作品在 TMDB 上的译名、原名、英文名和别名 */
@@ -1016,6 +1018,13 @@ export const api = {
       remove: (userId: number) =>
         data(axiosInstance.delete<{ success: boolean; message: string }>(`/api/telegram/users?userId=${userId}`)),
     },
+  },
+
+  cd2: {
+    /** 设置页「CloudDrive2」的「检查连接和路径」：按页面上当前填的值连一次 CD2，掩码的凭据后端换回原值 */
+    check: (draft: Cd2Settings) => data(axiosInstance.post<Cd2CheckResult>("/api/cd2/check", draft, { timeout: 60_000 })),
+    /** CD2 里一个目录下的子目录（复制引擎选 CD2 时给目标目录选路径用） */
+    list: (path = "/") => data(axiosInstance.post<DirectoryNode[]>("/api/cd2/list", { path })),
   },
 
   emby: {

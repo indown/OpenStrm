@@ -12,7 +12,7 @@ import { providerForTask } from "../drive/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
 import { revertFollowOrganized, rewriteFollowSubPaths } from "../follow/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
-import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
+import { scheduleMountRefresh } from "../mount-cache/refresh.js";
 import { rewriteOfflineSubPaths } from "../offline/service.js";
 import { rewriteCopyPaths } from "../copy/queue.js";
 import { describeFileFailure } from "../download/failure.js";
@@ -275,10 +275,10 @@ function finishRevert(job: Job, runId: string, outcome: { fatal: string | null; 
   updateRun(runId, { status, error: outcome.fatal ?? (outcome.aborted ? "已取消" : ""), stats, log: job.logs, finishedAt: Math.floor(Date.now() / 1000) });
   planStates.delete(runId);
   if (outcome.refresh) {
-    // 和 finishApply 对称：退回过的目录两边都让 OpenList 刷新；撤销时删掉的新建目录不刷
+    // 和 finishApply 对称：退回过的目录两边都让挂载层刷新；撤销时删掉的新建目录不刷
     const undone = items.filter((it) => it.status === "reverted" && WORK_ACTIONS.has(it.action));
     if (undone.length > 0) {
-      scheduleOpenlistRefresh(
+      scheduleMountRefresh(
         task.account,
         undone.flatMap((it) => [it.srcPath, it.dstPath]),
         { removed: undone.filter((it) => it.action === "mkdir").map((it) => it.dstPath) },

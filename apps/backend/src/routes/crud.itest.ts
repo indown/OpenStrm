@@ -137,7 +137,7 @@ test("GET /api/task：copyBlocked 说这个任务要复制卡在哪，同类型�
     // 设置页的默认目标目录是 /（以前存进去的）：等于没填，说清楚是 / 不算
     patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/", mounts: { "115-a": "/115" } } });
     const root = (await call("GET", "/api/task")).json() as Array<{ id: string; copyBlocked: string | null }>;
-    assert.equal(root.find((t) => t.id === "cb-a")?.copyBlocked, "没有目标目录：设置页填的是 OpenList 根 /，等于没填");
+    assert.equal(root.find((t) => t.id === "cb-a")?.copyBlocked, "没有目标目录：设置页填的是根 /，等于没填");
     patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/local", mounts: { "115-a": "/115" } } });
 
     // 设置上看着都齐，OpenList 账号却被删了：照样复制不了
@@ -268,7 +268,7 @@ test("POST/PUT /api/task、PUT /api/settings：复制的目标目录不收 OpenL
   const bad = await call("POST", "/api/task", { ...base, copyToOpenlist: { enabled: true, dstDir: "/" } });
   assert.equal(bad.statusCode, 400);
   assert.equal(bad.json().code, "VALIDATION");
-  assert.match(bad.json().message, /copyToOpenlist\.dstDir: 目标目录不能是 OpenList 根/);
+  assert.match(bad.json().message, /copyToOpenlist\.dstDir: 目标目录不能是根 \//);
   const created = await call("POST", "/api/task", { ...base, copyToOpenlist: { enabled: true, dstDir: "" } });
   assert.equal(created.statusCode, 201, "空着是没填，照收");
   const id = created.json().id;
@@ -280,7 +280,7 @@ test("POST/PUT /api/task、PUT /api/settings：复制的目标目录不收 OpenL
   try {
     const res = await call("PUT", "/api/settings", { openlistCopy: { account: "ol", dstDir: "/", mounts: {} } });
     assert.equal(res.statusCode, 400);
-    assert.match(res.json().message, /openlistCopy\.dstDir: 目标目录不能是 OpenList 根/);
+    assert.match(res.json().message, /openlistCopy\.dstDir: 目标目录不能是根 \//);
     assert.deepEqual(readAppSettings().openlistCopy, before, "拒了就一样都没存");
     const ok = await call("PUT", "/api/settings", { openlistCopy: { account: "ol", dstDir: "/hhd", mounts: {} } });
     assert.equal(ok.statusCode, 200);

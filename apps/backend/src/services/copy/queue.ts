@@ -12,6 +12,8 @@ import { randomUUID } from "node:crypto";
 import type { CopyAfterCopy } from "@openstrm/shared";
 import { afterCopyOf } from "../../lib/after-copy.js";
 import { readKv, writeKv } from "../../db/repositories/life.js";
+import { readAppSettings } from "../../db/repositories/settings.js";
+import { copyEngineLabel, copyEngineOf } from "./paths.js";
 import { KEY } from "../../db/keys.js";
 
 /** 谁把这条活儿丢进来的，给界面和通知看 */
@@ -334,9 +336,10 @@ export function releaseCopyHolds(taskId: string, before: number, now = Date.now(
   const changed = listCopies().filter(
     (c) => c.taskId === taskId && c.status === "pending" && c.stage === "waiting" && (c.holdUntil ?? 0) > now && c.addedAt <= before,
   );
+  const who = copyEngineLabel(copyEngineOf(readAppSettings()));
   for (const c of changed) {
     c.holdUntil = undefined;
-    c.detail = "自动整理办完了，等着复制到 OpenList";
+    c.detail = `自动整理办完了，等着 ${who} 复制`;
   }
   commitCopies(changed, now);
   return changed.length;
@@ -350,9 +353,10 @@ export function releaseCopyHoldsById(ids: readonly string[], now = Date.now()): 
   if (ids.length === 0) return 0;
   const want = new Set(ids);
   const changed = listCopies().filter((c) => want.has(c.id) && queuedNow(c) && c.holdUntil !== undefined);
+  const who = copyEngineLabel(copyEngineOf(readAppSettings()));
   for (const c of changed) {
     c.holdUntil = undefined;
-    c.detail = "这次没交给整理，等着复制到 OpenList";
+    c.detail = `这次没交给整理，等着 ${who} 复制`;
   }
   commitCopies(changed, now);
   return changed.length;

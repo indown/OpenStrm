@@ -13,7 +13,7 @@ import { isTaskRunning } from "../task/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
 import { learnFollowOrganized, rewriteFollowSubPaths } from "../follow/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
-import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
+import { scheduleMountRefresh } from "../mount-cache/refresh.js";
 import { rewriteOfflineSubPaths } from "../offline/service.js";
 import { rewriteCopyPaths } from "../copy/queue.js";
 import { describeFileFailure } from "../download/failure.js";
@@ -434,11 +434,11 @@ function finishApply(job: Job, runId: string, outcome: { fatal: string | null; a
     jobLog(job, `执行完成：${stats.done} 项完成，${stats.failed} 项失败${stats.failedByKind.mirror > 0 ? `，${stats.failedByKind.mirror} 项本地未同步` : ""}`);
     updateRun(runId, { status: "done", stats, log: job.logs, finishedAt });
   }
-  // 网盘上动过的目录先让 OpenList 忘掉缓存，再叫 Emby 刷新：经 OpenList 挂载回源的，入库预热的 ffprobe 才找得到新路径。
+  // 网盘上动过的目录先让挂载层（OpenList / CD2）忘掉缓存，再叫 Emby 刷新：经 OpenList 挂载回源的，入库预热的 ffprobe 才找得到新路径。
   // 删掉的源目录不刷（刷了只会 object not found）
   const worked = items.filter((it) => it.status === "done" && WORK_ACTIONS.has(it.action));
   if (worked.length > 0) {
-    scheduleOpenlistRefresh(
+    scheduleMountRefresh(
       task.account,
       worked.flatMap((it) => [it.srcPath, it.dstPath]),
       { removed: worked.filter((it) => it.action === "rmdir").map((it) => it.srcPath) },

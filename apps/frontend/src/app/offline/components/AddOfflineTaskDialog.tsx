@@ -234,7 +234,7 @@ export function AddOfflineTaskDialog({ open, onOpenChange, account: defaultAccou
       setResults(res.results);
       setInvalid(res.invalid);
       if (res.added > 0) {
-        const copied = copying && copyBase ? `让 OpenList 复制到 ${copyTarget}` : "";
+        const copied = copying && copyBase ? `复制到 ${copyTarget}` : "";
         // strm 只看「下完生成 strm」的回执：followup 把「下完只复制」的也算在里面（比如关了生成 strm、或者链接都是 115 上已有的）
         const suffix = !res.followup
           ? ""
@@ -493,12 +493,12 @@ export function AddOfflineTaskDialog({ open, onOpenChange, account: defaultAccou
                     className="mt-0.5"
                   />
                   <span>
-                    下载完成后让 OpenList 复制走
+                    下载完成后复制走（OpenList / CD2）
                     <span className="block text-xs text-muted-foreground">
                       {!copyBase
                         ? "设置页和这个任务上都没填复制目标目录，复制不了"
                         : taskCopies
-                          ? `这个任务开着「复制到 OpenList」，下完会复制到 ${copyTarget}（在任务设置里改）；任务目录里的层级会原样带过去`
+                          ? `这个任务开着「复制到 OpenList / CD2」，下完会复制到 ${copyTarget}（在任务设置里改）；任务目录里的层级会原样带过去`
                           : `复制到 ${copyTarget}${mode === "task" ? "；任务目录里的层级会原样带过去" : ""}`}
                     </span>
                   </span>

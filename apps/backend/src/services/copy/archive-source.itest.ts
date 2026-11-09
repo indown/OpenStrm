@@ -16,7 +16,8 @@ import { patchAppSettings, readAppSettings } from "../../db/repositories/setting
 import { DATA_DIR } from "../../paths.js";
 import { setDriveProviderFactory } from "../drive/registry.js";
 import type { OpenlistTaskInfo } from "../openlist/client.js";
-import { flushOpenlistRefresh, setOpenlistRefreshDeps, startOpenlistRefresh, stopOpenlistRefresh } from "../openlist/refresh.js";
+import { flushMountRefresh, setMountRefreshDeps, startMountRefresh, stopMountRefresh } from "../mount-cache/refresh.js";
+import { fakeMountTarget } from "../../test/fake-mount-target.js";
 import type { NotifyEvent } from "../notify.js";
 import { FakeDrive } from "../../test/fake-drive.js";
 import { __test_resetCopy, enqueueCopy, listCopies, setCopyServiceDeps, stopCopyWatcher, tickCopies } from "./service.js";
@@ -258,28 +259,22 @@ test("上次其实挪过去了、只是没等到回话：到点再做时认出�
 
 test("归档之后让 OpenList 刷新源目录和归档目录连同上级", async () => {
   const listed: string[] = [];
-  setOpenlistRefreshDeps({
-    listDir: async (_acc, dir) => {
-      listed.push(dir);
-      return [];
-    },
-    quietMs: 10,
-  });
-  startOpenlistRefresh();
+  setMountRefreshDeps({ targets: () => [fakeMountTarget({ mounts: { acc: "/quark" }, listed })], quietMs: 10 });
+  startMountRefresh();
   try {
     drive.tree.addFile("/tv/某剧/S01/E01.mkv");
     names = { "/quark/tv/某剧/S01": ["E01.mkv"] };
     afterCopy = { "/local/media/某剧/S01": ["E01.mkv"] };
     await copyThrough({ path: "/tv/某剧/S01/E01.mkv", nodeId: drive.tree.get("/tv/某剧/S01/E01.mkv")!.id });
     assert.match(detail(), /已归档到 \/tv\/归档\/某剧\/S01/);
-    await flushOpenlistRefresh();
+    await flushMountRefresh();
     assert.deepEqual(
       new Set(listed),
       new Set(["/quark/tv/某剧/S01", "/quark/tv", "/quark/tv/归档", "/quark/tv/归档/某剧", "/quark/tv/归档/某剧/S01"]),
       "源文件所在目录 + 归档目录链里任务目录以下每一层的父目录（这些目录可能是这次新建的）+ 落点本身",
     );
   } finally {
-    stopOpenlistRefresh();
-    setOpenlistRefreshDeps(null);
+    stopMountRefresh();
+    setMountRefreshDeps(null);
   }
 });

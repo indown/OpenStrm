@@ -718,10 +718,10 @@ function FollowupLine({ followup, originPath }: { followup: OfflineFollowup; ori
     : `${originPath ?? followup.taskId}${followup.subPath ? `/${followup.subPath}` : ""}`;
   const badge: { tone: StatusTone; label: string } =
     followup.status === "done"
-      ? { tone: "success", label: isCopy ? "已复制到 OpenList" : "strm 已生成" }
+      ? { tone: "success", label: isCopy ? "已复制走" : "strm 已生成" }
       : followup.status === "failed"
-        ? { tone: "danger", label: isCopy ? "OpenList 复制失败" : "strm 未生成" }
-        : { tone: "neutral", label: isCopy ? "完成后复制到 OpenList" : "完成后生成 strm" };
+        ? { tone: "danger", label: isCopy ? "复制失败" : "strm 未生成" }
+        : { tone: "neutral", label: isCopy ? "完成后复制走" : "完成后生成 strm" };
   return (
     <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>

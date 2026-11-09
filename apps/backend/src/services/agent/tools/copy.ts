@@ -15,7 +15,7 @@ import { AFTER_COPY_LABEL, afterCopyOf } from "../../../lib/after-copy.js";
 import { readAppSettings } from "../../../db/repositories/settings.js";
 import { listTasks } from "../../../db/repositories/tasks.js";
 import { messageOf } from "../../../lib/errors.js";
-import { copyBlockerFor, joinPath, normConfigDir, normTargetDir, resolveCopyConfig } from "../../copy/paths.js";
+import { copyBlockerFor, copyEngineOf, copyMountFieldLabel, joinPath, normConfigDir, normTargetDir, resolveCopyConfig } from "../../copy/paths.js";
 import {
   COPY_TRIGGER_LABEL,
   canAfterCopy,
@@ -56,8 +56,10 @@ const STATUS_TEXT: Record<CopyStatus, string> = { pending: "复制中", done: "�
  * 挂载根是按网盘账号各填各的，哪个账号能复制看 mounts
  */
 export function copyConfigState(settings: AppSettings = readAppSettings()): { configured: boolean; problem?: string; mounts: Record<string, string> } {
+  // 挂载映射按引擎取：选了 CloudDrive2 看它那一节的，不然看「复制到 OpenList」的
+  const engine = copyEngineOf(settings);
   const mounts: Record<string, string> = {};
-  for (const [name, path] of Object.entries(settings.openlistCopy?.mounts ?? {})) {
+  for (const [name, path] of Object.entries((engine === "cd2" ? settings.cd2?.mounts : settings.openlistCopy?.mounts) ?? {})) {
     const norm = normConfigDir(path);
     if (norm) mounts[name] = norm;
   }
@@ -67,7 +69,7 @@ export function copyConfigState(settings: AppSettings = readAppSettings()): { co
   } catch (err) {
     problem = messageOf(err);
   }
-  if (!problem && Object.keys(mounts).length === 0) problem = "还没给任何网盘账号填「在 OpenList 里的挂载根」";
+  if (!problem && Object.keys(mounts).length === 0) problem = `还没给任何网盘账号填${copyMountFieldLabel(engine)}`;
   return { configured: !problem, ...(problem ? { problem } : {}), mounts };
 }
 

@@ -25,8 +25,8 @@ import {
   listOfflineTasks,
   type AddOfflineResponse,
 } from "../offline/service.js";
-import { openlistListDir } from "../openlist/client.js";
 import { copyConfigured, resolveCopyConfig } from "../copy/paths.js";
+import { listOpenlistEntries } from "../copy/service.js";
 import { getLifeMonitorStatus } from "../life/monitor.js";
 import { normalizeOfflineUrls } from "../cloud-115/offline.js";
 import { KIND_LABEL, findShareLink, providerFor, providerForTask, shareForLink } from "../drive/registry.js";
@@ -190,8 +190,9 @@ const realDeps: CommandDeps = {
   cancelTask: (taskId) => cancelRunningTask(taskId, "Telegram 取消"),
   addOffline: (input) => addOfflineTasks(input),
   listOpenlistDirs: async (path) => {
+    // 走复制引擎：选了 CD2 就是 CD2 里的目录。浏览用缓存就行，不刷新（和以前直接调 openlistListDir 一样）
     const cfg = resolveCopyConfig();
-    return (await openlistListDir(cfg.account, path)).filter((e) => e.is_dir).map((e) => e.name);
+    return (await listOpenlistEntries(cfg, path, { refresh: false })).filter((e) => e.isDir).map((e) => e.name);
   },
   listOffline: async () => {
     const page = await listOfflineTasks(undefined, 1);

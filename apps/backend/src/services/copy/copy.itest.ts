@@ -443,13 +443,34 @@ test("任务列表里找不到：3 轮后作废；换阶段时 waits 已清零",
   assert.equal(listCopies()[0].status, "failed");
 });
 
-test("任务列表拿不到：这一轮一个字段都不改", async () => {
+test("任务列表拿不到：状态不动、不算没找到，改按目标目录核对；目标也读不到就说清楚；目标里有了算完成", async () => {
   await submitted();
-  const before = JSON.stringify(listCopies());
+  const before = listCopies()[0];
   tasksError = new Error("OpenList 连不上");
   await tickCopies();
-  assert.equal(JSON.stringify(listCopies()), before);
+  let [c] = listCopies();
+  assert.equal(c.status, "pending");
+  assert.equal(c.stage, before.stage);
+  assert.equal(c.copyTaskId, before.copyTaskId);
+  assert.equal(c.misses, 0, "任务列表读不到不算一次「列表里没找到」");
+  assert.match(c.detail, /读不到 OpenList 的复制任务列表（OpenList 连不上），改按目标目录核对：目标里没看到这一份/);
   assert.match(getCopyWatcherStatus().lastError ?? "", /连不上/);
+  assert.deepEqual(listedDirs, ["/local/media/某剧/S01"], "只按目标目录核对了一次");
+
+  // 目标目录也读不到（整个 OpenList 连不上）：别说成「目标里没有」
+  listError = new Error("OpenList 连不上");
+  await tickCopies();
+  [c] = listCopies();
+  assert.equal(c.status, "pending");
+  assert.match(c.detail, /读不到 OpenList 的复制任务列表（OpenList 连不上），目标目录也读不到，下轮再看/);
+  listError = null;
+
+  // 任务列表还是读不到，但目标里出现了：算完成，说明写清是按目标核对的
+  names = { ...names, "/local/media/某剧/S01": ["E01.mkv"] };
+  await tickCopies();
+  [c] = listCopies();
+  assert.equal(c.status, "done");
+  assert.match(c.detail, /复制完成（OpenList 的任务列表读不到，按目标目录核对到了这一份）/);
 });
 
 /* ------------------------------- 重试、删除、接管 ------------------------------- */

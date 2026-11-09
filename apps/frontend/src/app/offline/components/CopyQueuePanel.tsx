@@ -129,7 +129,7 @@ export function CopyQueuePanel() {
   return (
     <section id="copy-queue" className="scroll-mt-20 space-y-3 rounded-xl border bg-card p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-base font-medium">复制到 OpenList</h2>
+        <h2 className="text-base font-medium">复制到 OpenList / CD2</h2>
         {pending > 0 && (
           <StatusBadge tone="brand" className="tabular-nums" pulse>
             {pending} 个在队列里

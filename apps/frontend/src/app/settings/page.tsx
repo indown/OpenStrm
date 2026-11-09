@@ -20,8 +20,9 @@ import { downloadBackupWithToast } from "@/lib/backup";
 import { useModKey } from "@/hooks/use-mod-key";
 import { apiErrorMessage } from "@/lib/axios";
 import { FEATURES } from "@/lib/features";
-import type { AppSettings, OpenlistCopySettings, OrganizeSettings, ResourceStatus, UpdateSettings } from "@openstrm/shared";
+import type { AppSettings, Cd2Settings, OpenlistCopySettings, OrganizeSettings, ResourceStatus, UpdateSettings } from "@openstrm/shared";
 import { OpenlistCopySection } from "./components/OpenlistCopySection";
+import { Cd2Section } from "./components/Cd2Section";
 import { OrganizeSection } from "./components/OrganizeSection";
 import { UpdateSection } from "./components/UpdateSection";
 import { TmdbCacheButton } from "./components/TmdbCacheButton";
@@ -40,7 +41,8 @@ const SECTIONS: Section[] = [
   { id: "pansou", title: "资源搜索" },
   { id: "library", title: "收藏夹" },
   ...(FEATURES.hdhiveSearch ? [{ id: "hdhive", title: "HDHive" }] : []),
-  { id: "openlist-copy", title: "复制到 OpenList" },
+  { id: "openlist-copy", title: "复制到 OpenList / CD2" },
+  { id: "cd2", title: "CloudDrive2" },
   { id: "organize", title: "整理与命名" },
   { id: "agent", title: "智能体接入" },
 ];
@@ -230,6 +232,7 @@ const schema = z.object({
   }),
   library: z.object({ patrol: z.boolean() }),
   openlistCopy: z.custom<OpenlistCopySettings>(),
+  cd2: z.custom<Cd2Settings>(),
   organize: z.custom<OrganizeSettings>(),
   update: z.custom<UpdateSettings>(),
   agent: z.object({
@@ -285,6 +288,7 @@ function fromSettings(s: AppSettings): SettingsValues {
     hdhive: { apiKey: s.hdhive?.apiKey ?? "", baseUrl: s.hdhive?.baseUrl ?? "" },
     library: { patrol: s.library?.patrol !== false },
     openlistCopy: s.openlistCopy ?? {},
+    cd2: s.cd2 ?? {},
     organize: s.organize ?? {},
     update: s.update ?? {},
     agent: {
@@ -338,6 +342,7 @@ function toSettings(v: SettingsValues): AppSettings {
     hdhive: v.hdhive,
     library: v.library,
     openlistCopy: v.openlistCopy,
+    cd2: v.cd2,
     organize: v.organize,
     update: v.update,
     agent: v.agent,
@@ -1015,8 +1020,10 @@ export default function SettingsPage() {
             <FormField
               control={form.control}
               name="openlistCopy"
-              render={({ field }) => <OpenlistCopySection value={field.value ?? {}} onChange={field.onChange} />}
+              render={({ field }) => <OpenlistCopySection value={field.value ?? {}} onChange={field.onChange} cd2={form.watch("cd2")} />}
             />
+
+            <FormField control={form.control} name="cd2" render={({ field }) => <Cd2Section value={field.value ?? {}} onChange={field.onChange} />} />
 
             <FormField
               control={form.control}

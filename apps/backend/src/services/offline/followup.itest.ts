@@ -538,7 +538,7 @@ test("这次指定的复制目标只能在任务上、设置页的目标目录�
 });
 
 test("OpenList 根 / 当复制目标：这次指定成 / 的拒；设置页填的是 / 等于没填", async () => {
-  await assert.rejects(addOfflineTasks({ urls: "magnet:?xt=urn:btih:one", copyToOpenlist: true, copyDstDir: "/" }), /不能是 OpenList 根/);
+  await assert.rejects(addOfflineTasks({ urls: "magnet:?xt=urn:btih:one", copyToOpenlist: true, copyDstDir: "/" }), /不能是根 \//);
   patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/", mounts: { acc: "/115" } } });
   await assert.rejects(addOfflineTasks({ urls: "magnet:?xt=urn:btih:one", copyToOpenlist: true }), /没有复制目标目录/);
   assert.equal(listFollowups().length, 0, "拒绝时不该留下任何回执");

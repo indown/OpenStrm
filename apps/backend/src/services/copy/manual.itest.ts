@@ -187,9 +187,9 @@ test("拒绝：任务目录本身、带 ..、暂存区、太多条、目标目�
 });
 
 test("目标目录的 OpenList 根 / 算没填：这一次指定成 / 的拒；设置页填的是 / 就是没有目标目录，任务上填了具体目录的照常", async () => {
-  await rejects(go(["某剧"], { dstDir: "/" }), 400, "COPY_DST_INVALID", /不能是 OpenList 根/);
+  await rejects(go(["某剧"], { dstDir: "/" }), 400, "COPY_DST_INVALID", /不能是根 \//);
   patchAppSettings({ openlistCopy: { ...COPY_SETTINGS, dstDir: "/" } });
-  await rejects(go(["某剧"]), 400, "COPY_NOT_READY", /设置页填的是 OpenList 根 \/，等于没填/);
+  await rejects(go(["某剧"]), 400, "COPY_NOT_READY", /设置页填的是根 \/，等于没填/);
   assert.equal(listCopies().length, 0);
 
   const r = await enqueueManualCopy({ task: { ...task, copyToOpenlist: { ...task.copyToOpenlist, dstDir: "/hhd/tv" } }, paths: ["某剧"], allowDelete: true });

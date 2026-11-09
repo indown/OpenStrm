@@ -24,7 +24,9 @@ import { authPlugin } from "./plugins/auth.js";
 import { cronPlugin } from "./plugins/cron.js";
 import { registerNotifySink } from "./services/notify.js";
 import { startAutoOrganize } from "./services/organize/auto.js";
-import { flushOpenlistRefresh, startOpenlistRefresh } from "./services/openlist/refresh.js";
+import { flushMountRefresh, startMountRefresh } from "./services/mount-cache/refresh.js";
+import cd2CheckRoute from "./routes/cd2/check.js";
+import cd2ListRoute from "./routes/cd2/list.js";
 import { telegramNotify } from "./services/telegram/notify.js";
 import { startPolling, stopPolling } from "./services/telegram/polling.js";
 import { cancelAllRunningTasks } from "./services/task/registry.js";
@@ -125,8 +127,8 @@ registerErrorHandling(app);
 registerNotifySink(telegramNotify);
 // 自动整理听 files.landed 事件（转存 / 追更 / 云下载 / 监控 / 复制完成都发）：同样要在它们起来之前订上
 startAutoOrganize();
-// 改动过网盘目录之后让 OpenList 刷新目录缓存：同样听 files.landed，整理 / 监控 / 复制那边直接调
-startOpenlistRefresh();
+// 改动过网盘目录之后让挂载层（OpenList / CD2）刷新目录缓存：同样听 files.landed，整理 / 监控 / 复制那边直接调
+startMountRefresh();
 
 // 上个进程退出时还在跑的任务已经没了，历史里不能永远挂着 running
 const interrupted = reconcileInterruptedExecutions();
@@ -212,6 +214,8 @@ await app.register(oauthTokenRoute);
 await app.register(clearDirectoryRoute);
 await app.register(healthRoute);
 await app.register(embyDiagnoseRoute);
+await app.register(cd2CheckRoute);
+await app.register(cd2ListRoute);
 await app.register(updateRoute);
 await app.register(backupRoute);
 
@@ -310,8 +314,8 @@ async function shutdown() {
   try { await stopFollowWatcher(); } catch { /* ignore */ }
   try { await stopEmbyNewWatcher(); } catch { /* ignore */ }
   try { flushEmbyRefresh(); } catch { /* ignore */ }
-  // 攒着还没发出去的 OpenList 刷新也发掉（最多等两秒）：整理刚做完就重启容器，不能让缓存半小时都是旧名字
-  try { await flushOpenlistRefresh(2000); } catch { /* ignore */ }
+  // 攒着还没发出去的挂载层刷新也发掉（最多等两秒）：整理刚做完就重启容器，不能让缓存半小时都是旧名字
+  try { await flushMountRefresh(2000); } catch { /* ignore */ }
   try { cancelAllRunningTasks(); } catch { /* ignore */ }
   try { cancelAllRuns(); } catch { /* ignore */ }
 

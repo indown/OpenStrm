@@ -34,6 +34,8 @@ const SETTING_SECRETS: Array<[string, string]> = [
   ["hdhive", "apiKey"],
   ["telegram", "botToken"],
   ["pansou", "password"],
+  ["cd2", "apiToken"],
+  ["cd2", "password"],
 ];
 
 type Groups = Record<string, unknown>;
