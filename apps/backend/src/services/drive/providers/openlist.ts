@@ -13,6 +13,7 @@ import {
   openlistRemove,
   openlistRename,
   type OpenlistFsEntry,
+  isOpenlistMissing,
 } from "../../openlist/client.js";
 import { syncViewFromPaths } from "../subtree.js";
 import {
@@ -30,9 +31,8 @@ import {
 
 const join = (dir: string, name: string): string => (dir === "/" ? `/${name}` : `${dir}/${name}`);
 
-/** OpenList 明确说没有这个路径（不是连不上） */
-const isMissing = (err: unknown): boolean =>
-  err instanceof OpenlistError && !err.transport && /not found|不存在|no such/i.test(err.message);
+/** OpenList 明确说没有这个路径（不是连不上）；和 openlist/refresh.ts 共用一份判断 */
+const isMissing = isOpenlistMissing;
 
 function modifiedAtOf(e: OpenlistFsEntry): number | undefined {
   if (!e.modified) return undefined;

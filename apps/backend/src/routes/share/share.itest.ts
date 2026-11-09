@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { AccountInfo, AppSettings, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AccountOpenlist, AppSettings, TaskDefinition } from "@openstrm/shared";
 import { registerErrorHandling } from "../../plugins/error-handler.js";
 import { authPlugin } from "../../plugins/auth.js";
 import shareRoute from "./index.js";
@@ -26,7 +26,8 @@ import { patchAppSettings } from "../../db/repositories/settings.js";
 import { clearCopies, listCopies } from "../../services/copy/queue.js";
 import { enqueueCopy, stopCopyWatcher } from "../../services/copy/service.js";
 import { isTaskRunning } from "../../services/task/registry.js";
-import { __test_setAsyncStartGrace } from "../../services/share/receive.js";
+import { __test_setAsyncStartGrace, saveSelectionToTask } from "../../services/share/receive.js";
+import { flushOpenlistRefresh, setOpenlistRefreshDeps, startOpenlistRefresh, stopOpenlistRefresh } from "../../services/openlist/refresh.js";
 
 const a115: AccountInfo = { accountType: "115", name: "a", cookie: "c" };
 const aQuark: AccountInfo = { accountType: "quark", name: "q", cookie: "c" };
@@ -358,5 +359,68 @@ test("没有同类账号：说清楚要加哪种账号", async () => {
     assert.match(res.json().message, /添加一个夸克网盘账号/);
   } finally {
     replaceAccounts([a115, aQuark]);
+  }
+});
+
+test("receive 时选了不整理（organize: false）：照样让 OpenList 刷新新文件所在的目录连同上级，不靠 files.landed（真机：转存后 OpenList 半小时列不出新目录）", async () => {
+  const listed: string[] = [];
+  const olAccount: AccountOpenlist = { accountType: "openlist", name: "ol", account: "u", password: "p", url: "http://ol.local" };
+  setOpenlistRefreshDeps({
+    listDir: async (_acc, dir) => {
+      listed.push(dir);
+      return [];
+    },
+    config: () => ({ account: olAccount, mounts: { a: "/115" } }),
+    quietMs: 10,
+  });
+  startOpenlistRefresh();
+  try {
+    const list = await post({ action: "list", url: LINK_115 });
+    const readme = (list.json().entries as Array<{ id: string; name: string; isDir: boolean }>).find((e) => e.name === "readme.txt")!;
+    const res = await post({ action: "receive", url: LINK_115, taskId: "s-115", subPath: "Show", mode: "sync", items: [readme], organize: false });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.ok(d115.tree.get("/tv/Show/readme.txt"), "转存进了任务目录的 Show 下");
+    await flushOpenlistRefresh();
+    assert.deepEqual(listed, ["/115/tv/Show"]);
+  } finally {
+    stopOpenlistRefresh();
+    setOpenlistRefreshDeps(null);
+  }
+});
+
+test("为转存新建的目录（createdDir）：成功时它的父目录也刷（上级缓存里还没有它）；转存失败收回目录后同样刷父目录", async () => {
+  const listed: string[] = [];
+  const olAccount: AccountOpenlist = { accountType: "openlist", name: "ol", account: "u", password: "p", url: "http://ol.local" };
+  setOpenlistRefreshDeps({
+    listDir: async (_acc, dir) => {
+      listed.push(dir);
+      return [];
+    },
+    config: () => ({ account: olAccount, mounts: { a: "/115" } }),
+    quietMs: 10,
+  });
+  startOpenlistRefresh();
+  try {
+    const list = await post({ action: "list", url: LINK_115 });
+    const readme = (list.json().entries as Array<{ id: string; name: string; isDir: boolean }>).find((e) => e.name === "readme.txt")!;
+    const ref = { kind: "115" as const, code: "abc", password: "1234", url: LINK_115 };
+    // 调用方（追更 / 智能体）先建好 Show/New，再带 createdDir 转存进去
+    d115.tree.addDir("/tv/Show/New");
+    await saveSelectionToTask({ task: t115, provider: d115, ref, items: [readme], subPath: "Show/New", mode: "sync", settings: readAppSettings(), organize: false, createdDir: "Show/New" });
+    await flushOpenlistRefresh();
+    assert.deepEqual(listed, ["/115/tv/Show", "/115/tv/Show/New"], "新目录的父目录 + 条目所在目录");
+
+    listed.length = 0;
+    d115.tree.addDir("/tv/Show/Tmp");
+    await assert.rejects(
+      saveSelectionToTask({ task: t115, provider: d115, ref, items: [{ id: "nope", name: "nope.mkv", isDir: false }], subPath: "Show/Tmp", mode: "sync", settings: readAppSettings(), organize: false, createdDir: "Show/Tmp" }),
+      /unknown share item/,
+    );
+    assert.equal(d115.tree.get("/tv/Show/Tmp"), undefined, "转存没成，建出来的目录收回去了");
+    await flushOpenlistRefresh();
+    assert.deepEqual(listed, ["/115/tv/Show"], "收回的目录的父目录刷一次");
+  } finally {
+    stopOpenlistRefresh();
+    setOpenlistRefreshDeps(null);
   }
 });

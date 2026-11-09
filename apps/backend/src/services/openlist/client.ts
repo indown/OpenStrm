@@ -35,6 +35,14 @@ export class OpenlistError extends Error {
   }
 }
 
+/** OpenList 明确说没有这个路径（不是连不上）：object not found 等 */
+export const isOpenlistMissing = (err: unknown): boolean =>
+  err instanceof OpenlistError && !err.transport && /not found|不存在|no such/i.test(err.message);
+
+/** OpenList 说这个路径不在任何存储下（failed get storage: storage not found）：多半是挂载根填错了 */
+export const isOpenlistStorageMissing = (err: unknown): boolean =>
+  err instanceof OpenlistError && !err.transport && /storage not found/i.test(err.message);
+
 interface Envelope<T> {
   code?: number;
   message?: string;

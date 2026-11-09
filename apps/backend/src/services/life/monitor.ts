@@ -48,6 +48,7 @@ import { normalizePath, type AccountIssue, type ChangeCursor, type ChangeEvent, 
 import { isTaskRunning } from "../task/registry.js";
 import { DeferralGate } from "./deferral.js";
 import { flushEmbyRefresh, getEmbyRefreshState, scheduleEmbyRefresh } from "../media-server.js";
+import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
 import {
   handleCreate,
   handleMove,
@@ -508,6 +509,9 @@ class AccountMonitor {
     const halfBack = own !== null && own.status === "done" && own.curPath !== "" && getOrganizeRun(own.runId)?.status !== "reverting";
     const ownOk = own !== null && own.errorKind !== "mirror" && !halfBack;
     if (ownOk) bumpOwnHit(own.id);
+    // 事件所在的目录（改名 / 移动连旧目录）让 OpenList 刷新：不管落不落在任务里、本地动没动，OpenList 的缓存都已经旧了。
+    // 整理自己造成的它已经刷过；解析不出路径的 problem 事件没有可刷的目录
+    if (!ownOk && !ev.problem) scheduleOpenlistRefresh(this.name, ev.oldPath ? [ev.path, ev.oldPath] : [ev.path]);
     const res: HandleResult = ownOk ? { status: "skipped", detail: "整理已处理，本地已镜像", changed: false } : await dispatch(ctx, ev);
     markLifeEvent(id, res.status, res.detail);
     if (res.status !== "done") {

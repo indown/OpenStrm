@@ -38,6 +38,7 @@ import {
 } from "../openlist/client.js";
 import { notify, type NotifyEvent } from "../notify.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
+import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
 import { events } from "../events.js";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -1024,6 +1025,19 @@ async function removeSourceReal(account: string, path: string, nodeId?: string):
  * 复制成功之后：通知 Emby 扫一遍、目标落在某个 OpenList 任务里就按它的策略自动整理、
  * 按需删源。每一步失败都只写进 detail，不把已经成功的复制翻成失败。
  */
+/** 归档落点目录链里、任务目录以下的每一层（含落点本身）：这些目录可能是这次新建的，报上去让各自的父目录刷新 */
+function archiveChainEntries(rootPath: string | undefined, to: string): string[] {
+  const rel = rootPath ? relativeTo(rootPath, to) : null;
+  if (rel === null) return [to];
+  const out: string[] = [];
+  let cur = normDir(rootPath!);
+  for (const seg of rel.split("/").filter(Boolean)) {
+    cur = joinPath(cur, seg);
+    out.push(cur);
+  }
+  return out;
+}
+
 async function afterCopied(c: CopyRecord, cfg: CopyConfig): Promise<void> {
   try {
     await afterCopiedInner(c, cfg);
@@ -1157,6 +1171,10 @@ export async function applyAfterCopy(c: CopyRecord, cfg: CopyConfig, opts: { ret
       } catch (err) {
         c.detail += `，本地 strm 没删掉：${messageOf(err)}`;
       }
+      // 源目录在 OpenList 之外变了：让它刷新缓存，经挂载回源的别再看到已删 / 已挪走的文件。
+      // 归档的还有落点那条目录链（to 是落进去的目录）：ensureDriveDir 可能新建了其中几层，任务目录以下每一层都报上去让父目录刷，
+      // 落点本身用「落点/名字」报
+      scheduleOpenlistRefresh(c.account, result.kind === "archived" ? [src, ...archiveChainEntries(c.rootPath, result.to), joinPath(result.to, c.name)] : [src]);
       return result;
     }
     if (outcome === "missing") return kept("源文件已不在原处", `，没${verb}`);

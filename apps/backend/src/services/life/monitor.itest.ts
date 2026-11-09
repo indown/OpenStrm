@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, beforeEach, test } from "node:test";
-import type { AccountInfo, TaskDefinition } from "@openstrm/shared";
+import type { AccountInfo, AccountOpenlist, TaskDefinition } from "@openstrm/shared";
 import { KEY } from "../../db/keys.js";
 import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
 import { deleteDriveSnapshots, deleteKv, deleteLifeEventsBefore, listRecentLifeEvents, readDriveSnapshot, readKv } from "../../db/repositories/life.js";
@@ -33,6 +33,7 @@ import { FakeDrive } from "../../test/fake-drive.js";
 import { __test_flushAutoOrganize, __test_resetAutoOrganize, setAutoOrganizeDeps, startAutoOrganize } from "../organize/auto.js";
 import { __test_resetCopy, listCopies } from "../copy/service.js";
 import { events } from "../events.js";
+import { flushOpenlistRefresh, setOpenlistRefreshDeps, startOpenlistRefresh, stopOpenlistRefresh } from "../openlist/refresh.js";
 import { releaseTaskStart, reserveTaskStart } from "../task/registry.js";
 import { QuarkSnapshotSource } from "./sources/quark.js";
 import { getLifeMonitorStatus, probeLifeEvents, startLifeMonitor, stopLifeMonitor } from "./monitor.js";
@@ -612,5 +613,48 @@ test("快照来源一样：同步在跑时变化先记下、快照照常往前�
   } finally {
     releaseTaskStart("m-q");
     await stopLifeMonitor();
+  }
+});
+
+test("监控处理过的新增 / 改名 / 删除：新旧路径所在的目录连同上级让 OpenList 刷新（网盘 App 里改的 OpenList 同样不知道）", async () => {
+  const listed: string[] = [];
+  const olAccount: AccountOpenlist = { accountType: "openlist", name: "ol", account: "u", password: "p", url: "http://ol.local" };
+  setOpenlistRefreshDeps({
+    listDir: async (_acc, dir) => {
+      listed.push(dir);
+      return [];
+    },
+    config: () => ({ account: olAccount, mounts: { A: "/115" } }),
+    quietMs: 10,
+  });
+  startOpenlistRefresh();
+  configure({ accounts: ["A"], pullMode: "latest", intervalSeconds: 5 });
+  dA.tree.addDir("/tv/Show");
+  dA.tree.addFile("/tv/Show/ep1.mkv");
+  dA.tree.addDir("/tv/NewShow");
+  dA.changes!.queue.push(
+    ev({ id: "o1", kind: "create", path: "/tv/Show/ep1.mkv" }),
+    ev({ id: "o2", kind: "rename", path: "/tv/Show/ep1 v2.mkv", oldPath: "/tv/Show/ep1.mkv" }),
+    ev({ id: "o3", kind: "remove", path: "/tv/Show/ep1 v2.mkv" }),
+    // 新建的目录：事件本身报的是目录，刷它的父目录；不在任何任务里的文件：本地不动，OpenList 的缓存照样旧了
+    ev({ id: "o4", kind: "create", path: "/tv/NewShow", isDir: true }),
+    ev({ id: "o5", kind: "create", path: "/other/x.mkv" }),
+    ev({ id: "o6", kind: "create", path: "orphan.mkv", problem: "父目录 404 无法解析" }),
+  );
+  try {
+    const r = await startLifeMonitor();
+    assert.equal(r.ok, true, r.message);
+    await waitFor(() => {
+      const st = statusOf("A")?.stats;
+      return !!st && st.handled + st.skipped + st.failed === 6;
+    }, "六条都处理完");
+    await stopLifeMonitor();
+    await flushOpenlistRefresh();
+    assert.deepEqual(new Set(listed), new Set(["/115/tv", "/115/tv/Show", "/115/other"]), "problem 事件没有可刷的目录");
+    assert.ok(listed.indexOf("/115/tv") < listed.indexOf("/115/tv/Show"), "浅的先刷");
+  } finally {
+    await stopLifeMonitor();
+    stopOpenlistRefresh();
+    setOpenlistRefreshDeps(null);
   }
 });

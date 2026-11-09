@@ -12,12 +12,13 @@ import { providerForTask } from "../drive/registry.js";
 import { normalizePath, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
 import { revertFollowOrganized, rewriteFollowSubPaths } from "../follow/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
+import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
 import { rewriteOfflineSubPaths } from "../offline/service.js";
 import { rewriteCopyPaths } from "../copy/queue.js";
 import { describeFileFailure } from "../download/failure.js";
 import { classifyFailure, FAILURE_LABEL, messageOf, OrganizeFailure, revertWorkItem } from "./failures.js";
 import { mirrorRelocate, mirrorRmdir } from "../strm/mirror.js";
-import { copyLayout, deps, type Job, jobs, assertNoOps, jobLog, setProgress, baseOf, dirOf, absOf, relOf, computeStats, startJob, planStates, intermediateOf, revertability, dirMappings, movedFiles, accountTasks } from "./run-state.js";
+import { copyLayout, deps, type Job, jobs, assertNoOps, jobLog, setProgress, baseOf, dirOf, absOf, relOf, computeStats, startJob, planStates, intermediateOf, revertability, dirMappings, movedFiles, accountTasks, WORK_ACTIONS } from "./run-state.js";
 import { type DirEntryRef, type ExecCtx, noteRenamed, noteMoved, namesIn, occupied, clashError, withRetry, listCtx } from "./exec-ctx.js";
 
 /**
@@ -273,7 +274,18 @@ function finishRevert(job: Job, runId: string, outcome: { fatal: string | null; 
   jobLog(job, outcome.fatal ?? (outcome.aborted ? `已取消：退回 ${stats.reverted} 项${left}` : `撤销完成：退回 ${stats.reverted} 项${left}`));
   updateRun(runId, { status, error: outcome.fatal ?? (outcome.aborted ? "已取消" : ""), stats, log: job.logs, finishedAt: Math.floor(Date.now() / 1000) });
   planStates.delete(runId);
-  if (outcome.refresh) scheduleEmbyRefresh();
+  if (outcome.refresh) {
+    // 和 finishApply 对称：退回过的目录两边都让 OpenList 刷新；撤销时删掉的新建目录不刷
+    const undone = items.filter((it) => it.status === "reverted" && WORK_ACTIONS.has(it.action));
+    if (undone.length > 0) {
+      scheduleOpenlistRefresh(
+        task.account,
+        undone.flatMap((it) => [it.srcPath, it.dstPath]),
+        { removed: undone.filter((it) => it.action === "mkdir").map((it) => it.dstPath) },
+      );
+    }
+    scheduleEmbyRefresh();
+  }
   if (!outcome.aborted) {
     void deps.notify({ type: "organize-done", task, runId, units: stats.units, done: stats.reverted, failed: stats.failed, reverted: true, failedByKind: stats.failedByKind, notReverted: stats.notReverted });
   }

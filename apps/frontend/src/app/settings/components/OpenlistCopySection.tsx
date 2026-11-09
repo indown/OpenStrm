@@ -193,6 +193,7 @@ export function OpenlistCopySection({ value, onChange }: Props) {
       <p className="text-sm text-muted-foreground">
         网盘上新落下的文件（云下载、转存、追更、网盘监控），让 OpenList 复制到另一个存储，比如挂载的本地磁盘。
         复制哪些由任务上的开关决定；这里配的是「用哪个 OpenList、复制到哪、各个网盘挂在 OpenList 的什么位置」。
+        填了挂载根的账号，整理 / 转存 / 删源改动网盘之后还会让 OpenList 刷新改过的目录，经 OpenList 挂载回源播放的不用等它的缓存过期。
       </p>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -241,7 +242,7 @@ export function OpenlistCopySection({ value, onChange }: Props) {
           <h3 className="text-sm font-medium">各个网盘在 OpenList 里的挂载根</h3>
           <p className="text-xs text-muted-foreground">
             OpenList 把网盘挂在哪个目录下就填哪个，比如 115 挂在 <code>/115</code>。
-            网盘上的路径拼上它就是 OpenList 里的路径；不填的账号不复制。
+            网盘上的路径拼上它就是 OpenList 里的路径；不填的账号不复制，也不刷新缓存。
           </p>
         </div>
         {failed ? (

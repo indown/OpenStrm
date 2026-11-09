@@ -14,6 +14,7 @@ import { COPY_TRIGGER_LABEL, enqueueCopyFor, type CopyOutcome } from "../copy/se
 import { checkCopyDstDir, copyBlockerFor, copyOptionsFor } from "../copy/paths.js";
 import { releaseCopyHoldsById, type CopyTrigger } from "../copy/queue.js";
 import { events } from "../events.js";
+import { scheduleOpenlistRefresh } from "../openlist/refresh.js";
 import { effectiveAutoMode } from "../organize/auto.js";
 import { generateStrmForSelected, type SelectedItem } from "../strm/share-strm.js";
 import { recordLibrarySave } from "../library/saves.js";
@@ -201,9 +202,20 @@ export async function saveSelectionToTask(opts: SaveSelectionOpts): Promise<Save
     topIds = result.topIds;
   } catch (err) {
     // 转存没成：调用方为它建出来的目录收回去，不然下次再存就当成原来就有的，整理完留一个空壳
-    if (opts.createdDir) await dropCreatedDir(provider, task.originPath, subPath, opts.createdDir);
+    if (opts.createdDir) {
+      await dropCreatedDir(provider, task.originPath, subPath, opts.createdDir);
+      // 建出来又删掉的目录，OpenList 这期间可能已经列到过：让它的父目录刷新
+      scheduleOpenlistRefresh(provider.account.name, [`/${task.originPath}/${opts.createdDir}`]);
+    }
     throw driveErrorToHttp(err, "转存失败");
   }
+  // 网盘上多了这些条目，OpenList 的目录缓存不知道：不管这次整不整理、同步还是后台模式，都让它刷新所在目录；
+  // 为这次转存新建的目录也报上去（它的父目录才会刷）。不能只靠 files.landed——那个事件只在交给整理时才发
+  // （真机：转存时选了不整理，OpenList 半小时都列不出新目录）
+  scheduleOpenlistRefresh(provider.account.name, [
+    ...items.map((i) => `/${fullOriginPath}/${i.name}`),
+    ...(opts.createdDir ? [`/${task.originPath}/${opts.createdDir}`] : []),
+  ]);
   // 从收藏夹里的分享存的：记一笔，收藏夹里这部作品就显示「已经有了」；记不上不影响转存
   try {
     recordLibrarySave({ shareCode: ref.code, itemIds: items.map((i) => i.id), taskId: task.id, subPath });

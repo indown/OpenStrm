@@ -130,6 +130,19 @@ export function resolveCopyConfig(settings: AppSettings = readAppSettings()): Co
 }
 
 /**
+ * 配齐了就给配置，没配 / 配错就 null：给「顺手让 OpenList 刷一下目录缓存」这类可有可无的用途，
+ * 没配不该报错、也不该惊动谁（services/openlist/refresh.ts）
+ */
+export function copyConfigIfReady(settings: AppSettings = readAppSettings()): CopyConfig | null {
+  try {
+    return resolveCopyConfig(settings);
+  } catch (err) {
+    if (err instanceof HttpError) return null;
+    throw err;
+  }
+}
+
+/**
  * 只看设置：这个网盘账号要复制还缺哪样，null = 设置上齐了。顺序照设置页从上到下。
  * 不碰账号表——账号本身好不好使留到真提交时报错（要连账号表一起看的是 copyBlockerFor）。
  * 前端任务弹框里有一份同样的判断（apps/frontend/src/lib/openlist-copy.ts），改条件时两边一起动。

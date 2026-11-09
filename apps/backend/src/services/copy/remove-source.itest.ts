@@ -17,6 +17,7 @@ import { patchAppSettings, readAppSettings } from "../../db/repositories/setting
 import { setDriveProviderFactory } from "../drive/registry.js";
 import { FakeDrive } from "../../test/fake-drive.js";
 import type { OpenlistTaskInfo } from "../openlist/client.js";
+import { flushOpenlistRefresh, setOpenlistRefreshDeps, startOpenlistRefresh, stopOpenlistRefresh } from "../openlist/refresh.js";
 import type { DriveEntry, DriveNode } from "../drive/types.js";
 import { __test_resetCopy, enqueueCopy, listCopies, setCopyServiceDeps, stopCopyWatcher, tickCopies } from "./service.js";
 
@@ -281,5 +282,29 @@ test("115 式目录缓存：缓存里的清单还没有刚转存的文件，钉�
     assert.equal(cachedDrive.tree.get("/tv/某剧/S01/E01.mkv"), undefined);
   } finally {
     setDriveProviderFactory((a) => (a.name === "acc" ? drive : null));
+  }
+});
+
+test("删源之后让 OpenList 刷新源目录连同上级：经 OpenList 挂载回源的别再看到已删的文件", async () => {
+  const listed: string[] = [];
+  setOpenlistRefreshDeps({
+    listDir: async (_acc, dir) => {
+      listed.push(dir);
+      return [];
+    },
+    quietMs: 10,
+  });
+  startOpenlistRefresh();
+  try {
+    drive.tree.addFile("/tv/某剧/S01/E01.mkv");
+    names = { "/115/tv/某剧/S01": ["E01.mkv"] };
+    afterCopy = { "/local/media/某剧/S01": ["E01.mkv"] };
+    await copyThrough({ path: "/tv/某剧/S01/E01.mkv" });
+    assert.match(listCopies()[0].detail, /网盘上那份已删/);
+    await flushOpenlistRefresh();
+    assert.deepEqual(listed, ["/115/tv/某剧/S01"], "只刷源文件所在的目录；挂载根来自设置页的「复制到 OpenList」");
+  } finally {
+    stopOpenlistRefresh();
+    setOpenlistRefreshDeps(null);
   }
 });
