@@ -167,3 +167,5 @@ strm 页「删除」只删本地文件，不动网盘，不接。
 升级说明要写的行为变化：配了 OpenList 账号和挂载根（设置页「复制到 OpenList」）的用户，整理 / 转存 / 追更 / 云下载 / 监控到的改动 / 复制后删源 / 归档之后会多几次对 OpenList `fs/list refresh` 的请求（每个改过的目录一次，OpenList 再问一次网盘）；经 OpenList 挂载回源的不用再等缓存过期。没配的不受影响。
 
 工作流：CI 和 Release 都绿（Release 四个作业：Typecheck, lint and tests / Build arm64 / Build amd64 / Merge manifest and release 全 success，17:39 UTC 完成）。GitHub Release `v2.26.0-rc.1` 是 prerelease。Docker Hub `indown/openstrm:v2.26.0-rc.1` digest `sha256:dddee7924e14a5fc2d1ab0d06da9f8b8d432de1279d73c6881af6577712acb2a`（17:38 推上），`latest` 仍是 v2.25.0 的 `sha256:c7aa598bd933…`，没动。升级说明交用户手动贴。待用户把 ssm 上的 openstrm 换到这个 tag 后用真片走一次整理看挂载。
+
+2026-11-09 晚：CD2 线随 `v2.26.0-rc.2`（855058f）发出，`latest` 仍没动；rc.1 还没做的 ssm 真片验证改在 rc.2 上做。记录在 `cd2.md`「发布」。

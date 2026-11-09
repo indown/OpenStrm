@@ -204,3 +204,11 @@ proto 里和复制有关的：`CopyFile(CopyFileRequest{theFilePaths[], destPath
 **收尾（2026-11-09 20:05 UTC 前后）**：ssm 上 `docker rm -f cd2-lab` 已删（`/root/cd2-lab/config` 是空目录，CD2 的登录状态 / 115 授权 / lab API 令牌都随容器没了，没有要撤销的令牌）；本机 lab 后端（4100）和 19798 隧道已停；scratchpad 的 lab-cd2（lab 库、临时口令、lab 登录令牌、CD2 令牌、脚本、日志）已删。留下的三样（NAS `/mnt/hdd/cd2lab/` 两集共 7.6 GB、115 `/lab1109/` 三集、ssm `/root/cd2-lab/` 空目录）用户说「删一下」，20:20 UTC 前后全删了：NAS 和空目录直接 ssh 删；115 那边重新只读备份一份生产库到本机 scratch，走项目自己的 115 Provider 逐个 `remove`（进回收站）再 `rmdirIfEmpty`，核对 `/lab1109` 已不在，scratch 备份随手删掉。115 上这一轮什么都没留。下回再起 lab CD2：`docker run -d --name cd2-lab --restart no -p 127.0.0.1:19798:19798 -e CLOUDDRIVE_HOME=/Config -v /root/cd2-lab/config:/Config -v /mnt/hdd/cd2lab:/local/hdd -e TZ=Asia/Shanghai cloudnas/clouddrive2:latest`，浏览器走 `ssh -L 19798:127.0.0.1:19798` 登录、扫码加 115、加本地文件夹、生成令牌（勾「读」「复制」「查看传输任务」）。
 
 **文案修补后的全量**：第一遍 1789 过 1788、挂 1 个——`copy.itest`「任务列表拿不到：这一轮一个字段都不改」是修问题 1 之前的契约（任务列表读不到就什么都不动），兜底一加它必然挂；真机前那次全量 1788 是在兜底之前跑的，兜底之后只跑过 cd2-engine / check 两个文件，这里补上。按新契约重写：状态、阶段、任务号不动、不算「列表里没找到」、说明写清是任务列表读不到、目标里有了算完成；顺手把兜底说明分成两种——目标目录能读就带核对结果（「改按目标目录核对：目标里没看到这一份」/「…少了 N 项」），目标目录也读不到（多半整个服务连不上）就说「目标目录也读不到，下轮再看」，不再一律说「目标里还没有这一份」（`cd2-engine.itest` 的断言同步改）。第二遍：typecheck / lint 过，后端全量 1789 / 1789，shared 20 / 20。
+
+## 发布（2026-11-09）
+
+用户：「提交一下发 rc 吧」。`00bc7a4` feat(cd2)（两阶段代码 + 测试 + 设置页 + README，含真机后的两处修补）→ `4d758ca` docs(plans) 方案 + drive-notes → `855058f` chore(release): v2.26.0-rc.2（三个 package.json 从 2.26.0-rc.1 升到 2.26.0-rc.2，shared 仍 2.0.0）；tag `v2.26.0-rc.2`（注释 v2.26.0-rc.2），`git push origin v2 v2.26.0-rc.2`（20:23 UTC），main 没动（仍 == v2.25.0 5f1d88b）。没有迁移。接着 rc.1（OpenList 刷新）在 2.26.0 这条线上继续出 rc，不另开 2.27（惯例同 v2.17 / v2.18：一个小版本在 rc 期间攒几个功能）。
+
+工作流：CI 和 Release 都绿（Release 四个作业 Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release 全 success，20:34 UTC 完成，推送到全绿 11 分钟）。GitHub Release `v2.26.0-rc.2` 是 prerelease。Docker Hub `indown/openstrm:v2.26.0-rc.2` digest `sha256:c00716290f34e663329e974a1bd19a02e5c94b96c8018eb7708bfb60e1069f94`（amd64 + arm64，20:34 推上），`latest` 仍是 v2.25.0 的 `sha256:c7aa598bd933…`，没动。升级说明交用户手动贴（草稿给了用户：新增设置页「CloudDrive2」一节和「用哪个复制」下拉，默认仍是 OpenList、老用户不用改配置；CD2 令牌权限要读 / 复制 / 查看传输任务；复制队列文案改按引擎；没有迁移）。
+
+待办：用户把 ssm 上的 openstrm 换到这个 tag 后，用真片走一次整理看 rclone 挂载（rc.1 那条也还没验）；CD2 用户的反馈等 issue。
