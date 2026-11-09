@@ -159,3 +159,11 @@ strm 页「删除」只删本地文件，不动网盘，不接。
 日志：lab 后端日志里除两次 `listen EADDRINUSE`（我误杀了监听进程、`pnpm dev` 的看护又拉了一个，两份看护重载时抢端口）之外没有告警和报错；openlist-refresh 的四条都是 info。
 
 收尾：lab 后端（两个 `pnpm dev` 看护 37810 / 57049 和它们的 tsx watch、监听进程）按 PID 停掉，4100 已空；ssh 隧道（5244）关掉；scratchpad 里的 lab 目录（含 115 cookie 的库拷贝 672 MB、临时口令、令牌、脚本、测试临时目录）整个删掉。115 上留下 `/lab1109/`（S03E01–E03 三集，约 12 GB，撤销后在顶层、原名），删不删由用户定；lab 任务只存在于已删除的 lab 库里。
+
+## 发布（2026-11-09）
+
+用户：「发」。`8492f60` feat(openlist) 代码 + 测试 + 设置页文案 + README → `9bd721d` docs(plans) 方案 → `0c71356` chore(release): v2.26.0-rc.1（三个 package.json 升到 2.26.0-rc.1，shared 仍 2.0.0）；tag `v2.26.0-rc.1`（注释 v2.26.0-rc.1），`git push origin v2 v2.26.0-rc.1`，main 没动（仍 == v2.25.0 5f1d88b）。没有迁移。
+
+升级说明要写的行为变化：配了 OpenList 账号和挂载根（设置页「复制到 OpenList」）的用户，整理 / 转存 / 追更 / 云下载 / 监控到的改动 / 复制后删源 / 归档之后会多几次对 OpenList `fs/list refresh` 的请求（每个改过的目录一次，OpenList 再问一次网盘）；经 OpenList 挂载回源的不用再等缓存过期。没配的不受影响。
+
+工作流：CI 和 Release 都绿（Release 四个作业：Typecheck, lint and tests / Build arm64 / Build amd64 / Merge manifest and release 全 success，17:39 UTC 完成）。GitHub Release `v2.26.0-rc.1` 是 prerelease。Docker Hub `indown/openstrm:v2.26.0-rc.1` digest `sha256:dddee7924e14a5fc2d1ab0d06da9f8b8d432de1279d73c6881af6577712acb2a`（17:38 推上），`latest` 仍是 v2.25.0 的 `sha256:c7aa598bd933…`，没动。升级说明交用户手动贴。待用户把 ssm 上的 openstrm 换到这个 tag 后用真片走一次整理看挂载。
