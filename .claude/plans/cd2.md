@@ -433,6 +433,7 @@ OpenList 在账户页是因为它能建同步任务，复制和刷新只是复�
 - [x] 真机（2026-11-10，见「真机记录」；用户批准后在 115 的 `/lab1110` 里做完，实验环境已全部删除）
 - [ ] 评审：没做。用户 2026-11-10：「真机测试做完之后不用review，直接停掉然后把实验环境都删除」
 - [x] 发布：v2.26.0-rc.3（2026-11-11，见文末「发布（阶段 3）」）
+- [x] 转正：v2.26.0 正式版（2026-11-11，见文末「发布（v2.26.0 正式版）」）
 
 ## 实施记录（2026-11-10，阶段 3，进行中）
 
@@ -656,3 +657,31 @@ scratch 库的后端（127.0.0.1:4100）+ `next dev`（3223）+ 测试里的假 
 - 「检查连接」平时验地址、凭据和「获取传输任务」；按用途列缺哪项权限只有带「令牌管理」权限的令牌才看得到。
 
 待办：用户把 ssm 上的 openstrm 换到这个 tag，用自己的 CD2 走一遍（账户页那个自动迁移出来的 `cd2` 账号、建 CD2 任务、整理）；rc.1 的 rclone 挂载那条也还没用真片验；v2.26.0 转正等用户。
+
+## 发布（v2.26.0 正式版，2026-11-11）
+
+用户在 rc.3 发出半小时后：「发个正式版吧」。没有等 ssm 上的真片验证（rc.1 的 rclone 挂载、rc.2 / rc.3 的 CD2 都只在 lab 上验过），是用户定的。
+
+工作区是干净的，没有压着的方案记录。先把三个 package.json 改成 2.26.0，在这份代码上跑了 `pnpm typecheck && pnpm lint && pnpm test`（后端 1821 / 1821，前端 24 / 24），再提交。
+
+`d294614` chore(release): v2.26.0（三个 package.json 从 2.26.0-rc.3 改成 2.26.0，shared 仍 2.0.0）；tag `v2.26.0`（注释 v2.26.0），`git push origin v2 v2.26.0`，然后 `git branch -f main v2 && git push origin main`：main 从 `5f1d88b`（v2.25.0）快进到 `d294614`，15:15 UTC。main == v2 == v2.26.0。
+
+这一版相对 v2.25.0 带的东西（14 个提交）：
+
+- `8492f60` feat(openlist)：改动网盘后让 OpenList 刷新目录缓存（rc.1，方案在 `openlist-cache-refresh.md`）。
+- `00bc7a4` feat(cd2)：CloudDrive2 当目录缓存刷新目标和复制引擎（rc.2）。
+- `ed2cc54` feat(cd2)：CloudDrive2 做成账号类型，带 Provider（rc.3）。
+- 其余是 docs(plans) 和三个 rc 的版本号提交。
+- **迁移 0030**（纯数据）。从 v2.25.0 直接升上来的库里没有 `app.cd2`，这条迁移什么都不做；用过 rc.2 的才会被搬成 `cd2` 账号。
+
+工作流：CI@v2、CI@main（各自 Typecheck and tests、Docker image）和 Release（Typecheck, lint and tests / Build amd64 / Build arm64 / Merge manifest and release）全 success，15:27 UTC 完成，推送到全绿 12 分钟。GitHub Release `v2.26.0` 不是 prerelease，是仓库的 latest release。Docker Hub `indown/openstrm:v2.26.0` 和 `latest` 同为 `sha256:20801a6b967df57fadd862a28d5146ae7ae799a4ba811851b0a4868aaa0f10bb`（amd64 + arm64，15:26 推上）。
+
+升级说明交用户手动贴，草稿要点（相对 v2.25.0）：
+
+- 新增「改动网盘后刷新挂载层的目录缓存」：整理、转存、追更、云下载、监控到的改动、复制后删源 / 归档之后，让 OpenList 或 CloudDrive2 刷新改过的目录，经它们挂载回源的不用等缓存过期。OpenList 那边复用「复制到 OpenList」里的账号和挂载根，CD2 那边在设置页「CloudDrive2」一节选账号、填各网盘在 CD2 里的路径；没配的不受影响，配了的会多几次列目录请求。
+- 新增 CloudDrive2 账号类型：账户页填地址 + API 令牌（或用户名口令），CD2 里挂的任何云盘都能建同步任务、浏览目录、整理；没有分享转存、追更、网盘监控、云下载、302。
+- 复制可以改用 CloudDrive2：设置页「复制到 OpenList / CloudDrive2」里「用哪个复制」，默认仍是 OpenList，老用户不用改配置。
+- 令牌权限按用途勾（叫法同 CD2 界面）：浏览「列出文件」；同步再加「读取文件」；整理再加「创建文件夹」「重命名」「移动」「删除」；复制引擎要「复制」「获取传输任务」「创建文件夹」。
+- 带迁移 0030；回滚要连库一起退。用过 rc.2 的：设置页里填的 CD2 地址和凭据升级时自动变成一个叫 `cd2` 的账号。
+
+没验过、留给用户反馈的：真实片库上 rclone 挂载跟上 OpenList 刷新的效果；CD2 令牌限根目录、少勾权限、用户名口令登录；CD2 大库全量同步的耗时。阶段 3 没做评审。

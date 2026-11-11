@@ -169,3 +169,5 @@ strm 页「删除」只删本地文件，不动网盘，不接。
 工作流：CI 和 Release 都绿（Release 四个作业：Typecheck, lint and tests / Build arm64 / Build amd64 / Merge manifest and release 全 success，17:39 UTC 完成）。GitHub Release `v2.26.0-rc.1` 是 prerelease。Docker Hub `indown/openstrm:v2.26.0-rc.1` digest `sha256:dddee7924e14a5fc2d1ab0d06da9f8b8d432de1279d73c6881af6577712acb2a`（17:38 推上），`latest` 仍是 v2.25.0 的 `sha256:c7aa598bd933…`，没动。升级说明交用户手动贴。待用户把 ssm 上的 openstrm 换到这个 tag 后用真片走一次整理看挂载。
 
 2026-11-09 晚：CD2 线随 `v2.26.0-rc.2`（855058f）发出，`latest` 仍没动；rc.1 还没做的 ssm 真片验证改在 rc.2 上做。记录在 `cd2.md`「发布」。
+
+2026-11-11：随 **v2.26.0 正式版**（`d294614`）发布，main 快进到它，`latest` 是 `sha256:20801a6b967d…`。ssm 上的真片验证到转正时都还没做，是用户定的直接转正。记录在 `cd2.md`「发布（v2.26.0 正式版）」。
