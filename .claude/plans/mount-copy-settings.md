@@ -109,7 +109,7 @@
 - [x] 评审：`/code-review medium`，9 条全修（2026-11-11，见「评审与修补」）
 - [x] 真机：OpenList + CD2 + 115 / 夸克，两处真机发现已修（2026-11-11，见「真机验证」）
 - [x] 第二轮评审（真机后）：`/code-review medium`，9 条全修（2026-11-11，见「第二轮评审与修补」）
-- [ ] 提交 / 发版：等用户叫
+- [x] 提交 / 发版：v2.27.0 正式版（2026-11-11，见「发布」）
 
 ## 实施记录（2026-11-11）
 
@@ -287,3 +287,30 @@
 - 前端 typecheck / lint 过，单测 35 / 35。
 - 后端 typecheck 过。改到的几组先单独跑过：`paths.test` 16、`telegram/commands.test` 34、`crud.itest` 34、`offline/followup.itest` 32、`mcp-copy.itest` 21，都过。
 - 后端全量 1824 / 1824（5 分 09 秒，比上次多的 2 条就是这轮加的）；全仓 typecheck / lint 过；改过的文件扫过不可见字符：0。
+
+## 发布（2026-11-11）
+
+用户：「发正式版吧」。没走 rc，直接发正式版（v2.23.0、v2.24.0、v2.25.0 也是这样）。
+
+- 提交：
+  - `0b0b57d feat(settings): give mount layers their own section and make copy follow the engine`
+  - `8ea3be0 docs(plans): record the mount/copy settings split, its reviews and real-device run`
+  - `0112463 chore(release): v2.27.0`（只改三个 `package.json` 的版本号）
+- tag `v2.27.0`（注释 `v2.27.0`）。`v2.26.0..v2.27.0` 带了 f4ab0a9（v2.26.0 的发布记录）和上面三个提交。
+- 发版前在改好版本号的这份代码上跑了根目录 typecheck / lint / test：后端 1824 / 1824，前端 35 / 35。
+- 20:56 UTC `git push origin v2 v2.27.0`，main 从 d294614 快进到 0112463（main == v2 == v2.27.0）。
+- 21:08 UTC 全部核对完：
+  - Release 四个作业 + CI@v2 + CI@main 全绿；
+  - Docker Hub `v2.27.0` 和 `latest` 同为 074e269948f7（amd64 + arm64）；
+  - GitHub Release 不是 prerelease，是仓库最新。
+- 迁移：没有。设置键：没有新的（存储形状不变）。接口：`GET /api/task` 每行多了 `copyBlockedAt`；`addOfflineTasks` 的回包多了 `copyEngine`（Telegram 回话用）。
+- 升级说明交用户手动贴，要点：
+  - 设置页两节换成「网盘挂载」「复制」，不用改配置；
+  - CD2 引擎下云下载页三处复制入口能用了；
+  - 任务列表「复制没生效」按原因跳到对的地方；
+  - 复制队列空闲时也会刷新；
+  - 选的账号被删了，复制入口就不出现；
+  - 指路的说法改了。
+- 盯梢时碰到两件事：
+  - GitHub 的作业列表接口对匿名请求有一阵一直回 502，脚本改成取不到就看整个运行的结论；
+  - 运行列表已经显示 completed / success 时，第四个作业（Merge manifest and release）可能还在跑，要以作业的结论为准。
