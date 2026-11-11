@@ -100,3 +100,18 @@
 - API 令牌按权限勾：「读」才能列目录 / forceRefresh；复制引擎要「复制」+「查看传输任务」，少了后者 `GetCopyTasks` 回 `PERMISSION_DENIED 7（get transfer tasks permission required）`，队列会改按目标目录核对；`GetAllCloudApis` 又是另一项权限，没勾就读不到事件监听状态。
 - CD2 对 115 开放平台自己会跟外部改动（撤销 11 秒后不刷新也列到了原名，多半是它的云盘事件监听），我们的 forceRefresh 对这种云盘多余但无害；对没有事件监听的云盘才有用，这次验不了。
 - 复制时目标目录里先是 `<名字>.clfstmp` + `.progress`，最终名出现才算完；单文件任务的 uploadedFiles 只有 0 / 1，进度没有中间值。115 开放平台直链下到 NAS 二十多 MB/s。
+
+### CD2 的 gRPC 接口在真机上的表现（2026-11-10，lab 实例，115 开放平台和本地文件夹存储都试过，两边一样）
+
+- **失败走 gRPC 状态码**，不是 `FileOperationResult.success=false`：路径不存在 NOT_FOUND(5)（`find by path: "…" not found under "…"`，列目录、FindFileByPath、改名 / 移动 / 删除的源、移动的目标目录都是它），改名撞名 ALREADY_EXISTS(6)（`rename error: "x" already exists in "…"`），对目录取下载地址 INVALID_ARGUMENT(3)，缺权限 PERMISSION_DENIED(7)（`… permission required`）。
+- **MoveFile 带 conflictPolicy=Skip**：撞名的原地不动、同一批里别的照挪、整个调用回成功；`resultFilePaths` 永远是空的，挪成了的也不在里面。想知道哪些挪成了只能看目录——看源还在不在，别看目标（撞名时目标里本来就有同名的）。
+- **CD2 自己动过之后它的目录缓存当场就是新的**：改名 / 移动 / 删除之后不带 forceRefresh 列出来就对。核对自己的操作用缓存就行。
+- **CreateFolder 是递归且幂等的**：目录已经在回成功；父目录不在会连父目录一起建。探测脚本「在不存在的父目录下建」那一条会真的建出东西来。
+- **DeleteFile 对非空目录也照删**，连里面的一起。「空了才删」得自己先列一遍。
+- **FindFileByPath** 的两个参数怎么拆都认：（父目录, 名字）、（/, 相对路径）、（"", 完整路径）、（完整路径, ""）。
+- **GetDownloadUrlPath** 回的是带占位符的路径 `/static/{SCHEME}/{HOST}/{PREVIEW}/<整条路径 URL 编码>?token=…&cloudname=…&membership=…`；换完占位符直接 GET，不用另带 `authorization`，支持 Range。
+- **GetApiTokenInfo 只给带「令牌管理」权限的令牌**：普通令牌问自己的权限表回 PERMISSION_DENIED（`token management permission required`）。别指望靠它在检查时列出缺哪项权限，也别建议用户为这个去勾「令牌管理」。
+- **令牌权限在界面上的叫法**（生成令牌那一页）：列出文件、读取文件、创建文件夹、重命名、移动、复制、删除、获取传输任务、令牌管理。文案里照这个写；上面 2026-11-09 那条记的「读」「查看传输任务」是当时的转述，和界面对不上。界面文案在 `clouddrive_web_bg.wasm` 里，不登录也能取到。
+- 这次的 lab 带了 `-e CLOUDDRIVE_HOME=/Config`：登录状态、115 授权、API 令牌都落在挂出来的配置目录里，收尾要连那个目录一起删。
+- 从 macOS 往服务器送测试文件别直接 `tar | ssh`：会多带一堆 `._` 开头的扩展属性文件。打包时加 `COPYFILE_DISABLE=1`（或 `tar --no-mac-metadata`）。往网盘传的时候按文件点名，别整目录复制。
+- 和用户说话别把测试样本叫「种子文件」：在这个项目的语境里那是 BT 种子，用户会问「什么种子文件」。
