@@ -75,7 +75,6 @@ import type {
   TelegramNotifySettings,
   UpdateStatus,
   Cd2CheckResult,
-  Cd2Settings,
 } from "@openstrm/shared";
 
 /** 改标题弹框：这部作品在 TMDB 上的译名、原名、英文名和别名 */
@@ -115,7 +114,19 @@ export type StartTaskResult = {
   warning?: string;
 };
 
-export type DriveKind = "115" | "quark" | "openlist";
+export type DriveKind = "115" | "quark" | "openlist" | "cd2";
+
+/** CloudDrive2「检查连接」带的东西，见 api.cd2.check */
+export interface Cd2CheckDraft {
+  /** 账户页里 CD2 账号的名字 */
+  account?: string;
+  url?: string;
+  apiToken?: string;
+  username?: string;
+  password?: string;
+  /** 网盘账号名 → 它在 CD2 里的路径 */
+  mounts?: Record<string, string>;
+}
 
 /** 分享里的一项（后端已归一化，各家网盘同一个形状） */
 export interface ShareEntry {
@@ -1021,10 +1032,11 @@ export const api = {
   },
 
   cd2: {
-    /** 设置页「CloudDrive2」的「检查连接和路径」：按页面上当前填的值连一次 CD2，掩码的凭据后端换回原值 */
-    check: (draft: Cd2Settings) => data(axiosInstance.post<Cd2CheckResult>("/api/cd2/check", draft, { timeout: 60_000 })),
-    /** CD2 里一个目录下的子目录（复制引擎选 CD2 时给目标目录选路径用） */
-    list: (path = "/") => data(axiosInstance.post<DirectoryNode[]>("/api/cd2/list", { path })),
+    /**
+     * CloudDrive2 的「检查连接」。带 url 是按草稿验（账户弹框里还没保存的值，掩码的令牌 / 口令后端按 account 那个账号换回原值）；
+     * 不带 url 就验 account 这个账号存着的那份（设置页，连同 mounts 里各网盘的路径）
+     */
+    check: (draft: Cd2CheckDraft) => data(axiosInstance.post<Cd2CheckResult>("/api/cd2/check", draft, { timeout: 60_000 })),
   },
 
   emby: {

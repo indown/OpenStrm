@@ -1,7 +1,7 @@
 /**
  * 复制队列换成 CloudDrive2 引擎，对着假 gRPC 服务（test/fake-cd2.ts）跑真引擎：
  * 登记 → 列源目录 → 建目标目录 → CopyFile → 盯 GetCopyTasks → 完成；Failed 带原因；任务从列表里消失但目标里有了算完成；
- * 两个条目一批提交。网盘那侧是 FakeDrive，OpenList 一个字节都不碰。
+ * 两个条目一批提交。网盘那侧是 FakeDrive，OpenList 一个字节都不碰。CD2 的连接来自账号表里的 CD2 账号（设置里选的那个）。
  *
  *   CONFIG_DIR=... DATA_DIR=... pnpm test:file src/services/copy/cd2-engine.itest.ts
  */
@@ -12,6 +12,7 @@ import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js
 import { patchAppSettings, readAppSettings } from "../../db/repositories/settings.js";
 import { listTasks, replaceTasks } from "../../db/repositories/tasks.js";
 import { setDriveProviderFactory } from "../drive/registry.js";
+import { events, type FilesLandedEvent } from "../events.js";
 import { FakeCd2 } from "../../test/fake-cd2.js";
 import { FakeDrive } from "../../test/fake-drive.js";
 import { __test_resetCd2Tokens } from "../cd2/client.js";
@@ -23,6 +24,12 @@ const drive = new FakeDrive("115", account);
 let baseline: { accounts: AccountInfo[]; tasks: TaskDefinition[]; openlistCopy: AppSettings["openlistCopy"]; cd2: AppSettings["cd2"] };
 /** 和假服务一样用真实时钟：CopyTask 的 endTime 是假服务按真实时间写的，队列按提交时间过滤它 */
 let now = Date.now();
+/** 队列看到的任务表（复制完找「目标目录落在哪个任务下」用）；默认没有任务 */
+let tasks: TaskDefinition[] = [];
+const landed: FilesLandedEvent[] = [];
+events.on("files.landed", (input) => {
+  landed.push(input);
+});
 
 async function copyThrough(sources: string[]): Promise<void> {
   enqueueCopy({ account: "acc", sources, rootPath: "/tv", taskId: "t1", trigger: "manual" });
@@ -34,17 +41,19 @@ async function copyThrough(sources: string[]): Promise<void> {
 before(async () => {
   baseline = { accounts: listAccounts(), tasks: listTasks(), openlistCopy: readAppSettings().openlistCopy, cd2: readAppSettings().cd2 };
   await fake.start();
-  replaceAccounts([account]);
+  replaceAccounts([account, { accountType: "cd2", name: "nas-cd2", url: fake.url, apiToken: "api-token" }]);
   replaceTasks([]);
-  patchAppSettings({ openlistCopy: { engine: "cd2", dstDir: "/hdd/media" }, cd2: { url: fake.url, apiToken: "api-token", mounts: { acc: "/115" } } });
+  patchAppSettings({ openlistCopy: { engine: "cd2", dstDir: "/hdd/media" }, cd2: { account: "nas-cd2", mounts: { acc: "/115" } } });
   setDriveProviderFactory((a) => (a.name === "acc" ? drive : null));
-  setCopyServiceDeps({ notify: async () => {}, now: () => now, embyRefresh: () => {}, listTasks: () => [] });
+  setCopyServiceDeps({ notify: async () => {}, now: () => now, embyRefresh: () => {}, listTasks: () => tasks });
 });
 
 beforeEach(async () => {
   await __test_resetCopy();
   __test_resetCd2Tokens();
   fake.reset();
+  tasks = [];
+  landed.length = 0;
   fake.tree = { "/": ["115/", "hdd/"], "/115": ["tv/"], "/115/tv": ["某剧/"], "/115/tv/某剧": ["S01/"], "/115/tv/某剧/S01": ["E01.mkv", "E02.mkv"], "/hdd": ["media/"], "/hdd/media": [] };
   drive.tree.nodes.clear();
   drive.tree.addFile("/tv/某剧/S01/E01.mkv");
@@ -146,7 +155,7 @@ test("CD2 的任务 id 是「源→目标」：上一轮同一条留在列表里
   assert.equal(byName["E02.mkv"]!.status, "done");
 });
 
-test("令牌没有「查看传输任务」权限（GetCopyTasks 被拒）：不卡死，改按目标目录核对，文件落了就算完成", async () => {
+test("令牌没有「获取传输任务」权限（GetCopyTasks 被拒）：不卡死，改按目标目录核对，文件落了就算完成", async () => {
   fake.denyCopyTasks = true;
   await copyThrough(["/tv/某剧/S01/E01.mkv"]);
   await tickCopies();
@@ -158,4 +167,22 @@ test("令牌没有「查看传输任务」权限（GetCopyTasks 被拒）：不�
   [c] = listCopies();
   assert.equal(c.status, "done");
   assert.match(c.detail, /任务列表读不到，按目标目录核对到了这一份/);
+});
+
+test("目标目录在某个 CD2 账号任务的目录下：复制完给那个任务发 files.landed（听它的是自动整理和目录缓存刷新）；别的账号的任务、没罩住目标的任务不发", async () => {
+  const cd2Task = { id: "cd2-media", account: "nas-cd2", originPath: "/hdd/media", targetPath: "media", strmPrefix: "/mnt/cd2" } as TaskDefinition;
+  tasks = [
+    cd2Task,
+    { id: "cd2-other", account: "nas-cd2", originPath: "/hdd/other", targetPath: "other", strmPrefix: "/mnt/cd2" } as TaskDefinition,
+    { id: "drive-task", account: "acc", originPath: "/hdd/media", targetPath: "x", strmPrefix: "/mnt/x" } as TaskDefinition,
+  ];
+  await copyThrough(["/tv/某剧/S01/E01.mkv"]);
+  assert.equal(landed.length, 0, "还没复制完");
+  fake.advanceCopies();
+  await tickCopies();
+  assert.equal(listCopies()[0]?.status, "done");
+  assert.deepEqual(
+    landed.map((l) => [l.task.id, l.paths, l.trigger]),
+    [["cd2-media", ["某剧/S01/E01.mkv"], "copy"]],
+  );
 });

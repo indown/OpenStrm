@@ -7,15 +7,18 @@ import { test } from "node:test";
 import { AxiosError } from "axios";
 import { PermanentError } from "../../lib/errors.js";
 import { HttpError } from "../../lib/http-error.js";
+import { Cd2Error } from "../cd2/client.js";
 import { Cloud115ApiError, Cloud115Error, ShareBusyError } from "../cloud-115/client.js";
 import { ShareApiError } from "../cloud-115/share.js";
 import { OpenlistError } from "../openlist/client.js";
 import { QuarkError } from "../quark/client.js";
 import { accountIssueOf, classifyAccountIssue, driveErrorFacts, driveErrorToHttp } from "./errors.js";
+import { Cd2Provider } from "./providers/cd2.js";
 import { Cloud115Provider } from "./providers/cloud115.js";
 import { ShareGoneError } from "./types.js";
 
 const p115 = new Cloud115Provider({ accountType: "115", name: "a", cookie: "c" });
+const pCd2 = new Cd2Provider({ accountType: "cd2", name: "c", url: "http://127.0.0.1:1", apiToken: "t" });
 
 test("driveErrorFacts：三家的错误类和 axios 的响应算接口错误，普通 Error / PermanentError 不算；包着网盘错误的 PermanentError 看 cause", () => {
   assert.equal(driveErrorFacts(new Error("x")).api, false);
@@ -73,4 +76,29 @@ test("driveErrorToHttp：网盘接口超时、连不上换成人话，前面带�
   assert.equal(http.cause, timeout, "原始错误还挂在 cause 上");
   assert.equal(driveErrorToHttp(new AxiosError("socket hang up", "ECONNRESET"), "转存失败").message, "转存失败：连不上网盘接口（ECONNRESET），稍后再试");
   assert.equal(driveErrorToHttp(new Error("别的错误"), "转存失败").message, "别的错误", "不是网络层的照旧");
+});
+
+test("Cd2Error 的事实：没有这个路径给 404、连不上 / UNAVAILABLE / DEADLINE_EXCEEDED 值得重试、UNAUTHENTICATED 是登录码；gRPC 码不当 HTTP 状态", () => {
+  const facts = (err: unknown) => driveErrorFacts(err);
+  assert.deepEqual(facts(new Cd2Error('CD2 GetSubFiles 失败：find by path: "/115/tv" not found under "/115"', 5)), { status: 404, transport: false, taskFailed: false, authCode: false, api: false });
+  assert.equal(facts(new Cd2Error("CD2 DeleteFile 失败：file not found: /115/x.mkv")).status, 404, "success=false 带着「没有」的文案也算");
+  assert.deepEqual(facts(new Cd2Error("CD2 GetSubFiles 失败：连不上 http://x：连接被拒绝", undefined, true)), { transport: true, taskFailed: false, authCode: false, api: false });
+  assert.equal(facts(new Cd2Error("CD2 GetSubFiles 失败：upstream unavailable", 14)).transport, true);
+  assert.equal(facts(new Cd2Error("CD2 GetSubFiles 失败：deadline exceeded", 4)).transport, true);
+  assert.deepEqual(facts(new Cd2Error("CD2 GetSubFiles 失败：Unauthenticated", 16)), { transport: false, taskFailed: false, authCode: true, api: false });
+  assert.deepEqual(facts(new Cd2Error("CD2 MoveFile 失败：internal error", 13)), { transport: false, taskFailed: false, authCode: false, api: false }, "13 不是 HTTP 的 5xx，也不是 429");
+  assert.equal(facts(new Cd2Error("CD2 RenameFile 失败：file already exists")).status, undefined);
+});
+
+test("CD2 的账号问题只按 gRPC 码认：令牌失效、缺权限算；文案里带着路径，路径里的 405 / cookie 不算", () => {
+  assert.equal(accountIssueOf(pCd2, new Cd2Error("CD2 GetSubFiles 失败：Unauthenticated", 16)), "auth");
+  assert.equal(accountIssueOf(undefined, new Cd2Error("CD2 GetSubFiles 失败：Unauthenticated", 16)), "auth", "没给 provider 也认得出登录码");
+  assert.equal(accountIssueOf(pCd2, new Cd2Error("CD2 MoveFile 失败：move permission required", 7)), "auth");
+  assert.equal(accountIssueOf(pCd2, new Cd2Error('CD2 GetSubFiles 失败：find by path: "/115/Room 405/cookie" not found under "/115/Room 405"', 5)), null);
+  assert.equal(accountIssueOf(undefined, new Cd2Error("CD2 GetDownloadUrlPath 失败：file not found: /115/请重新登录.mkv", 5)), null);
+  const http = driveErrorToHttp(new Cd2Error('CD2 GetSubFiles 失败：find by path: "/115/tv" not found under "/115"', 5), "列目录失败");
+  assert.equal(http.status, 500, "上游错误不回 502");
+  assert.equal(http.message, 'CD2 GetSubFiles 失败：find by path: "/115/tv" not found under "/115"');
+  assert.equal(http.extra.grpcStatus, 5);
+  assert.equal(driveErrorToHttp(new Cd2Error("CD2 GetSubFiles 失败：连不上", undefined, true), "列目录失败").extra.grpcStatus, undefined);
 });

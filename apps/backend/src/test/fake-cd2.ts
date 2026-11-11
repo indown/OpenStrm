@@ -1,10 +1,14 @@
 /**
  * 假的 CloudDrive2 gRPC 服务（node:http2 明文）：认 GetSystemInfo / GetToken / GetSubFiles，记下每次调用，能按配置造错。
+ * 复制引擎的 CreateFolder / CopyFile / GetCopyTasks，和 CD2 账号当网盘用的 FindFileByPath / RenameFile / MoveFile / DeleteFile /
+ * GetDownloadUrlPath / GetApiTokenInfo 也在这里；目录树是活的，改名 / 移动 / 删除会真的改它。
+ * 找不到 / 撞名时的状态码和说法、下载地址的形状、目录不给下载、令牌权限表默认不给读、MoveFile 带 Skip 时不报错也不回结果路径，
+ * 都照 2026-11-10 对 lab 里真 CD2 的探测写的。
  * 报文用 lib/protobuf.ts 拼，线上格式和 lib/grpc.ts 一致（5 字节帧头 + trailer 里的 grpc-status；拒绝时 trailers-only）。
  */
 import http2 from "node:http2";
 import type { AddressInfo } from "node:net";
-import { concatBytes, decodeMessage, encodeBool, encodeBytes, encodeString, encodeUint, readBool, readString, readStrings } from "../lib/protobuf.js";
+import { concatBytes, decodeMessage, encodeBool, encodeBytes, encodeString, encodeUint, readBool, readString, readStrings, readUint } from "../lib/protobuf.js";
 
 export interface FakeCd2Call {
   method: string;
@@ -12,6 +16,9 @@ export interface FakeCd2Call {
   path?: string;
   forceRefresh?: boolean;
 }
+
+/** TokenPermissions 里我们用得上的字段号：列出文件 1、创建文件夹 4、读取文件 7、重命名 8、移动 9、复制 10、删除 11、获取传输任务 27 */
+export const FAKE_CD2_ALL_PERMISSIONS = [1, 4, 7, 8, 9, 10, 11, 27];
 
 export interface FakeCd2CopyTask {
   sourcePath: string;
@@ -55,8 +62,28 @@ export class FakeCd2 {
   closeWithoutEnd = false;
   /** 老版本 CD2：条目没有 isDirectory=30，只有 fileType=5（目录是 0，proto3 不发） */
   legacyFileType = false;
-  /** 令牌没有「查看传输任务」权限：GetCopyTasks 回 PERMISSION_DENIED（真机撞到） */
+  /** 令牌没有「获取传输任务」权限：GetCopyTasks 回 PERMISSION_DENIED（真机撞到） */
   denyCopyTasks = false;
+  /** 令牌缺某项权限：这些方法一律回 PERMISSION_DENIED */
+  deny = new Set<string>();
+  /**
+   * CreateFolder 按真机的表现来（本地文件夹存储和 115 都探测过）：目录已经在也回成功，父目录不在就连父目录一起建。
+   * 默认 false 是更严的那种：已存在、父目录不在都回失败——代码两种都得接得住
+   */
+  lenientCreateFolder = false;
+  /** 条目的最后修改时间（秒），键是完整路径；没有的不发 writeTime */
+  mtimes: Record<string, number> = {};
+  /** MoveFile 收到的请求（policy 是 conflictPolicy，没带是 undefined） */
+  moveRequests: Array<{ sources: string[]; dest: string; policy: number | undefined }> = [];
+  /** GetApiTokenInfo 回的内容；permissions 是 TokenPermissions 里为 true 的字段号 */
+  tokenInfo = { rootDir: "", friendlyName: "openstrm", expiresIn: 0, permissions: [...FAKE_CD2_ALL_PERMISSIONS] };
+  /**
+   * 令牌有没有「令牌管理」权限。真 CD2 只有带这项权限的令牌才给读权限表，普通令牌问 GetApiTokenInfo 回 PERMISSION_DENIED
+   *（`token management permission required`），所以默认 false
+   */
+  tokenManagement = false;
+  /** GetDownloadUrlPath 回的有效期（秒）；0 = 不带 */
+  downloadExpiresIn = 0;
   url = "";
   private issued = 0;
   private readonly server = http2.createServer();
@@ -91,6 +118,86 @@ export class FakeCd2 {
     this.closeWithoutEnd = false;
     this.legacyFileType = false;
     this.denyCopyTasks = false;
+    this.deny.clear();
+    this.lenientCreateFolder = false;
+    this.mtimes = {};
+    this.moveRequests.length = 0;
+    this.tokenInfo = { rootDir: "", friendlyName: "openstrm", expiresIn: 0, permissions: [...FAKE_CD2_ALL_PERMISSIONS] };
+    this.tokenManagement = false;
+    this.downloadExpiresIn = 0;
+  }
+
+  /** 真 CD2 找不到路径时的说法（gRPC NOT_FOUND）：`find by path: "/a/b" not found under "/a"` */
+  private notFound(path: string): string {
+    return `find by path: "${path}" not found under "${this.parentOf(path)}"`;
+  }
+
+  private join(dir: string, name: string): string {
+    return `${dir === "/" ? "" : dir}/${name}`;
+  }
+
+  private parentOf(path: string): string {
+    return path.slice(0, path.lastIndexOf("/")) || "/";
+  }
+
+  private nameOf(path: string): string {
+    return path.split("/").pop() ?? "";
+  }
+
+  /** 这个路径在父目录里登记的那一项（目录带尾斜杠）；没有回 null */
+  private entryOf(path: string): { parent: string; entry: string; isDir: boolean } | null {
+    const parent = this.parentOf(path);
+    const name = this.nameOf(path);
+    const list = this.tree[parent];
+    if (!list || !name) return null;
+    if (list.includes(`${name}/`)) return { parent, entry: `${name}/`, isDir: true };
+    if (list.includes(name)) return { parent, entry: name, isDir: false };
+    return null;
+  }
+
+  /** 把 from 这条路径（目录连子树）下挂的键搬到 to 下面；to 为 null 就是删掉 */
+  private rekey(map: Record<string, unknown>, from: string, to: string | null): void {
+    for (const key of Object.keys(map)) {
+      if (key !== from && !key.startsWith(`${from}/`)) continue;
+      if (to !== null) map[`${to}${key.slice(from.length)}`] = map[key];
+      delete map[key];
+    }
+  }
+
+  /** 从目录树里拿掉一个条目（目录连子树） */
+  private drop(path: string): void {
+    const hit = this.entryOf(path);
+    if (!hit) return;
+    this.tree[hit.parent] = this.tree[hit.parent].filter((e) => e !== hit.entry);
+    this.rekey(this.tree, path, null);
+    this.rekey(this.mtimes, path, null);
+  }
+
+  /** 把一个条目（目录连子树）从 from 挪到 to（都是完整路径；to 的父目录得在） */
+  private relocate(from: string, to: string): void {
+    const hit = this.entryOf(from);
+    if (!hit) return;
+    this.tree[hit.parent] = this.tree[hit.parent].filter((e) => e !== hit.entry);
+    (this.tree[this.parentOf(to)] ??= []).push(hit.isDir ? `${this.nameOf(to)}/` : this.nameOf(to));
+    this.rekey(this.tree, from, to);
+    this.rekey(this.mtimes, from, to);
+  }
+
+  /** 一个条目的 CloudDriveFile 报文：name=2、fullPathName=3、size=4、fileType=5、writeTime=7、isDirectory=30 */
+  private fileMessage(dir: string, entry: string): Uint8Array {
+    const isDir = entry.endsWith("/");
+    const name = isDir ? entry.slice(0, -1) : entry;
+    const full = this.join(dir, name);
+    // 真 CD2 两个都发：fileType=5（文件是 1，目录是 0 不发）和 isDirectory=30（目录 true，文件 false 不发）；老版本只有 fileType
+    const kind = this.legacyFileType ? encodeUint(5, isDir ? 0 : 1) : concatBytes(encodeUint(5, isDir ? 0 : 1), encodeBool(30, isDir));
+    const mtime = this.mtimes[full];
+    return concatBytes(
+      encodeString(2, name),
+      encodeString(3, full),
+      isDir ? new Uint8Array(0) : encodeUint(4, this.fileSize),
+      kind,
+      mtime ? encodeBytes(7, encodeUint(1, mtime)) : new Uint8Array(0),
+    );
   }
 
   /** 把没结束的复制任务推到结束：失败名单里的记 Failed，其余 Completed 并把条目搬进目标目录 */
@@ -171,24 +278,24 @@ export class FakeCd2 {
       this.reply(stream, [], 16, "Unauthenticated");
       return;
     }
+    if (this.deny.has(method)) {
+      this.reply(stream, [], 7, `${method} permission required`);
+      return;
+    }
+    /** FileOperationResult{success=1, errorMessage=2, resultFilePaths=3} */
+    const operation = (ok: boolean, msg = "", results: string[] = []) => concatBytes(encodeBool(1, ok), encodeString(2, msg), ...results.map((r) => encodeString(3, r)));
     if (method === "GetSubFiles") {
       const path = readString(req, 1) ?? "";
       call.path = path;
       call.forceRefresh = readBool(req, 2) ?? false;
       const entries = this.tree[path];
       if (!entries) {
-        this.reply(stream, [], 5, `object not found: ${path}`);
+        this.reply(stream, [], 5, this.notFound(path));
         return;
       }
       const frames: Uint8Array[] = [];
       for (let i = 0; i < entries.length; i += this.chunk) {
-        const files = entries.slice(i, i + this.chunk).map((e) => {
-          const isDir = e.endsWith("/");
-          const name = isDir ? e.slice(0, -1) : e;
-          // 真 CD2 两个都发：fileType=5（文件是 1，目录是 0 不发）和 isDirectory=30（目录 true，文件 false 不发）；老版本只有 fileType
-          const kind = this.legacyFileType ? encodeUint(5, isDir ? 0 : 1) : concatBytes(encodeUint(5, isDir ? 0 : 1), encodeBool(30, isDir));
-          return encodeBytes(1, concatBytes(encodeString(2, name), encodeString(3, `${path === "/" ? "" : path}/${name}`), isDir ? new Uint8Array(0) : encodeUint(4, this.fileSize), kind));
-        });
+        const files = entries.slice(i, i + this.chunk).map((e) => encodeBytes(1, this.fileMessage(path, e)));
         frames.push(concatBytes(...files));
       }
       if (frames.length === 0) frames.push(new Uint8Array(0));
@@ -199,14 +306,29 @@ export class FakeCd2 {
       const parent = readString(req, 1) ?? "";
       const name = readString(req, 2) ?? "";
       call.path = `${parent}/${name}`;
-      const entries = this.tree[parent];
       const result = (ok: boolean, msg = "") => encodeBytes(2, concatBytes(encodeBool(1, ok), encodeString(2, msg)));
+      if (this.lenientCreateFolder && !this.tree[parent]) {
+        // 本地文件夹存储：父目录不在就一路建下来
+        const segs = parent.split("/").filter(Boolean);
+        for (let i = 1; i <= segs.length; i++) {
+          const dir = `/${segs.slice(0, i).join("/")}`;
+          const up = this.parentOf(dir);
+          if (this.tree[dir] || !this.tree[up]) continue;
+          this.tree[up].push(`${segs[i - 1]}/`);
+          this.tree[dir] = [];
+        }
+      }
+      const entries = this.tree[parent];
       if (!entries) {
         // CD2 对不存在的父目录回的是 success=false 的结果，不是 gRPC 错误
         this.reply(stream, [result(false, `parent folder does not exist: ${parent}`)]);
         return;
       }
       if (entries.includes(`${name}/`) || entries.includes(name)) {
+        if (this.lenientCreateFolder && entries.includes(`${name}/`)) {
+          this.reply(stream, [concatBytes(encodeBytes(1, concatBytes(encodeString(2, name), encodeBool(30, true))), result(true))]);
+          return;
+        }
         this.reply(stream, [result(false, "folder already exists")]);
         return;
       }
@@ -264,6 +386,116 @@ export class FakeCd2 {
         ),
       );
       this.reply(stream, [concatBytes(...tasks)]);
+      return;
+    }
+    if (method === "FindFileByPath") {
+      const parent = readString(req, 1) ?? "/";
+      const name = readString(req, 2) ?? "";
+      const full = name.startsWith("/") ? name : this.join(parent, name);
+      call.path = full;
+      const hit = this.entryOf(full);
+      if (!hit) {
+        this.reply(stream, [], 5, this.notFound(full));
+        return;
+      }
+      this.reply(stream, [this.fileMessage(hit.parent, hit.entry)]);
+      return;
+    }
+    if (method === "RenameFile") {
+      const path = readString(req, 1) ?? "";
+      const newName = readString(req, 2) ?? "";
+      call.path = path;
+      const hit = this.entryOf(path);
+      if (!hit) {
+        this.reply(stream, [], 5, this.notFound(path));
+        return;
+      }
+      const target = this.join(hit.parent, newName);
+      if (this.entryOf(target)) {
+        // 真 CD2：撞名是 gRPC ALREADY_EXISTS，不是 success=false
+        this.reply(stream, [], 6, `rename error: "${newName}" already exists in "${hit.parent}"`);
+        return;
+      }
+      this.relocate(path, target);
+      this.reply(stream, [operation(true)]);
+      return;
+    }
+    if (method === "MoveFile") {
+      const sources = readStrings(req, 1);
+      const dest = readString(req, 2) ?? "";
+      const raw = readUint(req, 3);
+      const policy = raw === undefined ? undefined : Number(raw);
+      this.moveRequests.push({ sources, dest, policy });
+      if (!this.tree[dest]) {
+        // 真 CD2：目标目录不在是 gRPC NOT_FOUND，说法和别处一样
+        this.reply(stream, [], 5, this.notFound(dest));
+        return;
+      }
+      const missing = sources.find((src) => !this.entryOf(src));
+      if (missing) {
+        this.reply(stream, [], 5, this.notFound(missing));
+        return;
+      }
+      for (const src of sources) {
+        const target = this.join(dest, this.nameOf(src));
+        if (this.entryOf(target)) {
+          // Skip（2）：目标里已有同名的原地不动，别的照挪，整个调用照样回成功；Rename（1）加后缀；其余覆盖
+          if (policy === 2) continue;
+          if (policy === 1) {
+            this.relocate(src, `${target} (1)`);
+            continue;
+          }
+          this.drop(target);
+        }
+        this.relocate(src, target);
+      }
+      // 真 CD2 回的 resultFilePaths 是空的（挪成了的也不在里面）：哪些挪成了只能看目录
+      this.reply(stream, [operation(true)]);
+      return;
+    }
+    if (method === "DeleteFile") {
+      const path = readString(req, 1) ?? "";
+      call.path = path;
+      if (!this.entryOf(path)) {
+        this.reply(stream, [], 5, this.notFound(path));
+        return;
+      }
+      this.drop(path);
+      this.reply(stream, [operation(true)]);
+      return;
+    }
+    if (method === "GetDownloadUrlPath") {
+      const path = readString(req, 1) ?? "";
+      call.path = path;
+      const hit = this.entryOf(path);
+      if (!hit) {
+        this.reply(stream, [], 5, this.notFound(path));
+        return;
+      }
+      if (hit.isDir) {
+        this.reply(stream, [], 3, "Cannot download directory");
+        return;
+      }
+      // DownloadUrlPathInfo{downloadUrlPath=1, expiresIn=2}：占位符留给客户端换；路径整个编码（斜杠也编成 %2F）、不带头斜杠，后面跟着访问用的查询参数
+      const urlPath = `/static/{SCHEME}/{HOST}/{PREVIEW}/${encodeURIComponent(path.slice(1))}?token=dl-1&cloudname=fake&membership=1`;
+      this.reply(stream, [concatBytes(encodeString(1, urlPath), encodeUint(2, this.downloadExpiresIn))]);
+      return;
+    }
+    if (method === "GetApiTokenInfo") {
+      if (!this.tokenManagement) {
+        this.reply(stream, [], 7, "token management permission required");
+        return;
+      }
+      const asked = readString(req, 1) ?? "";
+      if (!asked.startsWith("api-") || !this.tokens.has(asked)) {
+        this.reply(stream, [], 5, "token not found");
+        return;
+      }
+      // TokenInfo{token=1, rootDir=2, permissions=3, expires_in=4, friendly_name=5}
+      const permissions = concatBytes(...this.tokenInfo.permissions.map((field) => encodeBool(field, true)));
+      this.reply(stream, [
+        concatBytes(encodeString(1, asked), encodeString(2, this.tokenInfo.rootDir), encodeBytes(3, permissions), encodeUint(4, this.tokenInfo.expiresIn), encodeString(5, this.tokenInfo.friendlyName)),
+      ]);
       return;
     }
     this.reply(stream, [], 12, `Unimplemented: ${method}`);

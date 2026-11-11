@@ -18,6 +18,9 @@ import { flushMountRefresh, scheduleMountRefresh, setMountRefreshDeps, startMoun
 
 const olAccount: AccountInfo = { accountType: "openlist", name: "ol", account: "u", password: "p", url: "http://ol.local" };
 const drive: AccountInfo = { accountType: "115", name: "acc", cookie: "c" };
+const cd2Token: AccountInfo = { accountType: "cd2", name: "cd2-token", url: "http://cd2.local:19798", apiToken: "tok" };
+const cd2Login: AccountInfo = { accountType: "cd2", name: "cd2-login", url: "http://cd2.local:19798", username: "u", password: "p" };
+const cd2Half: AccountInfo = { accountType: "cd2", name: "cd2-half", url: "http://cd2.local:19798", username: "u" };
 const task: TaskDefinition = { id: "t1", account: "acc", accountType: "115", originPath: "tv", targetPath: "refresh-itest/tv", strmPrefix: "/mnt" };
 
 let baseline: { accounts: AccountInfo[]; openlistCopy: AppSettings["openlistCopy"]; cd2: AppSettings["cd2"] };
@@ -37,7 +40,7 @@ const target = (mounts: Record<string, string> | null = { acc: "/115" }) =>
 
 before(() => {
   baseline = { accounts: listAccounts(), openlistCopy: readAppSettings().openlistCopy, cd2: readAppSettings().cd2 };
-  replaceAccounts([drive, olAccount]);
+  replaceAccounts([drive, olAccount, cd2Token, cd2Login, cd2Half]);
 });
 
 beforeEach(() => {
@@ -77,21 +80,25 @@ test("挂载层没配（mounts 为 null）或这个网盘账号没填挂载根�
   assert.deepEqual(listed, [], "acc 没填挂载根");
 });
 
-test("真目标的「配没配好」：OpenList 看「复制到 OpenList」的账号和挂载根，CD2 看它那一节的地址、凭据、映射", () => {
+test("真目标的「配没配好」：OpenList 看「复制到 OpenList」的账号和挂载根，CD2 看它那一节选的账号（在、类型对、凭据齐）和映射", () => {
   patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/local", mounts: { acc: "/115" } } });
   assert.deepEqual(openlistMountCacheTarget.prepare()?.mounts ?? null, { acc: "/115" });
   patchAppSettings({ openlistCopy: {} });
   assert.equal(openlistMountCacheTarget.prepare()?.mounts ?? null, null, "没选 OpenList 账号");
 
-  patchAppSettings({ cd2: { url: "http://cd2.local:19798", apiToken: "tok", mounts: { acc: "/115盘/" } } });
+  patchAppSettings({ cd2: { account: "cd2-token", mounts: { acc: "/115盘/" } } });
   assert.deepEqual(cd2MountCacheTarget.prepare()?.mounts ?? null, { acc: "/115盘" }, "映射归一：去尾斜杠");
-  patchAppSettings({ cd2: { url: "http://cd2.local:19798", username: "u", password: "p", mounts: { acc: "/115" } } });
+  patchAppSettings({ cd2: { account: "cd2-login", mounts: { acc: "/115" } } });
   assert.deepEqual(cd2MountCacheTarget.prepare()?.mounts ?? null, { acc: "/115" }, "用户名口令也算凭据");
-  patchAppSettings({ cd2: { url: "http://cd2.local:19798", username: "u", mounts: { acc: "/115" } } });
-  assert.equal(cd2MountCacheTarget.prepare()?.mounts ?? null, null, "只有用户名没有口令");
-  patchAppSettings({ cd2: { apiToken: "tok", mounts: { acc: "/115" } } });
-  assert.equal(cd2MountCacheTarget.prepare()?.mounts ?? null, null, "没地址");
-  patchAppSettings({ cd2: { url: "http://cd2.local:19798", apiToken: "tok" } });
+  patchAppSettings({ cd2: { account: "cd2-half", mounts: { acc: "/115" } } });
+  assert.equal(cd2MountCacheTarget.prepare()?.mounts ?? null, null, "账号只有用户名没有口令");
+  patchAppSettings({ cd2: { mounts: { acc: "/115" } } });
+  assert.equal(cd2MountCacheTarget.prepare()?.mounts ?? null, null, "没选账号");
+  patchAppSettings({ cd2: { account: "删掉了的", mounts: { acc: "/115" } } });
+  assert.equal(cd2MountCacheTarget.prepare()?.mounts ?? null, null, "选的账号不在了");
+  patchAppSettings({ cd2: { account: "ol", mounts: { acc: "/115" } } });
+  assert.equal(cd2MountCacheTarget.prepare()?.mounts ?? null, null, "选的不是 CloudDrive2 账号");
+  patchAppSettings({ cd2: { account: "cd2-token" } });
   assert.equal(cd2MountCacheTarget.prepare()?.mounts ?? null, null, "没映射");
   patchAppSettings({ cd2: {} });
 });

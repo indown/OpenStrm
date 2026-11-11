@@ -174,7 +174,7 @@ async function revert(job: Job, runId: string): Promise<void> {
           lost(it, "文件已不在整理后的位置");
           continue;
         }
-        if (it.nodeId && node.id !== it.nodeId && provider.kind !== "openlist") {
+        if (it.nodeId && node.id !== it.nodeId && !provider.pathIds) {
           lost(it, "整理后的位置上已经是另一个文件");
           continue;
         }

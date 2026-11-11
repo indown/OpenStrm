@@ -190,6 +190,7 @@ export class Cloud115Provider implements DriveProvider {
   readonly kind = "115" as const;
   readonly capabilities = { share: true, changes: true, write: true };
   readonly rootId = "0";
+  readonly pathIds = false;
   readonly notes = { verify: VERIFY_NOTE };
   readonly share: ShareProvider;
   readonly changes: Cloud115ChangeSource;

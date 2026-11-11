@@ -1,13 +1,30 @@
 /**
- * 网盘路径 ↔ OpenList 路径的换算。纯函数，不碰库也不碰网络。
+ * 网盘路径 ↔ OpenList 路径的换算。不碰网络；只有 CloudDrive2 引擎那一条要往账号表里放账号（配置是按账号取的）。
  *
  *   CONFIG_DIR=... DATA_DIR=... pnpm test:file src/services/copy/paths.test.ts
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AppSettings } from "@openstrm/shared";
+import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
 import { HttpError } from "../../lib/http-error.js";
-import { baseName, checkCopyDstDir, copyDstProblem, copyOptionsFor, copySettingsGap, dstDirFor, isOpenlistRootInput, joinPath, normDir, normTargetDir, parentDir, relativeTo, resolveCopyConfig, toOpenlistPath } from "./paths.js";
+import {
+  baseName,
+  checkCopyDstDir,
+  copyBlockerFor,
+  copyDstProblem,
+  copyOptionsFor,
+  copySettingsGap,
+  dstDirFor,
+  isOpenlistRootInput,
+  joinPath,
+  normDir,
+  normTargetDir,
+  parentDir,
+  relativeTo,
+  resolveCopyConfig,
+  toOpenlistPath,
+} from "./paths.js";
 
 test("checkCopyDstDir：这次指定的复制目标——没给回 undefined；这次不会复制、任务开着却说不复制、越界、不是路径各有各的 code", () => {
   const s = { openlistCopy: { account: "ol", dstDir: "/local/media", mounts: { a: "/115" } } } as unknown as AppSettings;
@@ -160,21 +177,54 @@ test("copyDstProblem：这一次指定成 / 的拒；填成 / 的也不算「只
   assert.match(copyDstProblem("/115/tv", { copyToOpenlist: { dstDir: "/hhd/tv" } }, rootDefault) ?? "", /只能是 \/hhd\/tv，/);
 });
 
-test("引擎选 CloudDrive2：缺什么看 CD2 那一节，不要 OpenList 账号；resolveCopyConfig 给 cd2 连接和它的映射", () => {
-  const base = withCopy({ engine: "cd2", dstDir: "/hdd/media" });
-  assert.match(copySettingsGap("115-a", base) ?? "", /CloudDrive2 一节还没填地址/);
-  const noCred: AppSettings = { ...base, cd2: { url: "http://cd2.local:19798", mounts: { "115-a": "/115" } } };
-  assert.match(copySettingsGap("115-a", noCred) ?? "", /还没填 API 令牌或用户名口令/);
-  const ok: AppSettings = { ...base, cd2: { url: "http://cd2.local:19798", apiToken: "tok", mounts: { "115-a": "/115/" } } };
-  assert.equal(copySettingsGap("115-a", ok), null, "OpenList 账号一个都没选也行");
-  assert.match(copySettingsGap("夸克", ok) ?? "", /账号 夸克 还没填「在 CD2 里的路径」/);
-  const cfg = resolveCopyConfig(ok);
-  assert.equal(cfg.engine, "cd2");
-  assert.equal(cfg.account, null);
-  assert.deepEqual(cfg.cd2, { url: "http://cd2.local:19798", apiToken: "tok" });
-  assert.deepEqual(cfg.mounts, { "115-a": "/115" }, "映射来自 CD2 那一节，归一过");
-  assert.equal(cfg.dstDir, "/hdd/media");
-  assert.throws(() => resolveCopyConfig(noCred), (err: unknown) => err instanceof HttpError && /API 令牌或用户名口令/.test(err.message));
+test("引擎选 CloudDrive2：缺什么看 CD2 那一节选的账号，不要 OpenList 账号；resolveCopyConfig 给那个 CD2 账号和它的映射", () => {
+  const baseline = listAccounts();
+  try {
+    replaceAccounts([
+      { accountType: "cd2", name: "nas-cd2", url: "http://cd2.local:19798", apiToken: "tok" },
+      { accountType: "cd2", name: "half", url: "http://cd2.local:19798" },
+      { accountType: "openlist", name: "ol", account: "a", password: "p", url: "http://ol" },
+    ]);
+    const base = withCopy({ engine: "cd2", dstDir: "/hdd/media" });
+    assert.match(copySettingsGap("115-a", base) ?? "", /CloudDrive2 一节还没选 CD2 账号/);
+    const ok: AppSettings = { ...base, cd2: { account: "nas-cd2", mounts: { "115-a": "/115/" } } };
+    assert.equal(copySettingsGap("115-a", ok), null, "OpenList 账号一个都没选也行");
+    assert.match(copySettingsGap("夸克", ok) ?? "", /账号 夸克 还没填「在 CD2 里的路径」/);
+    const cfg = resolveCopyConfig(ok);
+    assert.equal(cfg.engine, "cd2");
+    assert.equal(cfg.account, null);
+    assert.deepEqual(cfg.cd2, { accountType: "cd2", name: "nas-cd2", url: "http://cd2.local:19798", apiToken: "tok" });
+    assert.deepEqual(cfg.mounts, { "115-a": "/115" }, "映射来自 CD2 那一节，归一过");
+    assert.equal(cfg.dstDir, "/hdd/media");
+
+    // 设置上选了、账号表里却用不了的：没选 / 账号删了 / 类型不对 / 缺凭据，各有各的说法
+    const pick = (account: string): AppSettings => ({ ...base, cd2: { account, mounts: { "115-a": "/115" } } });
+    const why = (s: AppSettings): string => {
+      try {
+        resolveCopyConfig(s);
+        return "";
+      } catch (err) {
+        return err instanceof HttpError ? err.message : String(err);
+      }
+    };
+    assert.equal(why(base), "「复制」选了 CloudDrive2，但设置页的 CloudDrive2 一节还没选 CD2 账号");
+    assert.equal(why(pick("gone")), "CloudDrive2 账号不存在：gone");
+    assert.equal(why(pick("ol")), "ol 不是 CloudDrive2 账号");
+    assert.equal(why(pick("half")), "CloudDrive2 账号 half 缺少地址或凭据");
+
+    // copyBlockerFor 连账号表一起看：选的 CD2 账号用不了的说出来；没选的话短的那句留给 copySettingsGap
+    assert.equal(copyBlockerFor(ok)({ account: "115-a" }), null);
+    assert.equal(copyBlockerFor(pick("gone"))({ account: "115-a" }), "CloudDrive2 账号不存在：gone");
+    assert.equal(copyBlockerFor(pick("half"))({ account: "115-a" }), "CloudDrive2 账号 half 缺少地址或凭据");
+    assert.equal(copyBlockerFor(base)({ account: "115-a" }), "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没选 CD2 账号");
+    // 挂载层账号（OpenList / CD2）的任务用不着复制，两种引擎下都一样
+    for (const settings of [ok, withCopy({ account: "ol", dstDir: "/local", mounts: { "nas-cd2": "/x" } })]) {
+      assert.match(copyBlockerFor(settings)({ account: "nas-cd2" }) ?? "", /OpenList \/ CloudDrive2 账号的任务用不着复制/);
+      assert.match(copyBlockerFor(settings)({ account: "ol" }) ?? "", /OpenList \/ CloudDrive2 账号的任务用不着复制/);
+    }
+  } finally {
+    replaceAccounts(baseline);
+  }
   // 没选引擎 = OpenList，照旧要账号
   assert.match(copySettingsGap("115-a", withCopy({ dstDir: "/local" })) ?? "", /还没选 OpenList 账号/);
 });

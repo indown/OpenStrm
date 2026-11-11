@@ -12,20 +12,9 @@ import { HttpError } from "../../lib/http-error.js";
 import { parse } from "../../lib/validate.js";
 import { accountInputSchema, accountPatchSchema } from "../../schemas/entities.js";
 import { isMasked, maskAccount, unmaskAccountPatch } from "../../lib/secrets.js";
-import { credentialProblem } from "../../services/drive/credentials.js";
+import { credentialProblem, missingCredentials } from "../../services/drive/credentials.js";
 
 const nameQuerySchema = z.object({ name: z.string().min(1, "Missing name") });
-
-/** 改账号时凭据可以不传（沿用旧值），但传了 accountType 就得配套 */
-function missingCredentials(input: object): string | null {
-  const body = input as Record<string, unknown>;
-  if (body.accountType === "115" && !body.cookie) return "cookie is required for 115 accounts";
-  if (body.accountType === "quark" && !body.cookie) return "cookie is required for quark accounts";
-  if (body.accountType === "openlist" && (!body.account || !body.password || !body.url)) {
-    return "account, password, and url are required for openlist accounts";
-  }
-  return null;
-}
 
 /**
  * 存进去会跑不了的凭据保存时就拦下（比如 115 的网页版 cookie），别等用户跑任务才看到「请重新登录」。

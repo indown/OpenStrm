@@ -891,7 +891,7 @@ async function pollSubmitted(cfg: CopyConfig, items: CopyRecord[], touched: Set<
   try {
     tasks = await engineOf(cfg).copyTasks(cfg);
   } catch (err) {
-    // 这一轮任务列表拿不到（服务重启中、断网，或者 CD2 的 API 令牌没有「查看传输任务」权限——真机撞到，
+    // 这一轮任务列表拿不到（服务重启中、断网，或者 CD2 的 API 令牌没有「获取传输任务」权限——真机撞到，
     // 那样每一轮都拿不到）：退而按目标目录核对，这一份在目标里出现了就算完成（CD2 复制中是 .clfstmp 临时名，
     // 最终名出现就是复制完了）；核对不到的留着，说明里写清楚是任务列表读不到
     const msg = messageOf(err);
@@ -1082,11 +1082,12 @@ async function afterCopied(c: CopyRecord, cfg: CopyConfig): Promise<void> {
 async function afterCopiedInner(c: CopyRecord, cfg: CopyConfig): Promise<void> {
   deps.embyRefresh();
 
-  // 目标目录落在哪个「用这个 OpenList 账号」的任务下：最长 originPath 胜，同 life/handlers 的规则（CD2 引擎没有对应的账号，跳过）
+  // 目标目录落在哪个「用这个挂载层账号」的任务下（OpenList 引擎是那个 OpenList 账号，CD2 引擎是那个 CD2 账号）：
+  // 最长 originPath 胜，同 life/handlers 的规则。发 files.landed 是把新文件交给那个任务的自动整理（任务没开就没动作），不是生成 strm
   const full = joinPath(c.dstDir, c.name);
-  const olName = cfg.account?.name;
+  const layerName = cfg.engine === "cd2" ? cfg.cd2?.name : cfg.account?.name;
   const hit = deps.listTasks()
-    .filter((t) => olName !== undefined && t.account === olName)
+    .filter((t) => layerName !== undefined && t.account === layerName)
     .map((t) => ({ task: t, rel: relativeTo(t.originPath, full) }))
     .filter((x): x is { task: TaskDefinition; rel: string } => x.rel !== null)
     .sort((a, b) => b.task.originPath.length - a.task.originPath.length)[0];

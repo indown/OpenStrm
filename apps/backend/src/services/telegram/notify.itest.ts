@@ -69,7 +69,7 @@ test("账号告警：认得出 cookie 失效和封控，同一账号同一原因
 
   assert.equal(await notify({ type: "account-alert", account: "主号", reason: "socket hang up", source: "网盘监控" }), false);
   assert.equal(await notify({ type: "account-alert", account: "主号", reason: "登录超时，请重新登录", source: "网盘监控" }), true);
-  assert.match(sent[0].text, /⚠️ <b>网盘账号需要处理<\/b>\n账号 <b>主号<\/b> 的 cookie 已失效[\s\S]*来源：网盘监控/);
+  assert.match(sent[0].text, /⚠️ <b>网盘账号需要处理<\/b>\n账号 <b>主号<\/b> 的登录凭据（cookie \/ 密码 \/ 令牌）已失效[\s\S]*来源：网盘监控/);
   assert.equal(await notify({ type: "account-alert", account: "主号", reason: "登录超时，请重新登录", source: "网盘监控" }), false, "一小时内不重复");
   assert.equal(await notify({ type: "account-alert", account: "小号", reason: "登录超时", source: "网盘监控" }), true, "别的账号照发");
   assert.equal(await notify({ type: "account-alert", account: "主号", reason: "您的访问被阻断 405", source: "同步" }), true, "同账号不同原因照发");

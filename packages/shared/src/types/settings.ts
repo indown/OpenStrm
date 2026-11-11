@@ -207,7 +207,7 @@ export type UpdateSettings = {
 export type CopyEngine = "openlist" | "cd2";
 
 export type OpenlistCopySettings = {
-  /** 用哪个挂载层来复制：OpenList（默认）或 CloudDrive2。选 CD2 时账号、挂载映射都来自 CloudDrive2 那一节 */
+  /** 用哪个挂载层来复制：OpenList（默认）或 CloudDrive2。选 CD2 时用哪个 CD2 账号、挂载映射都来自 CloudDrive2 那一节 */
   engine?: CopyEngine;
   /** 用哪个 openlist 账号调 API（「账户」页里的账号名） */
   account?: string;
@@ -226,26 +226,38 @@ export type OpenlistCopySettings = {
 };
 
 /**
- * CloudDrive2（CD2）：改动网盘后让它刷新目录缓存（和 OpenList 那条一样），经 CD2 挂载回源的不用等它的缓存过期。
- * url、凭据（API 令牌或用户名 + 口令）、mounts 三样齐了才会动；默认空 = 什么都不做。
+ * CloudDrive2（CD2）当挂载层：改动网盘后让它刷新目录缓存（和 OpenList 那条一样），经 CD2 挂载回源的不用等它的缓存过期；
+ * 复制引擎选 CD2 时也用它。地址和凭据在「账户」页的 CloudDrive2 账号上，这里只选用哪一个。
+ * account 和 mounts 都有才会动；默认空 = 什么都不做。
  */
 export type Cd2Settings = {
-  /** gRPC 地址，如 http://192.168.1.10:19798（和 CD2 网页同端口） */
-  url?: string;
-  /** CD2 设置页生成的 API 令牌（推荐；开了两步验证的账号只能用它） */
-  apiToken?: string;
-  /** 没有令牌就用登录 CD2 的用户名和口令换 */
-  username?: string;
-  password?: string;
+  /** 用哪个 CloudDrive2 账号（「账户」页里的账号名） */
+  account?: string;
   /** 网盘账号名 → 它在 CD2 里的路径（云盘名），如 `{ "115": "/115" }` */
   mounts?: Record<string, string>;
 };
 
-/** 设置页「CloudDrive2」一节的「检查连接和路径」：三段各自成败 */
+/** CD2 的 API 令牌按用途要哪些权限：浏览目录 / 同步 / 整理 / 当复制引擎 */
+export type Cd2TokenUse = "browse" | "sync" | "organize" | "copy";
+
+/** 「检查连接」的结果（账户弹框、设置页「CloudDrive2」一节共用）：各段各自成败 */
 export type Cd2CheckResult = {
   system: { ok: boolean; message: string; loggedIn?: boolean; userName?: string };
   auth: { ok: boolean; message: string };
   mounts: Array<{ account: string; path: string; ok: boolean; message: string; entries?: number }>;
-  /** 复制引擎选 CD2 还需要的权限（查看传输任务）；凭据没过就没有这一段 */
+  /** 复制引擎选 CD2 还需要的权限（获取传输任务）；凭据没过就没有这一段 */
   copy?: { ok: boolean; message: string };
+  /**
+   * 用的是 API 令牌、而且读得到它自己的权限表时才有：按用途说够不够。
+   * CD2 只给带「令牌管理」权限的令牌读权限表，所以普通令牌、用户名口令登录的都没有这一段（那时只有上面 copy 那一下探测）
+   */
+  permissions?: {
+    /** 四种用途都够 */
+    ok: boolean;
+    message: string;
+    /** 令牌限定的根目录；没限就没有 */
+    rootDir?: string;
+    /** 权限不够的用途和各自缺的权限（CD2 生成令牌那一页上的叫法）；都够的用途不列 */
+    missing: Array<{ use: Cd2TokenUse; lacks: string[] }>;
+  };
 };

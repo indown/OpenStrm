@@ -5,12 +5,13 @@
 import type { AccountInfo, TaskDefinition } from "@openstrm/shared";
 import { getAccount, listAccounts } from "../../db/repositories/accounts.js";
 import { HttpError } from "../../lib/http-error.js";
+import { Cd2Provider } from "./providers/cd2.js";
 import { Cloud115Provider, parse115ShareLink } from "./providers/cloud115.js";
 import { OpenlistProvider } from "./providers/openlist.js";
 import { parseQuarkShareLink, QuarkProvider } from "./providers/quark.js";
 import type { DriveCapabilities, DriveKind, DriveProvider, ShareProvider, ShareRef } from "./types.js";
 
-export const KIND_LABEL: Record<DriveKind, string> = { "115": "115 网盘", quark: "夸克网盘", openlist: "OpenList" };
+export const KIND_LABEL: Record<DriveKind, string> = { "115": "115 网盘", quark: "夸克网盘", openlist: "OpenList", cd2: "CloudDrive2" };
 const CAP_LABEL: Record<keyof DriveCapabilities, string> = { share: "分享转存", changes: "网盘监控", write: "整理（改名 / 移动）" };
 
 export type ProviderFactory = (account: AccountInfo) => DriveProvider | null;
@@ -87,6 +88,8 @@ export function providerFor(account: AccountInfo): DriveProvider {
       return withObserver(new QuarkProvider(account));
     case "openlist":
       return new OpenlistProvider(account);
+    case "cd2":
+      return new Cd2Provider(account);
   }
   throw new Error(`Unknown account type: ${(account as { accountType?: string }).accountType}`);
 }

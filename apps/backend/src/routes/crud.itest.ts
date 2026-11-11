@@ -132,7 +132,7 @@ test("GET /api/task：copyBlocked 说这个任务要复制卡在哪，同类型�
     const blocked = (id: string) => rows.find((t) => t.id === id)?.copyBlocked;
     assert.equal(blocked("cb-a"), null, "填了挂载根的能复制");
     assert.match(blocked("cb-b") ?? "", /账号 115-b 还没填「在 OpenList 里的挂载根」/, "另一个 115 没填，要看得出来");
-    assert.match(blocked("cb-ol") ?? "", /OpenList 账号的任务用不着复制/);
+    assert.match(blocked("cb-ol") ?? "", /OpenList \/ CloudDrive2 账号的任务用不着复制/);
 
     // 设置页的默认目标目录是 /（以前存进去的）：等于没填，说清楚是 / 不算
     patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/", mounts: { "115-a": "/115" } } });
@@ -395,6 +395,44 @@ test("POST /api/account：夸克账号缺 cookie → 400；带 cookie → 201 �
   assert.equal(put.statusCode, 200);
   assert.equal((listAccounts().find((a) => a.name === "qk") as { cookie?: string }).cookie, "kps=1; __puus=abcdef");
   assert.equal((await call("DELETE", "/api/account?name=qk")).statusCode, 200);
+});
+
+test("POST/PUT /api/account：CloudDrive2 账号要地址和一组凭据；令牌和口令读回是掩码，掩码原样提交不改，空串才清掉", async () => {
+  const noUrl = await call("POST", "/api/account", { accountType: "cd2", name: "cd", apiToken: "tok-1234567890" });
+  assert.equal(noUrl.statusCode, 400);
+  assert.match(noUrl.json().message, /地址/);
+  const badUrl = await call("POST", "/api/account", { accountType: "cd2", name: "cd", url: "http://192.168.1.10:19798/some/path", apiToken: "tok-1234567890" });
+  assert.equal(badUrl.statusCode, 400);
+  assert.match(badUrl.json().message, /地址/);
+  const noCred = await call("POST", "/api/account", { accountType: "cd2", name: "cd", url: "http://192.168.1.10:19798", username: "admin" });
+  assert.equal(noCred.statusCode, 400);
+  assert.match(noCred.json().message, /令牌|口令/);
+
+  const res = await call("POST", "/api/account", { accountType: "cd2", name: "cd", url: "http://192.168.1.10:19798", apiToken: "tok-1234567890" });
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.json().apiToken, "••••7890", "响应里令牌只给末 4 位");
+
+  // 编辑表单把整套字段交回来：令牌是掩码 → 不改；顺手改了地址
+  const listed = (await call("GET", "/api/account")).json().find((a: { name: string }) => a.name === "cd");
+  assert.equal(listed.apiToken, "••••7890");
+  const keep = await call("PUT", "/api/account", { name: "cd", accountType: "cd2", url: "192.168.1.11:19798", apiToken: listed.apiToken, username: "", password: "" });
+  assert.equal(keep.statusCode, 200);
+  const stored = () => listAccounts().find((a) => a.name === "cd") as AccountInfo & { url?: string; apiToken?: string; username?: string; password?: string };
+  assert.equal(stored().apiToken, "tok-1234567890", "掩码值不能被写进库");
+  assert.equal(stored().url, "192.168.1.11:19798");
+
+  // 换成用户名口令：令牌交空串就是清掉
+  const swap = await call("PUT", "/api/account", { name: "cd", accountType: "cd2", url: "192.168.1.11:19798", apiToken: "", username: "admin", password: "pw-123456789" });
+  assert.equal(swap.statusCode, 200);
+  assert.equal(swap.json().password, "••••6789");
+  assert.equal(stored().apiToken, "");
+  assert.equal(stored().password, "pw-123456789");
+
+  // 两样都清掉：存不进去，库里还是上一份
+  const empty = await call("PUT", "/api/account", { name: "cd", accountType: "cd2", url: "192.168.1.11:19798", apiToken: "", username: "admin", password: "" });
+  assert.equal(empty.statusCode, 400);
+  assert.equal(stored().password, "pw-123456789");
+  assert.equal((await call("DELETE", "/api/account?name=cd")).statusCode, 200);
 });
 
 test("DELETE /api/account：删掉后再删 404", async () => {

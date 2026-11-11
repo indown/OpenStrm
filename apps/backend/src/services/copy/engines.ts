@@ -7,9 +7,9 @@
  */
 import type { CopyConfig } from "./paths.js";
 import { copyEngineLabel, joinPath } from "./paths.js";
-import { cd2CopyFiles, cd2CopyTasks, cd2EnsureDir, cd2ListEntries, type Cd2Connection } from "../cd2/client.js";
+import { cd2CopyFiles, cd2CopyTasks, cd2EnsureDir, cd2ListEntries } from "../cd2/client.js";
 import { openlistCopy, openlistCopyTasks, openlistListDir, openlistMkdir, type OpenlistTaskInfo } from "../openlist/client.js";
-import type { AccountOpenlist } from "@openstrm/shared";
+import type { AccountCd2, AccountOpenlist } from "@openstrm/shared";
 
 export interface CopyTargetEntry {
   name: string;
@@ -49,8 +49,8 @@ export const openlistCopyEngine: CopyEngine = {
   copyTasks: (cfg) => openlistCopyTasks(openlistAccountOf(cfg)),
 };
 
-function cd2Of(cfg: CopyConfig): Cd2Connection {
-  if (!cfg.cd2) throw new Error(`复制引擎是 ${copyEngineLabel(cfg.engine)}，没有 CloudDrive2 的连接配置`);
+function cd2Of(cfg: CopyConfig): AccountCd2 {
+  if (!cfg.cd2) throw new Error(`复制引擎是 ${copyEngineLabel(cfg.engine)}，没有 CloudDrive2 账号可用`);
   return cfg.cd2;
 }
 

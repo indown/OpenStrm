@@ -5,6 +5,7 @@ export type {
   CopyEngine,
   Cd2Settings,
   Cd2CheckResult,
+  Cd2TokenUse,
   LifePullMode,
   LifeEventMode,
   PansouSettings,
@@ -27,7 +28,7 @@ export type {
   ResourceSource,
   ResourceStatus,
 } from "./resource.js";
-export type { AccountInfo, Account115, AccountOpenlist, AccountQuark, Qrcode115App, Qrcode115Start, Qrcode115Status } from "./account.js";
+export type { AccountInfo, Account115, AccountCd2, AccountOpenlist, AccountQuark, Qrcode115App, Qrcode115Start, Qrcode115Status } from "./account.js";
 export type {
   CopyAfterCopy,
   FileFailureAction,

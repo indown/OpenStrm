@@ -226,6 +226,7 @@ export class QuarkProvider implements DriveProvider {
   readonly kind = "quark" as const;
   readonly capabilities = { share: true, changes: true, write: true };
   readonly rootId = "0";
+  readonly pathIds = false;
   readonly share: ShareProvider;
   readonly changes: QuarkSnapshotSource;
   readonly write: DriveWriteOps;

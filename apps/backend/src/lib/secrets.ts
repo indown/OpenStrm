@@ -34,8 +34,6 @@ const SETTING_SECRETS: Array<[string, string]> = [
   ["hdhive", "apiKey"],
   ["telegram", "botToken"],
   ["pansou", "password"],
-  ["cd2", "apiToken"],
-  ["cd2", "password"],
 ];
 
 type Groups = Record<string, unknown>;
@@ -68,7 +66,7 @@ export function unmaskSettingsPatch(patch: Partial<AppSettings>, current: AppSet
 
 /* ------------------------------- 账号 ------------------------------- */
 
-const ACCOUNT_SECRETS = ["cookie", "password", "token"] as const;
+const ACCOUNT_SECRETS = ["cookie", "password", "token", "apiToken"] as const;
 
 export function maskAccount(account: AccountInfo): AccountInfo {
   const out: Groups = { ...account };

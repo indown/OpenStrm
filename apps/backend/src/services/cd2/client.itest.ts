@@ -1,13 +1,35 @@
 /**
  * CloudDrive2 客户端对着假 gRPC 服务（test/fake-cd2.ts）：换令牌和缓存、API 令牌直接用、UNAUTHENTICATED 重登一次、
- * forceRefresh 真发出去、流里多帧合着数、NOT_FOUND 归 missing、连不上归 transport、地址补协议。
+ * forceRefresh 真发出去、流里多帧合着数、NOT_FOUND 归 missing、连不上归 transport、地址补协议；
+ * CD2 账号当网盘用的几个接口：按路径找条目、改名 / 移动 / 删除、下载地址、令牌权限。
  *
  *   CONFIG_DIR=... DATA_DIR=... pnpm test:file src/services/cd2/client.itest.ts
  */
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { FakeCd2 } from "../../test/fake-cd2.js";
-import { __test_resetCd2Tokens, Cd2Error, cd2CopyFiles, cd2CopyTasks, cd2EnsureDir, cd2ListDir, cd2ListEntries, cd2RefreshDir, cd2SystemInfo, cd2Token, isCd2Missing, normalizeCd2Url } from "./client.js";
+import {
+  __test_resetCd2Tokens,
+  Cd2Error,
+  cd2CopyFiles,
+  cd2CopyTasks,
+  cd2Delete,
+  cd2DownloadUrl,
+  cd2EnsureDir,
+  cd2FindFile,
+  cd2ListDir,
+  cd2ListEntries,
+  cd2Move,
+  cd2RefreshDir,
+  cd2Rename,
+  cd2SystemInfo,
+  cd2Token,
+  cd2TokenInfo,
+  fillDownloadUrl,
+  isCd2AlreadyExists,
+  isCd2Missing,
+  normalizeCd2Url,
+} from "./client.js";
 
 const fake = new FakeCd2();
 let url = "";
@@ -116,4 +138,84 @@ test("服务端只回首部就把流关掉（没有 end / trailer）：马上按
   // 流先 end 再 close 的话报「没有返回状态」，只 close 的话报「被对方关掉」：都是连接层的错，都得马上报
   await assert.rejects(cd2SystemInfo({ url }), (err: unknown) => err instanceof Cd2Error && err.transport && /关掉|没有返回状态/.test(err.message));
   assert.ok(Date.now() - started < 5000, "没有等 30 秒超时");
+});
+
+test("FindFileByPath：找到的带类型、大小、修改时间；找不到回 null；列目录也带修改时间", async () => {
+  const conn = { url, apiToken: "api-token" };
+  fake.mtimes["/115/movie/loose.mkv"] = 1_700_000_000;
+  assert.deepEqual(await cd2FindFile(conn, "/115/movie", "loose.mkv"), { name: "loose.mkv", isDir: false, size: 1234, modifiedAt: 1_700_000_000_000 });
+  assert.deepEqual(await cd2FindFile(conn, "/115", "movie"), { name: "movie", isDir: true });
+  assert.equal(await cd2FindFile(conn, "/115/movie", "nope.mkv"), null);
+  assert.deepEqual(fake.calls.map((c) => [c.method, c.path]), [
+    ["FindFileByPath", "/115/movie/loose.mkv"],
+    ["FindFileByPath", "/115/movie"],
+    ["FindFileByPath", "/115/movie/nope.mkv"],
+  ]);
+  assert.deepEqual((await cd2ListEntries(conn, "/115/movie")).at(-1), { name: "loose.mkv", isDir: false, size: 1234, modifiedAt: 1_700_000_000_000 });
+});
+
+test("改名、移动、删除：目录树真的变了；撞名是 ALREADY_EXISTS、不存在是 NOT_FOUND，都当错误抛；移动撞名被跳过不报错；缺权限是 PERMISSION_DENIED", async () => {
+  const conn = { url, apiToken: "api-token" };
+  fake.tree["/115/movie/A (2013)"] = ["a.mkv"];
+  fake.tree["/115/tv"] = ["loose.mkv"];
+
+  await cd2Rename(conn, "/115/movie/A (2013)", "A (2014)");
+  assert.deepEqual(fake.tree["/115/movie/A (2014)"], ["a.mkv"], "目录改名，里面的跟着走");
+  assert.equal(fake.tree["/115/movie/A (2013)"], undefined);
+  await assert.rejects(
+    cd2Rename(conn, "/115/movie/A (2014)", "B (2020)"),
+    (err: unknown) => err instanceof Cd2Error && err.code === 6 && /"B \(2020\)" already exists in "\/115\/movie"/.test(err.message) && !err.transport && isCd2AlreadyExists(err),
+  );
+  await assert.rejects(cd2Rename(conn, "/115/movie/nope", "x"), (err: unknown) => err instanceof Cd2Error && err.code === 5 && isCd2Missing(err));
+
+  // 一次带两个源：目标里已有同名的（loose.mkv）按 Skip 留在原处，另一个照挪，整个调用不报错——哪些挪成了回包里看不出来
+  await cd2Move(conn, ["/115/movie/A (2014)", "/115/movie/loose.mkv"], "/115/tv");
+  assert.deepEqual(fake.moveRequests, [{ sources: ["/115/movie/A (2014)", "/115/movie/loose.mkv"], dest: "/115/tv", policy: 2 }]);
+  assert.deepEqual(fake.tree["/115/tv/A (2014)"], ["a.mkv"]);
+  assert.deepEqual(fake.tree["/115/movie"], ["B (2020)/", "loose.mkv"], "被跳过的还在原处");
+  await cd2Move(conn, [], "/115/tv");
+  assert.equal(fake.moveRequests.length, 1, "空的不发请求");
+  await assert.rejects(cd2Move(conn, ["/115/movie/B (2020)"], "/115/nope"), (err: unknown) => err instanceof Cd2Error && err.code === 5 && isCd2Missing(err));
+  await assert.rejects(cd2Move(conn, ["/115/movie/没有.mkv"], "/115/tv"), (err: unknown) => isCd2Missing(err));
+
+  await cd2Delete(conn, "/115/movie/loose.mkv");
+  assert.deepEqual(fake.tree["/115/movie"], ["B (2020)/"]);
+  await assert.rejects(cd2Delete(conn, "/115/movie/loose.mkv"), (err: unknown) => err instanceof Cd2Error && err.code === 5 && isCd2Missing(err));
+
+  fake.deny.add("RenameFile");
+  await assert.rejects(cd2Rename(conn, "/115/movie/B (2020)", "C"), (err: unknown) => err instanceof Cd2Error && err.code === 7 && /permission required/.test(err.message));
+  assert.deepEqual(fake.tree["/115/movie"], ["B (2020)/"], "被拒的没改动");
+});
+
+test("下载地址：占位符换成 CD2 地址的协议、host:port 和 false；有效期带出来；文件不在是 missing", async () => {
+  const conn = { url, apiToken: "api-token" };
+  fake.tree["/115/movie"].push("带 空格.mkv");
+  const host = new URL(url).host;
+  // CD2 回的路径整个编码过（斜杠是 %2F），后面带着访问用的查询参数：原样接上，只换占位符
+  assert.deepEqual(await cd2DownloadUrl(conn, "/115/movie/带 空格.mkv"), {
+    url: `${url}/static/http/${host}/false/${encodeURIComponent("115/movie/带 空格.mkv")}?token=dl-1&cloudname=fake&membership=1`,
+  });
+  fake.downloadExpiresIn = 600;
+  assert.equal((await cd2DownloadUrl(conn, "/115/movie/loose.mkv")).expiresIn, 600);
+  await assert.rejects(cd2DownloadUrl(conn, "/115/movie/nope.mkv"), (err: unknown) => isCd2Missing(err));
+  await assert.rejects(cd2DownloadUrl(conn, "/115/movie"), (err: unknown) => err instanceof Cd2Error && err.code === 3 && /Cannot download directory/.test(err.message) && !isCd2Missing(err));
+  assert.equal(fillDownloadUrl("https://cd2.example.com:8443/", "/static/{SCHEME}/{HOST}/{PREVIEW}/a.mkv?token=t"), "https://cd2.example.com:8443/static/https/cd2.example.com:8443/false/a.mkv?token=t");
+  assert.equal(fillDownloadUrl("192.168.1.10:19798", "static/{SCHEME}/{HOST}/{PREVIEW}/a.mkv"), "http://192.168.1.10:19798/static/http/192.168.1.10:19798/false/a.mkv", "没写协议按 http，路径没带头斜杠也接得上");
+});
+
+test("GetApiTokenInfo：普通令牌读不了自己的权限表（要「令牌管理」权限）回 null；读得到时带权限、根目录、有效期；用户名口令登录的不问；令牌不对照常报", async () => {
+  const conn = { url, apiToken: "api-token" };
+  fake.tokenInfo = { rootDir: "/115", friendlyName: "lab", expiresIn: 3600, permissions: [1, 7, 10] };
+  assert.equal(await cd2TokenInfo(conn), null, "真 CD2 的默认表现：token management permission required");
+  fake.tokenManagement = true;
+  assert.deepEqual(await cd2TokenInfo(conn), {
+    rootDir: "/115",
+    friendlyName: "lab",
+    expiresIn: 3600,
+    permissions: { list: true, createFolder: false, read: true, rename: false, move: false, copy: true, delete: false, transferTasks: false },
+  });
+  fake.calls.length = 0;
+  assert.equal(await cd2TokenInfo({ url, username: "admin", password: "pw" }), null);
+  assert.deepEqual(fake.calls, [], "没有 API 令牌就不问");
+  await assert.rejects(cd2TokenInfo({ url, apiToken: "bad" }), (err: unknown) => err instanceof Cd2Error && err.code === 16);
 });

@@ -10,7 +10,7 @@ import { isAbortError } from "../../lib/errors.js";
 import { HttpError } from "../../lib/http-error.js";
 import { providerForTask } from "../drive/registry.js";
 import { isTaskRunning } from "../task/registry.js";
-import { normalizePath, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
+import { normalizePath, PartialMoveError, splitPath, type DriveProvider, type WriteNode } from "../drive/types.js";
 import { learnFollowOrganized, rewriteFollowSubPaths } from "../follow/service.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
 import { scheduleMountRefresh } from "../mount-cache/refresh.js";
@@ -344,13 +344,22 @@ async function execute(job: Job, runId: string, only: Set<string> | null): Promi
         for (const [i, it] of batch.entries()) await settleMoved(it, ids[i]?.id ?? nodeIds.get(it.id)!);
       } catch (err) {
         if (isAbortError(err) || signal.aborted) throw err;
-        if (batch.length === 1 || classifyFailure(provider, err) === "blocked") {
-          for (const it of batch) fail(it, err);
+        // 网盘按条处理的批量移动可能只成了一部分（CD2 撞名的原地不动、别的照挪）：已经挪过去的直接记账，
+        // 不然下面逐个再试时会拿一个已经不在原处的源去挪，把挪成了的记成失败
+        const partial = partialMoveOf(err);
+        const rest: OrganizeItem[] = [];
+        for (const it of batch) {
+          const newId = partial?.moved.get(nodeOfItem(it).path);
+          if (newId !== undefined) await settleMoved(it, newId);
+          else rest.push(it);
+        }
+        if ((batch.length === 1 && !partial) || classifyFailure(provider, err) === "blocked") {
+          for (const it of rest) fail(it, err);
           continue;
         }
         // 一批里有一个挪不动会把整批拖失败：逐个再试一遍，把失败定位到那一项
-        jobLog(job, `批量移动到 ${to} 失败（${messageOf(err)}），改为逐个移动`);
-        for (const it of batch) {
+        jobLog(job, `批量移动到 ${to} ${partial ? `只成了 ${batch.length - rest.length} 项` : "失败"}（${messageOf(err)}），${partial ? "其余" : "改为"}逐个移动`);
+        for (const it of rest) {
           if (fatal || signal.aborted) break;
           try {
             const [moved] = await withRetry(ctx, () => write.move([nodeOfItem(it)], { id: toId, path: to }, signal));
@@ -496,6 +505,12 @@ export function afterApply(task: TaskDefinition, provider: DriveProvider, units:
     (mappings.length > 0 ? rewriteFollowSubPaths(task.id, mappings).length + rewriteOfflineSubPaths(task.id, mappings).length : 0) +
     rewriteCopyPaths(task.id, task.originPath, mappings, false, copyLayout, fileMoves, removedDirs).length;
   if (rewritten > 0) log.info({ taskId: task.id, rewritten }, "整理后改写了追更 / 云下载回执 / 复制队列里的路径");
+}
+
+/** 批量移动只成了一部分时网盘给的那份「已经挪过去的」；withRetry 把错误包了一层，看 cause */
+function partialMoveOf(err: unknown): PartialMoveError | null {
+  if (err instanceof PartialMoveError) return err;
+  return err instanceof OrganizeFailure && err.cause instanceof PartialMoveError ? err.cause : null;
 }
 
 export async function applyRun(runId: string, ids?: string[]): Promise<OrganizeRun> {

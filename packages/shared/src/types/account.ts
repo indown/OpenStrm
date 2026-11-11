@@ -22,7 +22,23 @@ export interface AccountQuark {
   cookie: string;
 }
 
-export type AccountInfo = Account115 | AccountOpenlist | AccountQuark;
+/**
+ * CloudDrive2（CD2）：gRPC 地址 + API 令牌（推荐）或用户名口令。和 OpenList 账号一样能建同步任务、浏览目录、整理；
+ * 设置页「CloudDrive2」一节选中的那个账号还负责目录缓存刷新和复制引擎
+ */
+export interface AccountCd2 {
+  accountType: "cd2";
+  name: string;
+  /** 如 http://192.168.1.10:19798（和 CD2 网页同一个端口） */
+  url: string;
+  /** CD2 设置页生成的 API 令牌；开了两步验证的账号只能用它 */
+  apiToken?: string;
+  /** 没有令牌就用登录 CD2 的用户名和口令换 */
+  username?: string;
+  password?: string;
+}
+
+export type AccountInfo = Account115 | AccountOpenlist | AccountQuark | AccountCd2;
 
 /* ------------------------------- 115 扫码登录 ------------------------------- */
 

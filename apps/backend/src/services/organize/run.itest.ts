@@ -2771,3 +2771,69 @@ test("执行 / 撤销之后让 OpenList 刷新改过的目录：源和目标两�
     setMountRefreshDeps(null);
   }
 });
+
+test("撤销时整理后的位置上 id 和记下的不一样：普通网盘当成换了一个文件、不动它；id 就是路径的网盘（OpenList / CD2）照常退回", async () => {
+  const dst = "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E02.mkv";
+  /** 执行完，把整理后位置上的那一集换成一个新节点（名字一样、id 不一样） */
+  const applyAndSwap = async () => {
+    const run = await createRun({ taskId: "t1", subPath: "inbox" });
+    await untilStatus(run.id, ["ready"]);
+    await applyRun(run.id);
+    await untilStatus(run.id, ["done"]);
+    const before = drive.tree.get(dst)!.id;
+    drive.tree.remove(dst);
+    drive.tree.addFile(dst);
+    assert.notEqual(drive.tree.get(dst)!.id, before);
+    await revertRun(run.id);
+    await untilStatus(run.id, ["reverted"]);
+    return listItems(run.id).find((i) => i.srcPath.endsWith("S01E02.1080p.WEB-DL.mkv"))!;
+  };
+
+  const kept = await applyAndSwap();
+  assert.equal(kept.status, "failed");
+  assert.equal(kept.errorKind, "stale");
+  assert.match(kept.error, /已经是另一个文件/);
+  assert.ok(drive.tree.get(dst), "别人的文件留在原地");
+
+  // id 就是路径的网盘：改名 / 移动后 id 本来就会变，「id 不一样」说明不了什么，照常退回。
+  // seed() 重铺本地文件，网盘换成声明了 pathIds 的那种，里面放同样的文件
+  seed();
+  drive = new FakeDrive("quark", account, { pathIds: true });
+  for (const p of ["/tv/inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.mkv", "/tv/inbox/BEEF.S01.1080p/BEEF.S01E01.1080p.WEB-DL.chs.srt", "/tv/inbox/BEEF.S01.1080p/BEEF.S01E02.1080p.WEB-DL.mkv", "/tv/inbox/BEEF.S01.1080p/tvshow.nfo", "/tv/inbox/Dune.Part.Two.2024.2160p.WEB-DL.mkv"]) {
+    drive.tree.addFile(p);
+  }
+  setDriveProviderFactory((a) => (a.name === "acc" ? drive : null));
+  __test_resetOrganize();
+  const back = await applyAndSwap();
+  assert.equal(back.status, "reverted", back.error);
+  assert.ok(drive.tree.get("/tv/inbox/BEEF.S01.1080p/BEEF.S01E02.1080p.WEB-DL.mkv"), "挪回原处、改回原名");
+  assert.equal(drive.tree.get(dst), undefined);
+});
+
+
+test("批量移动只成了一部分（网盘按条处理：撞名的原地不动、别的照挪）：挪过去的照常记完成，只有没挪成的那项记失败", async () => {
+  const run = await createRun({ taskId: "t1", subPath: "inbox" });
+  await untilStatus(run.id, ["ready"]);
+  // 改完名、挪进 Season 01 的那一批里，第 2 集被网盘跳过
+  drive.skipMoveOf = (p) => p.endsWith("怒呛人生 - S01E02.mkv");
+  await applyRun(run.id);
+  const first = await untilStatus(run.id, ["done"]);
+  const season = "/tv/怒呛人生 (2023) [tmdbid=153312]/Season 01";
+  assert.ok(drive.tree.get(`${season}/怒呛人生 - S01E01.mkv`), "同一批里没被跳过的挪过去了");
+  const items = listItems(run.id);
+  const ep1 = items.find((i) => i.srcPath.endsWith("S01E01.1080p.WEB-DL.mkv"))!;
+  const ep2 = items.find((i) => i.srcPath.endsWith("S01E02.1080p.WEB-DL.mkv"))!;
+  assert.equal(ep1.status, "done", `挪成了的不能因为同批有一项没成就记失败：${ep1.error}`);
+  assert.equal(ep2.status, "failed");
+  assert.equal(ep2.errorKind, "rejected");
+  assert.match(ep2.error, /已存在同名的 怒呛人生 - S01E02\.mkv/);
+  assert.equal(first.stats.failed, 1);
+  assert.equal(drive.log.filter((l) => l.startsWith("move ") && l.includes("怒呛人生 - S01E01.mkv ->")).length, 1, "挪成了的没有被再挪一次");
+  assert.equal(localRead("怒呛人生 (2023) [tmdbid=153312]/Season 01/怒呛人生 - S01E01.strm"), `/mnt${season}/怒呛人生 - S01E01.mkv`, "本地镜像跟着挪成了的走");
+  // 占着名字的没了之后点名重试那一项（被拒的不会自动重试）：成了
+  drive.skipMoveOf = null;
+  await applyRun(run.id, [ep2.id]);
+  const second = await untilStatus(run.id, ["done"]);
+  assert.equal(second.stats.failed, 0);
+  assert.ok(drive.tree.get(`${season}/怒呛人生 - S01E02.mkv`));
+});

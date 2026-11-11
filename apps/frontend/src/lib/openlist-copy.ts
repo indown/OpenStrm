@@ -38,7 +38,7 @@ export function taskAfterCopy(cfg: TaskCopySettings | undefined): CopyAfterCopy 
  * 条件和顺序跟后端 services/copy/paths.ts 的 copySettingsGap 一样（改条件时两边一起动），
  * 说法是给弹框的：目标目录那条就在弹框里能补上。保存过的任务不用这个——
  * 任务列表接口直接带着后端算好的 copyBlocked。
- * accounts 是空的（还在读 / 读失败）就不查 OpenList 账号在不在，免得误报。
+ * accounts 是空的（还在读 / 读失败）就不查 OpenList / CD2 账号在不在，免得误报。
  */
 export function copyGapInDialog(
   cfg: OpenlistCopySettings,
@@ -48,9 +48,12 @@ export function copyGapInDialog(
   cd2?: Cd2Settings,
 ): string | null {
   if (cfg.engine === "cd2") {
-    // 引擎是 CloudDrive2：凭据和映射都看设置页 CloudDrive2 那一节
-    if (!(cd2?.url ?? "").trim()) return "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没填地址，开着也不会复制";
-    if (!((cd2?.apiToken ?? "").trim() || ((cd2?.username ?? "").trim() && cd2?.password))) return "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没填 API 令牌或用户名口令，开着也不会复制";
+    // 引擎是 CloudDrive2：用哪个 CD2 账号和映射都看设置页 CloudDrive2 那一节
+    const cd2Name = (cd2?.account ?? "").trim();
+    if (!cd2Name) return "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没选 CD2 账号，开着也不会复制";
+    if (accounts.length > 0 && !accounts.some((a) => a.name === cd2Name && a.accountType === "cd2")) {
+      return `设置页选的 CD2 账号「${cd2Name}」已经不在了，开着也不会复制`;
+    }
     if (!cd2?.mounts?.[account]?.trim()) return `账号 ${account} 还没在设置页 CloudDrive2 一节填「在 CD2 里的路径」，开着也不会复制`;
   } else {
     if (!cfg.account) return "设置页还没选 OpenList 账号，开着也不会复制";

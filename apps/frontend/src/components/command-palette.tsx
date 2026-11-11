@@ -30,7 +30,7 @@ import {
   Telescope,
 } from "lucide-react";
 import type { LibraryHit } from "@openstrm/shared";
-import type { TaskRow } from "@/lib/api";
+import type { DriveKind, TaskRow } from "@/lib/api";
 import {
   CommandDialog,
   CommandEmpty,
@@ -40,6 +40,7 @@ import {
   CommandList,
   CommandShortcut,
 } from "@/components/ui/command";
+import { DRIVE_FULL_LABEL } from "@/lib/drive";
 import { NAV_GROUPS } from "@/lib/nav";
 import { inputKindOf } from "@/lib/share";
 import { downloadBackupWithToast } from "@/lib/backup";
@@ -262,12 +263,12 @@ export function CommandPalette({ open, onOpenChange, onOpenShare, onInput, onOpe
                 {accounts.map((acc) => (
                   <CommandItem
                     key={acc.name}
-                    value={`${acc.name} ${acc.accountType}`}
+                    value={`${acc.name} ${acc.accountType} ${DRIVE_FULL_LABEL[acc.accountType as DriveKind] ?? ""}`}
                     onSelect={() => run(() => router.push("/account"))}
                   >
                     <KeyRound />
                     {acc.name}
-                    <CommandShortcut className="tracking-normal">{acc.accountType}</CommandShortcut>
+                    <CommandShortcut className="tracking-normal">{DRIVE_FULL_LABEL[acc.accountType as DriveKind] ?? acc.accountType}</CommandShortcut>
                   </CommandItem>
                 ))}
               </CommandGroup>

@@ -8,9 +8,9 @@
  * 这里的路径归一**只管斜杠**：不能用 drive/types.ts 的 normalizePath，
  * 它会把每一段首尾的空格削掉，而网盘上真有「Season 1 」这种带尾空格的目录名（见 test/fake-drive.ts）。
  */
-import type { AccountOpenlist, AppSettings, CopyAfterCopy, CopyEngine, TaskDefinition } from "@openstrm/shared";
-import type { Cd2Connection } from "../cd2/client.js";
-import { cd2ConnectionOf, cd2MountsOf } from "../cd2/config.js";
+import type { AccountCd2, AccountOpenlist, AppSettings, CopyAfterCopy, CopyEngine, TaskDefinition } from "@openstrm/shared";
+import { cd2AccountProblem, cd2AccountState, cd2MountsOf } from "../cd2/config.js";
+import { isMountLayerKind } from "../drive/types.js";
 import { afterCopyOf } from "../../lib/after-copy.js";
 import { getAccount, listAccounts } from "../../db/repositories/accounts.js";
 import { readAppSettings } from "../../db/repositories/settings.js";
@@ -22,8 +22,8 @@ export interface CopyConfig {
   engine: CopyEngine;
   /** 调 OpenList 接口用的账号；引擎是 CD2 时为 null */
   account: AccountOpenlist | null;
-  /** 调 CD2 接口用的连接；引擎是 OpenList 时为 null */
-  cd2: Cd2Connection | null;
+  /** 调 CD2 接口用的账号（设置页 CloudDrive2 一节选的那个，本身就是连接）；引擎是 OpenList 时为 null */
+  cd2: AccountCd2 | null;
   /** 默认目标目录（挂载层里的路径） */
   dstDir: string;
   /** 网盘账号名 → 它在挂载层里的挂载根 */
@@ -127,17 +127,16 @@ export function dstDirFor(base: string, rootPath: string | undefined, srcPath: s
 
 /**
  * 设置页的 openlistCopy + 账号表 → 可用的配置；缺什么直接说什么。
- * 引擎选 CloudDrive2 时凭据和挂载映射都来自设置页 CloudDrive2 那一节，不再要求 OpenList 账号
+ * 引擎选 CloudDrive2 时用哪个 CD2 账号、挂载映射都来自设置页 CloudDrive2 那一节，不再要求 OpenList 账号
  */
 export function resolveCopyConfig(settings: AppSettings = readAppSettings()): CopyConfig {
   const cfg = settings.openlistCopy ?? {};
   // 目标目录可以只在任务上填（设置页那个是默认值），所以这里不强求；真到要用时 enqueueCopy 会再看一次
   const dstDir = normTargetDir(cfg.dstDir);
   if (copyEngineOf(settings) === "cd2") {
-    const conn = cd2ConnectionOf(settings.cd2);
-    if (!(settings.cd2?.url ?? "").trim()) throw new HttpError(400, "「复制」选了 CloudDrive2，但设置页的 CloudDrive2 一节还没填地址");
-    if (!conn) throw new HttpError(400, "「复制」选了 CloudDrive2，但设置页的 CloudDrive2 一节还没填 API 令牌或用户名口令");
-    return { engine: "cd2", account: null, cd2: conn, dstDir, mounts: cd2MountsOf(settings.cd2) };
+    const state = cd2AccountState(settings);
+    if (!state.ok) throw new HttpError(400, state.reason === "unset" ? `「复制」选了 CloudDrive2，但${cd2AccountProblem(state)}` : cd2AccountProblem(state)!);
+    return { engine: "cd2", account: null, cd2: state.account, dstDir, mounts: cd2MountsOf(settings.cd2) };
   }
   const ol = resolveOpenlistMountConfig(settings);
   return { engine: "openlist", account: ol.account, cd2: null, dstDir, mounts: ol.mounts };
@@ -182,8 +181,7 @@ export function openlistMountConfigIfReady(settings: AppSettings = readAppSettin
 export function copySettingsGap(account: string, settings: AppSettings = readAppSettings(), taskDstDir?: string): string | null {
   const cfg = settings.openlistCopy ?? {};
   if (copyEngineOf(settings) === "cd2") {
-    if (!(settings.cd2?.url ?? "").trim()) return "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没填地址";
-    if (!cd2ConnectionOf(settings.cd2)) return "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没填 API 令牌或用户名口令";
+    if (!(settings.cd2?.account ?? "").trim()) return "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没选 CD2 账号";
     if (!cd2MountsOf(settings.cd2)[account]) return `账号 ${account} 还没填${copyMountFieldLabel("cd2")}`;
   } else {
     if (!cfg.account) return "设置页还没选 OpenList 账号";
@@ -197,7 +195,10 @@ export function copySettingsGap(account: string, settings: AppSettings = readApp
   return null;
 }
 
-/** 只看设置：OpenList 账号、目标目录、这个网盘账号的挂载根都填了没有。给「要不要显示这个入口」用 */
+/** 挂载层账号（OpenList / CD2）的任务为什么没有复制；前端任务弹框里有一句同样的话 */
+export const MOUNT_LAYER_TASK_NO_COPY = "OpenList / CloudDrive2 账号的任务用不着复制：转存、追更、云下载、监控都不会往这里落新文件";
+
+/** 只看设置：挂载层账号、目标目录、这个网盘账号的挂载根都填了没有。给「要不要显示这个入口」用 */
 export function copyConfigured(account: string, settings: AppSettings = readAppSettings(), taskDstDir?: string): boolean {
   return copySettingsGap(account, settings, taskDstDir) === null;
 }
@@ -206,14 +207,15 @@ export function copyConfigured(account: string, settings: AppSettings = readAppS
  * 按任务回答「要复制的话卡在哪」，null = 能复制。任务列表的徽标、转存弹框的勾选框、
  * 明确要复制时的当场报错都看它，和真干活时同一套判断。
  *
- * 比 copySettingsGap 多看账号表：设置上齐了、OpenList 账号却被删了或缺密码（resolveCopyConfig 会拒），
- * 或者任务本身挂在 OpenList 账号上（转存 / 追更 / 云下载 / 监控都不会往那种任务里落文件），一样复制不了。
+ * 比 copySettingsGap 多看账号表：设置上齐了、选的 OpenList / CD2 账号却被删了、类型不对或缺凭据（resolveCopyConfig 会拒），
+ * 或者任务本身挂在挂载层账号（OpenList / CD2）上（转存 / 追更 / 云下载 / 监控都不会往那种任务里落文件），一样复制不了。
  * 全局那部分只算一次，列表里每个任务只查表。
  */
 export function copyBlockerFor(settings: AppSettings = readAppSettings()): (task: Pick<TaskDefinition, "account" | "copyToOpenlist">) => string | null {
   let global: string | null = null;
-  // 压根没选 OpenList 账号的交给 copySettingsGap 说（话短），选了的才去账号表里核对；CD2 引擎没有账号表要核对
-  if (copyEngineOf(settings) === "openlist" && settings.openlistCopy?.account) {
+  // 压根没选账号的交给 copySettingsGap 说（话短），选了的才去账号表里核对
+  const picked = copyEngineOf(settings) === "cd2" ? (settings.cd2?.account ?? "").trim() : settings.openlistCopy?.account;
+  if (picked) {
     try {
       resolveCopyConfig(settings);
     } catch (err) {
@@ -222,7 +224,7 @@ export function copyBlockerFor(settings: AppSettings = readAppSettings()): (task
   }
   const types = new Map(listAccounts().map((a) => [a.name, a.accountType]));
   return (task) => {
-    if (types.get(task.account) === "openlist") return "OpenList 账号的任务用不着复制：转存、追更、云下载、监控都不会往这里落新文件";
+    if (isMountLayerKind(types.get(task.account))) return MOUNT_LAYER_TASK_NO_COPY;
     return global ?? copySettingsGap(task.account, settings, task.copyToOpenlist?.dstDir);
   };
 }

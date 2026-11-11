@@ -26,7 +26,6 @@ import { registerNotifySink } from "./services/notify.js";
 import { startAutoOrganize } from "./services/organize/auto.js";
 import { flushMountRefresh, startMountRefresh } from "./services/mount-cache/refresh.js";
 import cd2CheckRoute from "./routes/cd2/check.js";
-import cd2ListRoute from "./routes/cd2/list.js";
 import { telegramNotify } from "./services/telegram/notify.js";
 import { startPolling, stopPolling } from "./services/telegram/polling.js";
 import { cancelAllRunningTasks } from "./services/task/registry.js";
@@ -215,7 +214,6 @@ await app.register(clearDirectoryRoute);
 await app.register(healthRoute);
 await app.register(embyDiagnoseRoute);
 await app.register(cd2CheckRoute);
-await app.register(cd2ListRoute);
 await app.register(updateRoute);
 await app.register(backupRoute);
 

@@ -37,7 +37,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { api } from "@/lib/api";
+import { api, type DriveKind } from "@/lib/api";
+import { DRIVE_FULL_LABEL, isMountLayerKind } from "@/lib/drive";
 import { TemplateEditor, previewFor } from "@/components/template-editor";
 import { DEFAULT_TEMPLATES, serverFromIdTag, type MediaKind } from "@/lib/organize-presets";
 import { apiErrorMessage } from "@/lib/axios";
@@ -486,11 +487,11 @@ export function AddTaskDialog({
   const [directoryDialogOpen, setDirectoryDialogOpen] = React.useState(false);
   const [localDirectoryDialogOpen, setLocalDirectoryDialogOpen] = React.useState(false);
   /**
-   * 设置页的「复制到 OpenList」：复制目标从哪个 OpenList 账号里选、默认目标目录、各账号的挂载根。
+   * 设置页的「复制到 OpenList / CloudDrive2」：复制目标从哪个 OpenList 账号里选、默认目标目录、各账号的挂载根。
    * 开了复制才去读；undefined = 还没读到或读失败，这时不下「没配好」的结论
    */
   const [copySettings, setCopySettings] = React.useState<OpenlistCopySettings | undefined>(undefined);
-  /** 设置页 CloudDrive2 一节：复制引擎选了 CD2 时，缺什么、从哪选目录都看它 */
+  /** 设置页 CloudDrive2 一节（选的 CD2 账号和各网盘的路径）：复制引擎选了 CD2 时，缺什么、从哪个账号里选目录都看它 */
   const [cd2Settings, setCd2Settings] = React.useState<Cd2Settings | undefined>(undefined);
   const [copyBrowseOpen, setCopyBrowseOpen] = React.useState(false);
   /** 定时下拉选了"自定义"：表达式为空或不等于预设时也保持输入框可编辑 */
@@ -529,9 +530,12 @@ export function AddTaskDialog({
   }, [open]);
   const olAccount = copySettings?.account ?? "";
   const copyViaCd2 = copySettings?.engine === "cd2";
-  const cd2Ready = Boolean((cd2Settings?.url ?? "").trim() && ((cd2Settings?.apiToken ?? "").trim() || ((cd2Settings?.username ?? "").trim() && cd2Settings?.password)));
-  /** 「复制到哪」旁边的选目录：OpenList 要有账号，CD2 要有地址和凭据 */
+  const cd2Account = (cd2Settings?.account ?? "").trim();
+  /** 设置页选了 CD2 账号而且它还在（账号列表还没读到时先当在） */
+  const cd2Ready = cd2Account !== "" && (accounts.length === 0 || accounts.some((a) => a.name === cd2Account && a.accountType === "cd2"));
+  /** 「复制到哪」旁边的选目录：从复制用的那个挂载层账号里选——OpenList 引擎是 OpenList 账号，CD2 引擎是 CD2 账号 */
   const canBrowseCopy = copyViaCd2 ? cd2Ready : Boolean(olAccount);
+  const copyLayerAccount = copyViaCd2 ? cd2Account : olAccount;
   const copyEngineName = copyViaCd2 ? "CloudDrive2" : "OpenList";
   // 设置页填成 / 的算没填，占位里就不提它
   const copyDefaultDst = normTargetDir(copySettings?.dstDir);
@@ -541,18 +545,19 @@ export function AddTaskDialog({
 
   const accountType = accounts.find((acc) => acc.name === account)?.accountType ?? "";
   const is115Account = accountType === "115";
-  /** 115、夸克和 OpenList 都能列目录（/api/directory/remote/list 按账号类型分流），远程路径旁边给个浏览按钮 */
-  const canBrowseRemote = account !== "" && (is115Account || accountType === "openlist" || accountType === "quark");
+  /** 每种账号都能列目录（/api/directory/remote/list 交给各自的 Provider），远程路径旁边给个浏览按钮 */
+  const canBrowseRemote = account !== "";
+  const isCd2Account = accountType === "cd2";
   const prefixIsHttp = isHttpPrefix(strmPrefix);
   const is302 = is115Account && enable302;
   /** 只有本地挂载路径才拼 /账号名；http(s) 前缀靠任务反查账号 */
   const appendAccount = is302 && !prefixIsHttp;
   const encoding = pathEncodingHint(prefixIsHttp, is302);
-  /** OpenList 账号的任务没有新文件的来路（转存 / 追更 / 云下载 / 监控都只落到网盘账号上），复制开关没意义 */
-  const isOpenlistTask = accountType === "openlist";
+  /** 挂载层账号（OpenList / CloudDrive2）的任务没有新文件的来路（转存 / 追更 / 云下载 / 监控都只落到网盘账号上），复制开关没意义 */
+  const isMountLayerTask = isMountLayerKind(accountType);
   /** 开着复制、却因为设置没配齐（这个账号没填挂载根之类）实际不会复制：当场说出来，不然只会「开着，什么都没发生」 */
   const copyGap =
-    copyEnabled && account && !isOpenlistTask && copySettings ? copyGapInDialog(copySettings, account, copyDstDir, accounts, cd2Settings) : null;
+    copyEnabled && account && !isMountLayerTask && copySettings ? copyGapInDialog(copySettings, account, copyDstDir, accounts, cd2Settings) : null;
 
   // 编码没意义的场景下把它关掉，别让一个灰掉的勾继续生效
   React.useEffect(() => {
@@ -561,13 +566,13 @@ export function AddTaskDialog({
     }
   }, [encoding.allowed, form]);
 
-  // 复制开关同理：选了 OpenList 账号就关掉（带着 open：重新打开时表单被重置成任务上存的值，要再看一遍）。
-  // 「复制到哪」也清掉：这一栏对 OpenList 账号的任务不显示，留着个填成 / 的值会让保存卡在一个看不见的校验上
+  // 复制开关同理：选了挂载层账号就关掉（带着 open：重新打开时表单被重置成任务上存的值，要再看一遍）。
+  // 「复制到哪」也清掉：这一栏对挂载层账号的任务不显示，留着个填成 / 的值会让保存卡在一个看不见的校验上
   React.useEffect(() => {
-    if (!open || !isOpenlistTask) return;
+    if (!open || !isMountLayerTask) return;
     if (form.getValues("copyEnabled")) form.setValue("copyEnabled", false);
     if (form.getValues("copyDstDir")) form.setValue("copyDstDir", "");
-  }, [open, isOpenlistTask, form]);
+  }, [open, isMountLayerTask, form]);
 
   const setOpen = (next: boolean) => {
     if (!isControlled) setOpenState(next);
@@ -620,11 +625,11 @@ export function AddTaskDialog({
           ...(orgIdTag ? { idTag: orgIdTag } : {}),
           ...(orgEpisodeTitle ? { episodeTitle: orgEpisodeTitle === "on" } : {}),
         },
-        // 「复制到哪」开关关着也保存：手动复制、转存 / 云下载时一次性勾的复制都落在这里（OpenList 账号的任务用不着，不存）。
+        // 「复制到哪」开关关着也保存：手动复制、转存 / 云下载时一次性勾的复制都落在这里（挂载层账号的任务用不着，不存）。
         // 去向只在开着时存：关着还留着「删除 / 归档」的话，以后一次性勾的复制会连带把网盘上的源文件删了或挪走
         copyToOpenlist: {
           enabled: copyEnabled === true,
-          ...(copyDstDir?.trim() && !isOpenlistTask ? { dstDir: copyDstDir.trim() } : {}),
+          ...(copyDstDir?.trim() && !isMountLayerTask ? { dstDir: copyDstDir.trim() } : {}),
           ...(copyEnabled ? { afterCopy: copyAfterCopy ?? "keep" } : {}),
         },
       };
@@ -685,7 +690,7 @@ export function AddTaskDialog({
                       ) : (
                         accounts.map((acc) => (
                           <SelectItem key={acc.name} value={acc.name}>
-                            {acc.name}（{acc.accountType}）
+                            {acc.name}（{DRIVE_FULL_LABEL[acc.accountType as DriveKind] ?? acc.accountType}）
                           </SelectItem>
                         ))
                       )}
@@ -712,7 +717,7 @@ export function AddTaskDialog({
                       </InputGroupButton>
                     )}
                   </InputGroup>
-                  <FormDescription className="text-xs">网盘（或 OpenList）里要同步的目录，从根目录算起，不用带开头的斜杠。</FormDescription>
+                  <FormDescription className="text-xs">网盘（或 OpenList / CloudDrive2）里要同步的目录，从根目录算起，不用带开头的斜杠。</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -748,14 +753,19 @@ export function AddTaskDialog({
                   <FormLabel>Strm 前缀</FormLabel>
                   <InputGroup>
                     <FormControl>
-                      <InputGroupInput {...field} placeholder="例如：/mnt/115 或 /CloudNAS/115（rclone、CloudDrive2 的挂载路径）" />
+                      <InputGroupInput
+                        {...field}
+                        placeholder={isCd2Account ? "例如：/CloudNAS（CloudDrive2 挂载到媒体服务器上的路径）" : "例如：/mnt/115 或 /CloudNAS/115（rclone、CloudDrive2 的挂载路径）"}
+                      />
                     </FormControl>
                     {appendAccount && account && (
                       <InputGroupAddon title="开启 302 后自动拼上账号名">/{account}</InputGroupAddon>
                     )}
                   </InputGroup>
                   <FormDescription className="text-xs">
-                    写进 strm 文件的地址前缀，一般填 rclone 或 CloudDrive2 把网盘挂到本机的路径，Emby 要能读到。
+                    {isCd2Account
+                      ? "写进 strm 文件的地址前缀：填 CloudDrive2 挂载到媒体服务器那台机器上的路径，后面接的是 CD2 里的路径，Emby 要能读到。"
+                      : "写进 strm 文件的地址前缀，一般填 rclone 或 CloudDrive2 把网盘挂到本机的路径，Emby 要能读到。"}
                     {preview && (
                       <>
                         {" "}
@@ -919,13 +929,13 @@ export function AddTaskDialog({
                 name="copyEnabled"
                 label="复制到 OpenList / CD2"
                 description={
-                  isOpenlistTask
-                    ? "OpenList 账号的任务用不着复制：转存、追更、云下载、监控都不会往这里落新文件。"
-                    : `转存 / 追更 / 云下载 / 监控往这个任务目录里落下新文件时，让 ${copyEngineName} 把它复制到另一个存储（比如挂载的本地磁盘）。先在设置页配好${copyViaCd2 ? " CloudDrive2 的地址、凭据、这个网盘在 CD2 里的路径和目标目录" : " OpenList 账号、目标目录和这个网盘的挂载根"}。`
+                  isMountLayerTask
+                    ? "OpenList / CloudDrive2 账号的任务用不着复制：转存、追更、云下载、监控都不会往这里落新文件。"
+                    : `转存 / 追更 / 云下载 / 监控往这个任务目录里落下新文件时，让 ${copyEngineName} 把它复制到另一个存储（比如挂载的本地磁盘）。先在设置页配好${copyViaCd2 ? " CloudDrive2 账号、这个网盘在 CD2 里的路径和目标目录" : " OpenList 账号、目标目录和这个网盘的挂载根"}。`
                 }
-                disabled={isOpenlistTask}
+                disabled={isMountLayerTask}
               />
-              {!isOpenlistTask && (
+              {!isMountLayerTask && (
                 <div className="space-y-3 rounded-md border p-3">
                   {copyGap && <p className="text-xs text-warning">{copyGap}。</p>}
                   <FormField
@@ -944,7 +954,7 @@ export function AddTaskDialog({
                           <InputGroupButton
                             type="button"
                             disabled={!canBrowseCopy}
-                            title={canBrowseCopy ? (copyViaCd2 ? "从 CloudDrive2 里选" : `从 OpenList 账号 ${olAccount} 里选`) : copyViaCd2 ? "先在设置页填好 CloudDrive2 的地址和凭据" : "先在设置页选好 OpenList 账号"}
+                            title={canBrowseCopy ? `从 ${copyEngineName} 账号 ${copyLayerAccount} 里选` : copyViaCd2 ? "先在设置页的 CloudDrive2 一节选好 CD2 账号" : "先在设置页选好 OpenList 账号"}
                             onClick={() => setCopyBrowseOpen(true)}
                           >
                             <FolderOpen />
@@ -1027,8 +1037,12 @@ export function AddTaskDialog({
             open={copyBrowseOpen}
             onOpenChange={setCopyBrowseOpen}
             title="选择复制目标目录"
-            description={copyViaCd2 ? <>从 CloudDrive2 的根目录里选</> : <>从 OpenList 账号 {olAccount} 的根目录里选</>}
-            load={(path) => (copyViaCd2 ? api.cd2.list(path ? `/${path}` : "/") : api.directory.remote(olAccount, path ? `/${path}` : "/"))}
+            description={
+              <>
+                从 {copyEngineName} 账号 {copyLayerAccount} 的根目录里选
+              </>
+            }
+            load={(path) => api.directory.remote(copyLayerAccount, path ? `/${path}` : "/")}
             onConfirm={(path) => {
               form.setValue("copyDstDir", `/${path}`, { shouldDirty: true });
               setCopyBrowseOpen(false);

@@ -34,6 +34,7 @@ import { api, type LifeEventMode as EventMode, type LifeEventRow, type LifeMonit
 import { usePolling } from "@/hooks/use-polling";
 import { FieldHint } from "@/components/field-hint";
 import { apiErrorMessage } from "@/lib/axios";
+import { accountLabel, isMountLayerKind } from "@/lib/drive";
 
 /**
  * 只放配置项，故意不含 enabled。
@@ -160,8 +161,8 @@ export default function LifeMonitorPage() {
           mediaServerRefreshMaxWait: String(saved.mediaServerRefreshMaxWait ?? CONFIG_DEFAULTS.mediaServerRefreshMaxWait),
         });
       }),
-      // 能做变更监控的账号：115（生活事件）和夸克（快照对比）；OpenList 没有
-      api.accounts.list().then((list) => setAccounts((list || []).filter((a) => a.accountType !== "openlist"))),
+      // 能做变更监控的账号：115（生活事件）和夸克（快照对比）；挂载层账号（OpenList / CloudDrive2）没有
+      api.accounts.list().then((list) => setAccounts((list || []).filter((a) => !isMountLayerKind(a.accountType)))),
       loadStatus(),
       loadEvents(),
     ])
@@ -464,7 +465,7 @@ export default function LifeMonitorPage() {
                         checked={selected.has(a.name)}
                         onCheckedChange={(v) => toggleAccount(a.name, v === true)}
                       />
-                      <span className="text-sm font-medium">{a.name}</span>
+                      <span className="text-sm font-medium">{accountLabel(a.name, a.accountType)}</span>
                     </label>
                   ))}
                   {unknownAccounts.map((name) => (

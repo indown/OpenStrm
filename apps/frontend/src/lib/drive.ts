@@ -4,8 +4,14 @@
  */
 import type { DriveKind, TaskRow } from "@/lib/api";
 
-export const DRIVE_LABEL: Record<DriveKind, string> = { "115": "115", quark: "夸克", openlist: "OpenList" };
-export const DRIVE_FULL_LABEL: Record<DriveKind, string> = { "115": "115 网盘", quark: "夸克网盘", openlist: "OpenList" };
+export const DRIVE_LABEL: Record<DriveKind, string> = { "115": "115", quark: "夸克", openlist: "OpenList", cd2: "CD2" };
+export const DRIVE_FULL_LABEL: Record<DriveKind, string> = { "115": "115 网盘", quark: "夸克网盘", openlist: "OpenList", cd2: "CloudDrive2" };
+
+/**
+ * 挂载层账号（OpenList / CloudDrive2）：把别的网盘挂在自己下面，不是网盘本身。转存、追更、云下载、监控都不会往它的任务里落新文件，
+ * 设置页的挂载映射里也没有它自己的一行。后端 services/drive/types.ts 有一份同样的判断，加类型时两边一起动
+ */
+export const isMountLayerKind = (kind: string | undefined): boolean => kind === "openlist" || kind === "cd2";
 
 const labelOf = (kind?: string): string => DRIVE_LABEL[(kind ?? "") as DriveKind] ?? "";
 

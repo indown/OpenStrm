@@ -1,6 +1,6 @@
 /**
  * 网盘 Provider：同步任务、目录浏览、直链、分享转存、追更、变更监控都只认这组接口，
- * 具体网盘（115 / 夸克 / OpenList）各自实现一份放在 providers/ 下，registry 按账号类型分派。
+ * 具体网盘（115 / 夸克 / OpenList / CloudDrive2）各自实现一份放在 providers/ 下，registry 按账号类型分派。
  * 加一种网盘 = 写一个 Provider + 在 registry 登记；功能代码里不该再出现 `accountType === "..."`。
  *
  * 约定：
@@ -13,6 +13,12 @@ import type { AccountInfo, LifePullMode, TaskDefinition } from "@openstrm/shared
 import { PermanentError } from "../../lib/errors.js";
 
 export type DriveKind = AccountInfo["accountType"];
+
+/**
+ * 挂载层账号（OpenList / CloudDrive2）：把别的网盘挂在自己下面，不是网盘本身。转存、追更、云下载、监控都不会往它的任务里落新文件，
+ * 挂载映射里也没有它自己的一行。前端 apps/frontend/src/lib/drive.ts 有一份同样的判断，加类型时两边一起动
+ */
+export const isMountLayerKind = (kind: string | undefined): boolean => kind === "openlist" || kind === "cd2";
 
 /** 目录里的一项 */
 export interface DriveEntry {
@@ -87,7 +93,7 @@ export interface WriteNode {
 /**
  * 网盘写操作（整理用）。约定：
  *   - 改名 / 移动 / 建目录 / 删空目录；删文件只在用户对某个冲突明确选了删除 / 覆盖时才会调 remove，整理自己永远不删。
- *   - 返回改动后的 id：115 / 夸克的 id 不变，OpenList 的 id 就是路径，改名 / 移动后会变。
+ *   - 返回改动后的 id：115 / 夸克的 id 不变，OpenList / CD2 的 id 就是路径（provider.pathIds），改名 / 移动后会变。
  *   - 各家自己更新缓存（115 的 path_cache 让监控之后还能认出旧路径）。
  */
 export interface DriveWriteOps {
@@ -95,13 +101,16 @@ export interface DriveWriteOps {
   rename(node: WriteNode, newName: string, signal?: AbortSignal): Promise<{ id: string }>;
   /** 批量改名（115 一次一批）；没实现就逐个 rename */
   renameMany?(items: Array<{ node: WriteNode; newName: string }>, signal?: AbortSignal): Promise<Array<{ id: string }>>;
-  /** 挪到另一个目录，名字不变；返回挪动后的 id，顺序同入参 */
+  /**
+   * 挪到另一个目录，名字不变；返回挪动后的 id，顺序同入参。
+   * 一批里只成了一部分、而且说得清是哪些的（CD2 撞名的原地不动、别的照挪），抛 PartialMoveError 带上已经挪过去的那些
+   */
   move(nodes: WriteNode[], to: { id: string; path: string }, signal?: AbortSignal): Promise<Array<{ id: string }>>;
   /** 目录空了才删；非空返回 false */
   rmdirIfEmpty(node: WriteNode, signal?: AbortSignal): Promise<boolean>;
   /**
    * 删掉一个文件：只有用户在整理的冲突上选了「删掉这一份」/「覆盖」才调。
-   * 115 / 夸克进回收站，OpenList 看存储后端（本地存储是直接删）
+   * 115 / 夸克进回收站，OpenList / CD2 看背后那家网盘（本地存储是直接删）
    */
   remove(node: WriteNode, signal?: AbortSignal): Promise<void>;
 }
@@ -110,8 +119,10 @@ export interface DriveProvider {
   readonly kind: DriveKind;
   readonly account: AccountInfo;
   readonly capabilities: DriveCapabilities;
-  /** 根目录 id：115 / 夸克是 "0"，OpenList 是 "/" */
+  /** 根目录 id：115 / 夸克是 "0"，OpenList / CD2 是 "/" */
   readonly rootId: string;
+  /** id 就是路径（OpenList / CD2）：改名 / 移动后 id 跟着变，「id 不一样」不能当成「换了一个文件」 */
+  readonly pathIds: boolean;
   resolvePath(path: string, signal?: AbortSignal): Promise<DriveNode | null>;
   /**
    * fresh：绕过网盘客户端自己的目录缓存（115 进程内缓存 5 分钟），整理动手前看目标目录有没有同名文件时用。
@@ -326,6 +337,20 @@ export class RemoteDirNotFoundError extends PermanentError {
   constructor(readonly dirPath: string) {
     super(`网盘上不存在目录：${dirPath}`);
     this.name = "RemoteDirNotFoundError";
+  }
+}
+
+/**
+ * 批量移动只成了一部分。整批当普通失败抛的话，调用方会以为一个都没动、再拿已经不在原处的源去重试。
+ * moved：已经挪过去的，键是传进来的 node.path，值是挪动后的 id。message 说的是没挪成的那些为什么没成
+ */
+export class PartialMoveError extends Error {
+  constructor(
+    message: string,
+    readonly moved: ReadonlyMap<string, string>,
+  ) {
+    super(message);
+    this.name = "PartialMoveError";
   }
 }
 

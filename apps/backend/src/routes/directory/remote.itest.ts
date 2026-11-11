@@ -1,5 +1,6 @@
 /**
  * 远程目录浏览接口的夸克分支：按路径找到目录再列子目录、id 给 fid；路径不存在 404、指向文件 400、接口报错 500 带原话。
+ * CloudDrive2 账号走同一个接口（以前复制目标另有一个 /api/cd2/list）：对着假 gRPC 服务，id 是完整路径。
  *
  *   CONFIG_DIR=... DATA_DIR=... pnpm test:file src/routes/directory/remote.itest.ts
  */
@@ -12,9 +13,11 @@ import { authPlugin } from "../../plugins/auth.js";
 import remoteRoute from "./remote.js";
 import { DEFAULT_AUTH } from "../../db/defaults.js";
 import { writeAuthPassword } from "../../db/repositories/auth.js";
-import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
+import { deleteAccount, insertAccount, listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
 import { resetThrottle } from "../../services/throttle.js";
 import { clearQuarkCaches, setQuarkApiBase } from "../../services/quark/client.js";
+import { __test_resetCd2Tokens } from "../../services/cd2/client.js";
+import { FakeCd2 } from "../../test/fake-cd2.js";
 
 const tree: Record<string, Array<{ fid: string; file_name: string; file: boolean }>> = {
   "0": [
@@ -103,5 +106,39 @@ test("夸克：路径不存在 404，指向文件 400，接口报错 500 且 mes
     assert.equal(res.json().code, 31001);
   } finally {
     failMode = "none";
+  }
+});
+
+test("CloudDrive2 账号：只给目录、id 是完整路径，要文件时排在目录后面；路径不存在 404、指向文件 400、CD2 报错 500 带原话", async () => {
+  const fake = new FakeCd2();
+  await fake.start();
+  __test_resetCd2Tokens();
+  fake.tree = { "/": ["115/", "hdd/"], "/115": ["movie/", "tv/", "readme.txt"], "/115/movie": [], "/115/tv": [], "/hdd": [] };
+  insertAccount({ accountType: "cd2", name: "nas-cd2", url: fake.url, apiToken: "api-token" });
+  const cd2 = (path: string, extra: Record<string, unknown> = {}) =>
+    app.inject({ method: "POST", url: "/api/directory/remote/list", headers: auth, payload: { account: "nas-cd2", path, ...extra } });
+  try {
+    const root = await cd2("");
+    assert.equal(root.statusCode, 200, root.body);
+    assert.deepEqual(root.json(), [
+      { name: "115", id: "/115", isDir: true, hasChildren: true },
+      { name: "hdd", id: "/hdd", isDir: true, hasChildren: true },
+    ]);
+    assert.deepEqual((await cd2("/115")).json().map((n: { id: string }) => n.id), ["/115/movie", "/115/tv"]);
+    assert.deepEqual(
+      (await cd2("115", { withFiles: true })).json().map((n: { name: string; isDir: boolean; size?: number }) => [n.name, n.isDir, n.size]),
+      [["movie", true, undefined], ["tv", true, undefined], ["readme.txt", false, 1234]],
+    );
+    assert.ok(fake.calls.filter((c) => c.method === "GetSubFiles").every((c) => !c.forceRefresh), "浏览走 CD2 的缓存，不逼它重新问网盘");
+    assert.equal((await cd2("/115/nope")).statusCode, 404);
+    assert.equal((await cd2("/115/readme.txt")).statusCode, 400);
+    fake.deny.add("GetSubFiles");
+    const denied = await cd2("/115");
+    assert.equal(denied.statusCode, 500);
+    assert.match(denied.json().message, /GetSubFiles permission required/);
+    assert.equal(denied.json().grpcStatus, 7);
+  } finally {
+    deleteAccount("nas-cd2");
+    await fake.stop();
   }
 });

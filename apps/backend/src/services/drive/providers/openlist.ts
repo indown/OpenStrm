@@ -44,6 +44,7 @@ export class OpenlistProvider implements DriveProvider {
   readonly kind = "openlist" as const;
   readonly capabilities = { share: false, changes: false, write: true };
   readonly rootId = "/";
+  readonly pathIds = true;
   readonly write: DriveWriteOps;
 
   constructor(readonly account: AccountOpenlist) {

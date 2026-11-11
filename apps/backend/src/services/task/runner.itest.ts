@@ -11,10 +11,12 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { readAppSettings, replaceAppSettings } from "../../db/repositories/settings.js";
-import { listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
+import { deleteAccount, insertAccount, listAccounts, replaceAccounts } from "../../db/repositories/accounts.js";
 import { deleteTask, insertTask, updateTask } from "../../db/repositories/tasks.js";
 import { deleteTaskExecution, getTaskExecution, getTaskHistory } from "../task-history.js";
 import { resetThrottle } from "../throttle.js";
+import { FakeCd2 } from "../../test/fake-cd2.js";
+import { __test_resetCd2Tokens } from "../cd2/client.js";
 import { clearQuarkCaches, QUARK_UA, setQuarkApiBase } from "../quark/client.js";
 import { cancelRunningTask, isTaskRunning, waitForTaskStart } from "./registry.js";
 import { startTask } from "./runner.js";
@@ -570,5 +572,45 @@ test("源目录在网盘上不存在：500 中止，本地文件一个不动，�
     for (const h of getTaskHistory(id)) deleteTaskExecution(h.id);
     deleteTask(id);
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CloudDrive2 账号整条跑通：逐层强制刷新列目录、strm 内容是前缀 + CD2 里的路径；源目录不在照样中止", async () => {
+  const fake = new FakeCd2();
+  await fake.start();
+  __test_resetCd2Tokens();
+  fake.tree = { "/": ["115open/"], "/115open": ["media/"], "/115open/media": ["Show/"], "/115open/media/Show": ["S1/"], "/115open/media/Show/S1": ["ep1.mkv", "ep2.mkv"] };
+  insertAccount({ accountType: "cd2", name: "nas-cd2", url: fake.url, apiToken: "api-token" });
+  const id = `${TASK}-cd2`;
+  // originPath 存的是不带前导斜杠的（任务保存时归一过）
+  insertTask({ id, account: "nas-cd2", accountType: "cd2", originPath: "115open/media/Show", targetPath: `${TASK}/cd2`, strmPrefix: "/mnt/CloudNAS" });
+  const dir = path.join(process.env.DATA_DIR!, TASK, "cd2");
+  try {
+    const res = await startTask(id);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.message, "2 files to download");
+    await waitFor(() => !isTaskRunning(id), "任务结束");
+    assert.equal(fs.readFileSync(path.join(dir, "S1/ep1.strm"), "utf8"), "/mnt/CloudNAS/115open/media/Show/S1/ep1.mkv");
+    assert.equal(fs.readFileSync(path.join(dir, "S1/ep2.strm"), "utf8"), "/mnt/CloudNAS/115open/media/Show/S1/ep2.mkv");
+    const listed = fake.calls.filter((c) => c.method === "GetSubFiles");
+    assert.deepEqual(listed.map((c) => [c.path, c.forceRefresh]), [["/115open/media/Show", true], ["/115open/media/Show/S1", true]], "同步要看最新的：每一层都让 CD2 绕过目录缓存");
+    await waitFor(() => getTaskHistory(id)[0]?.status !== "running", "历史收尾");
+    assert.equal(getTaskHistory(id)[0]?.status, "completed", getTaskHistory(id)[0]?.summary.errorMessage);
+    assert.equal((await startTask(id)).body.message, "no files to download");
+
+    // 源目录在 CD2 里没了（云盘被摘掉、目录改名）：中止，不把本地的当多余删掉
+    delete fake.tree["/115open/media/Show"];
+    fake.tree["/115open/media"] = [];
+    const gone = await startTask(id);
+    assert.equal(gone.status, 500, JSON.stringify(gone.body));
+    assert.equal(gone.body.message, "远端目录树里找不到源目录");
+    assert.ok(fs.existsSync(path.join(dir, "S1/ep1.strm")), "本地文件不能动");
+  } finally {
+    await waitFor(() => !isTaskRunning(id), "任务结束", 5000).catch(() => {});
+    for (const h of getTaskHistory(id)) deleteTaskExecution(h.id);
+    deleteTask(id);
+    deleteAccount("nas-cd2");
+    fs.rmSync(dir, { recursive: true, force: true });
+    await fake.stop();
   }
 });

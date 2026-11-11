@@ -130,16 +130,27 @@ const accountQuarkSchema = z.looseObject({
   cookie: z.string({ error: "cookie is required for quark accounts" }).min(1, "cookie is required for quark accounts"),
 });
 
+/** 地址像不像地址、凭据齐不齐（令牌，或用户名 + 口令）由 services/drive/credentials.ts 的 missingCredentials 查：改账号走的是宽松的 patch，规则放那边两条路都管得到 */
+const accountCd2Schema = z.looseObject({
+  accountType: z.literal("cd2"),
+  name: z.string().min(1),
+  url: z.string().trim().max(300).optional(),
+  apiToken: z.string().optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+});
+
 export const accountInputSchema = z.discriminatedUnion("accountType", [
   account115Schema,
   accountOpenlistSchema,
   accountQuarkSchema,
+  accountCd2Schema,
 ]);
 
 /** 改账号：name 定位，其余字段可选；凭据是否齐全由路由按 accountType 再查 */
 export const accountPatchSchema = z.looseObject({
   name: z.string().min(1),
-  accountType: z.enum(["115", "openlist", "quark"]).optional(),
+  accountType: z.enum(["115", "openlist", "quark", "cd2"]).optional(),
 });
 
 export const lifeMonitorSchema = z.looseObject({
@@ -313,17 +324,12 @@ export const settingsPatchSchema = z.looseObject({
       srcDir: z.string().optional(),
     })
     .optional(),
+  // 地址和凭据在账户页的 CloudDrive2 账号上，这里只选用哪一个。用 z.object（多余的键丢掉）：
+  // 没刷新的旧页面还会带着 url / apiToken 提交，不能让它们再落回设置里
   cd2: z
-    .looseObject({
-      url: z
-        .string()
-        .trim()
-        .max(300)
-        .refine((v) => v === "" || /^(https?:\/\/)?[^\s/]+(:\d+)?\/?$/i.test(v), "填 CloudDrive2 的地址，比如 http://192.168.1.10:19798")
-        .optional(),
-      apiToken: z.string().optional(),
-      username: z.string().optional(),
-      password: z.string().optional(),
+    .object({
+      /** 「账户」页里 CloudDrive2 账号的名字 */
+      account: z.string().trim().max(200).optional(),
       /** 网盘账号名 → 它在 CD2 里的路径（云盘名） */
       mounts: z.record(z.string(), z.string()).optional(),
     })

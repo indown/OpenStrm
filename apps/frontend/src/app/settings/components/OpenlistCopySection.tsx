@@ -10,12 +10,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { TreeSelectDialog } from "@/components/TreeSelectDialog";
 import { api } from "@/lib/api";
-import { accountLabel } from "@/lib/drive";
+import { accountLabel, isMountLayerKind } from "@/lib/drive";
 import { apiErrorMessage } from "@/lib/axios";
 import { isOpenlistRootInput, OPENLIST_ROOT_TARGET } from "@/lib/openlist-copy";
 
-/** OpenList 之外的账号都是「网盘」：以后接新网盘时这里不用动（services/drive 的规矩） */
-const isDriveAccount = (a: AccountInfo): boolean => a.accountType !== "openlist";
+/** 挂载层账号（OpenList / CloudDrive2）之外的都是「网盘」：以后接新网盘时这里不用动（services/drive 的规矩） */
+const isDriveAccount = (a: AccountInfo): boolean => !isMountLayerKind(a.accountType);
 
 /**
  * 挂载根输入框的示例：按网盘类型给（夸克那一行写 /115 会让人照抄错），认不出的就用账号名。
@@ -37,7 +37,7 @@ const joinOl = (base: string, rel: string): string => `${base.replace(/\/+$/, ""
 type Props = {
   value: OpenlistCopySettings;
   onChange: (next: OpenlistCopySettings) => void;
-  /** 设置页 CloudDrive2 一节当前填的值：引擎选 CD2 时检查和选目录都靠它 */
+  /** 设置页 CloudDrive2 一节当前的值（选的 CD2 账号和各网盘的路径）：引擎选 CD2 时检查和选目录都靠它 */
   cd2?: Cd2Settings;
 };
 
@@ -76,8 +76,9 @@ export function OpenlistCopySection({ value, onChange, cd2 }: Props) {
   const olMissing = olName !== "" && accounts !== null && !olAccounts.some((a) => a.name === olName);
   /** 引擎选了 CloudDrive2：OpenList 账号和挂载根那两块不用填，看 CloudDrive2 一节 */
   const isCd2 = value.engine === "cd2";
-  const cd2Url = (cd2?.url ?? "").trim();
-  const cd2Ready = Boolean(cd2Url) && Boolean((cd2?.apiToken ?? "").trim() || ((cd2?.username ?? "").trim() && cd2?.password));
+  const cd2Name = (cd2?.account ?? "").trim();
+  /** 选了 CD2 账号而且它还在（账号列表还没读出来时先当在，免得按钮闪一下灰） */
+  const cd2Ready = cd2Name !== "" && (accounts === null || accounts.some((a) => a.name === cd2Name && a.accountType === "cd2"));
 
   /**
    * 两个账号填了同一个挂载根：不同的网盘账号在 OpenList 里挂在不同的位置，填成一样的话
@@ -101,13 +102,13 @@ export function OpenlistCopySection({ value, onChange, cd2 }: Props) {
   })();
   const labelOf = (acc: string): string => accountLabel(acc, driveAccounts.find((a) => a.name === acc)?.accountType);
 
-  /** 从 OpenList 的根目录起浏览，给挂载根 / 目标目录选路径 */
+  /** 从挂载层账号（OpenList 账号，或引擎选 CD2 时的 CD2 账号）的根目录起浏览，给挂载根 / 目标目录选路径 */
   const loadDirs = useCallback(
     (path: string) => {
-      if (isCd2) return cd2Ready ? api.cd2.list(path ? `/${path}` : "/") : Promise.resolve([]);
-      return olName ? api.directory.remote(olName, path ? `/${path}` : "/") : Promise.resolve([]);
+      const layer = isCd2 ? (cd2Ready ? cd2Name : "") : olName;
+      return layer ? api.directory.remote(layer, path ? `/${path}` : "/") : Promise.resolve([]);
     },
-    [isCd2, cd2Ready, olName],
+    [isCd2, cd2Ready, cd2Name, olName],
   );
 
   /**
@@ -117,21 +118,24 @@ export function OpenlistCopySection({ value, onChange, cd2 }: Props) {
    */
   const check = async () => {
     if (isCd2) {
-      // CD2 引擎：地址 / 凭据 / 映射交给 /api/cd2/check，目标目录在 CD2 里列一下
+      // CD2 引擎：地址 / 凭据 / 权限 / 映射交给 /api/cd2/check（按选的那个 CD2 账号），目标目录在 CD2 里列一下
       setChecking(true);
       try {
-        const r = await api.cd2.check({ url: cd2Url, apiToken: cd2?.apiToken ?? "", username: cd2?.username ?? "", password: cd2?.password ?? "", mounts: cd2?.mounts ?? {} });
+        const r = await api.cd2.check({ account: cd2Name, mounts: cd2?.mounts ?? {} });
         const bad: string[] = [];
         if (!r.system.ok) bad.push(`CD2 地址：${r.system.message}`);
         if (!r.auth.ok) bad.push(`CD2 凭据：${r.auth.message}`);
-        if (r.copy && !r.copy.ok) bad.push(`CD2 令牌：${r.copy.message}`);
+        // 这一节只管复制：令牌的权限表读得到就看「复制」那一项缺什么，读不到才看那一下探测
+        const lacks = r.permissions?.missing.find((m) => m.use === "copy")?.lacks;
+        if (lacks) bad.push(`CD2 令牌缺复制要的权限：${lacks.map((l) => `「${l}」`).join("")}`);
+        else if (!r.permissions && r.copy && !r.copy.ok) bad.push(`CD2 令牌：${r.copy.message}`);
         for (const m of r.mounts) if (!m.ok) bad.push(`${labelOf(m.account)} 在 CD2 里的路径（${m.path}）：${m.message}`);
         if (r.mounts.length === 0) bad.push("CloudDrive2 一节还没填任何网盘在 CD2 里的路径");
         const dst = (value.dstDir ?? "").trim();
         if (isOpenlistRootInput(dst)) bad.push(`默认目标目录：${OPENLIST_ROOT_TARGET}`);
         else if (dst && r.auth.ok) {
           try {
-            await api.cd2.list(dst);
+            await api.directory.remote(cd2Name, dst);
           } catch (err) {
             bad.push(`默认目标目录（${dst}）在 CD2 里打不开：${apiErrorMessage(err, "打不开")}`);
           }
@@ -213,7 +217,7 @@ export function OpenlistCopySection({ value, onChange, cd2 }: Props) {
         <InputGroupInput value={current} placeholder={placeholder} aria-invalid={error ? true : undefined} onChange={(e) => onPick(e.target.value)} />
         <InputGroupButton
           disabled={isCd2 ? !cd2Ready : !olName}
-          title={isCd2 ? (cd2Ready ? "从 CloudDrive2 里选" : "先在 CloudDrive2 一节填好地址和凭据") : olName ? "从 OpenList 里选" : "先选 OpenList 账号"}
+          title={isCd2 ? (cd2Ready ? "从 CloudDrive2 里选" : "先在 CloudDrive2 一节选好 CD2 账号") : olName ? "从 OpenList 里选" : "先选 OpenList 账号"}
           onClick={() => setBrowsing({ title: pickTitle, onPick: (p) => onPick(`/${p}`) })}
         >
           <FolderOpen />
@@ -247,7 +251,13 @@ export function OpenlistCopySection({ value, onChange, cd2 }: Props) {
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            {isCd2 ? "地址、凭据和各网盘在 CD2 里的路径都用上面 CloudDrive2 一节填的；目标目录是 CD2 里的路径" : "用下面选的 OpenList 账号调它的接口"}
+            {isCd2
+              ? cd2Ready
+                ? `用 CloudDrive2 一节选的账号「${cd2Name}」和那里填的各网盘路径；目标目录是 CD2 里的路径`
+                : cd2Name
+                  ? `CloudDrive2 一节选的账号「${cd2Name}」已经不在了，先到那一节换一个`
+                  : "先到 CloudDrive2 一节选一个 CD2 账号；各网盘在 CD2 里的路径也在那里填，目标目录是 CD2 里的路径"
+              : "用下面选的 OpenList 账号调它的接口"}
           </p>
         </div>
         {!isCd2 && (
@@ -295,7 +305,7 @@ export function OpenlistCopySection({ value, onChange, cd2 }: Props) {
       <div className="space-y-3">
         {isCd2 ? (
           <p className="text-xs text-muted-foreground">
-            各网盘在 CD2 里的路径在上面的「CloudDrive2」一节填，复制和刷新缓存共用。目标目录也是 CD2 里的路径：先在 CD2 里把硬盘目录加成「本地文件夹」存储，再填它在 CD2 里的路径，比如 <code>/hdd/media</code>。
+            用哪个 CD2 账号、各网盘在 CD2 里的路径在下面的「CloudDrive2」一节选和填，复制和刷新缓存共用。目标目录也是 CD2 里的路径：先在 CD2 里把硬盘目录加成「本地文件夹」存储，再填它在 CD2 里的路径，比如 <code>/hdd/media</code>。
           </p>
         ) : (
           <>
@@ -344,7 +354,7 @@ export function OpenlistCopySection({ value, onChange, cd2 }: Props) {
           open
           onOpenChange={(o) => !o && setBrowsing(null)}
           title={browsing.title}
-          description={isCd2 ? <>从 CloudDrive2 的根目录里选</> : <>从 OpenList 账号 {olName} 的根目录里选</>}
+          description={isCd2 ? <>从 CloudDrive2 账号 {cd2Name} 的根目录里选</> : <>从 OpenList 账号 {olName} 的根目录里选</>}
           load={loadDirs}
           onConfirm={(path) => {
             browsing.onPick(path);

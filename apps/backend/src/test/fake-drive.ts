@@ -10,6 +10,7 @@ import type { AccountInfo, LifePullMode, TaskDefinition } from "@openstrm/shared
 import { syncViewFromPaths } from "../services/drive/subtree.js";
 import {
   normalizePath,
+  PartialMoveError,
   RemoteDirNotFoundError,
   ShareGoneError,
   splitPath,
@@ -378,6 +379,8 @@ export interface FakeDriveOptions {
   notes?: { verify?: string };
   /** 模拟夸克的目录指纹：目录的 modifiedAt 按真机规则刷新、列表带子项数、实现 dirFingerprints（快照源因此按指纹增量） */
   fingerprints?: boolean | FakeFingerprintOptions;
+  /** 声明 id 就是路径（OpenList / CD2 那样）：功能代码据此不把「id 变了」当成换了文件。假网盘的 id 本身不变 */
+  pathIds?: boolean;
 }
 
 /** 默认时钟：从 2026-01-01 起每读一次加一秒 */
@@ -394,6 +397,7 @@ function steppingClock(): () => number {
 export class FakeDrive implements DriveProvider {
   readonly tree: FakeTree;
   readonly rootId = "0";
+  readonly pathIds: boolean;
   readonly capabilities: { share: boolean; changes: boolean; write: boolean };
   readonly share?: FakeShare;
   readonly changes?: FakeChanges;
@@ -423,6 +427,11 @@ export class FakeDrive implements DriveProvider {
   beforeCall: (() => Promise<void>) | null = null;
   /** 写操作前先问它：返回错误就让这次写失败（模拟某个文件改不了名） */
   failWriteOn: ((op: "mkdir" | "rename" | "move" | "rmdir" | "remove", path: string) => Error | null) | null = null;
+  /**
+   * 模拟按条处理的批量移动（CD2 带 Skip）：它返回 true 的源原地不动、别的照挪。有被跳过的就抛——
+   * 同一批里有挪过去的抛 PartialMoveError（带着挪过去的那些），一个都没挪成抛普通错误
+   */
+  skipMoveOf: ((path: string) => boolean) | null = null;
   /** dirFingerprints 对它返回 true 的路径不回（模拟 path_list 认不出某些名字） */
   fingerprintMiss: ((path: string) => boolean) | null = null;
   /** 开了 fingerprints 才有：按路径批量取目录指纹（精确匹配，不 trim，和 path_list 一样） */
@@ -436,6 +445,7 @@ export class FakeDrive implements DriveProvider {
     this.tree = new FakeTree(`${kind}-${account.name}-`);
     this.withHash = opts.withHash ?? kind === "115";
     this.linkBase = opts.linkBase ?? "http://127.0.0.1:1";
+    this.pathIds = opts.pathIds ?? false;
     const write = opts.write ?? true;
     this.capabilities = { share: !!opts.share, changes: !!opts.changes, write };
     if (opts.share) this.share = new FakeShare(kind, this);
@@ -600,9 +610,21 @@ export class FakeWrite implements DriveWriteOps {
       if (this.drive.tree.get(target)) throw new Error(`fake move: target exists ${target}`);
       planned.push({ from, target });
     }
-    for (const { from, target } of planned) {
+    const skip = this.drive.skipMoveOf;
+    const moved = new Map<string, string>();
+    const skipped: string[] = [];
+    for (const [i, { from, target }] of planned.entries()) {
+      if (skip?.(from)) {
+        skipped.push(baseOf(from));
+        continue;
+      }
       this.drive.log.push(`move ${from} -> ${dst}`);
       this.drive.tree.move(from, target);
+      moved.set(nodes[i].path, nodes[i].id);
+    }
+    if (skipped.length > 0) {
+      const message = `fake move: ${dst} 里已存在同名的 ${skipped.join("、")}`;
+      throw moved.size > 0 ? new PartialMoveError(message, moved) : new Error(message);
     }
     return nodes.map((n) => ({ id: n.id }));
   }
@@ -634,6 +656,7 @@ export function withoutWalk(inner: FakeDrive): DriveProvider {
     account: inner.account,
     capabilities: inner.capabilities,
     rootId: inner.rootId,
+    pathIds: inner.pathIds,
     write: inner.write,
     resolvePath: (p, s) => inner.resolvePath(p, s),
     listDir: (id, s) => inner.listDir(id, s),

@@ -19,8 +19,9 @@ import { TableSkeleton } from "@/components/loading";
 import { ColumnDef } from "@tanstack/react-table";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, type DriveKind } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/axios";
+import { DRIVE_FULL_LABEL } from "@/lib/drive";
 import { Edit, Trash2, Plus, User, Key, KeyRound } from "lucide-react";
 
 export type Account = {
@@ -28,11 +29,16 @@ export type Account = {
   name: string;
   cookie?: string;      // 115 / 夸克类型使用
   account?: string;     // openlist 类型使用 (用户名)
-  password?: string;    // openlist 类型使用
-  url?: string;         // openlist 类型使用
+  password?: string;    // openlist 的密码、CloudDrive2 的口令
+  url?: string;         // openlist / CloudDrive2 的地址
   token?: string;       // openlist 类型的认证令牌
   expiresAt?: number;   // openlist 类型的令牌过期时间
+  apiToken?: string;    // CloudDrive2 的 API 令牌（回来的是掩码）
+  username?: string;    // CloudDrive2 没有令牌时的用户名
 };
+
+/** 类型徽标上的叫法：认得的用中文全称，认不出的原样给 */
+const typeLabel = (accountType: string): string => DRIVE_FULL_LABEL[accountType as DriveKind] ?? accountType;
 
 /** 认证信息：表格列和手机卡片共用。手机上没法 hover 看 title，wrap 时 cookie 直接换行显示 */
 function Credentials({ account, wrap = false }: { account: Account; wrap?: boolean }) {
@@ -73,6 +79,29 @@ function Credentials({ account, wrap = false }: { account: Account; wrap?: boole
             {account.url}
           </code>
         </div>
+      </div>
+    );
+  }
+  if (account.accountType === "cd2") {
+    return (
+      <div className="space-y-1">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-muted-foreground">地址:</span>
+          <code className={`rounded bg-muted px-1 font-mono text-brand ${wrap ? "break-all" : ""}`}>{account.url}</code>
+        </div>
+        {account.apiToken ? (
+          <div className="flex items-center gap-2 text-xs">
+            <Key className="size-3 text-muted-foreground" />
+            <span className="text-muted-foreground">API 令牌:</span>
+            <code className="rounded bg-muted px-1 font-mono">{account.apiToken}</code>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-xs">
+            <User className="size-3 text-muted-foreground" />
+            <span className="text-muted-foreground">用户:</span>
+            <code className="rounded bg-muted px-1 font-mono">{account.username || "-"}</code>
+          </div>
+        )}
       </div>
     );
   }
@@ -134,7 +163,7 @@ export default function AccountPage() {
       header: "账户类型",
       cell: ({ row }) => (
         <Badge variant="outline" className="text-xs">
-          {row.original.accountType}
+          {typeLabel(row.original.accountType)}
         </Badge>
       ),
     },
@@ -189,7 +218,7 @@ export default function AccountPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader icon={KeyRound} title="账户管理" description="管理你的网盘账户信息" actions={addButton} />
+      <PageHeader icon={KeyRound} title="账户管理" description="管理你的网盘账户，以及 OpenList / CloudDrive2 这类挂载层的账户" actions={addButton} />
 
       {!loaded ? (
         <TableSkeleton rows={3} />
@@ -197,7 +226,7 @@ export default function AccountPage() {
         <EmptyState
           icon={KeyRound}
           title="暂无账户"
-          description="添加一个 115、夸克或 OpenList 账号，同步任务、云下载和网盘监控都要用它"
+          description="添加一个 115、夸克、OpenList 或 CloudDrive2 账号，同步任务、云下载和网盘监控都要用它"
           action={addButton}
         />
       ) : (
@@ -212,7 +241,7 @@ export default function AccountPage() {
                     <span className="break-all text-sm font-medium">{account.name}</span>
                   </div>
                   <Badge variant="outline" className="shrink-0 text-xs">
-                    {account.accountType}
+                    {typeLabel(account.accountType)}
                   </Badge>
                 </div>
                 <div className="mt-3">
@@ -258,7 +287,7 @@ export default function AccountPage() {
               你确定要删除账户 &ldquo;{deleteTarget?.name}&rdquo; 吗？此操作无法撤销。
               <br />
               <span className="mt-2 block text-sm text-muted-foreground">
-                账户类型: {deleteTarget?.accountType}
+                账户类型: {deleteTarget ? typeLabel(deleteTarget.accountType) : ""}
               </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
