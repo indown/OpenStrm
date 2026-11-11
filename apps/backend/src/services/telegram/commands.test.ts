@@ -148,6 +148,8 @@ const deps: Partial<CommandDeps> = {
       strmFollowup: Boolean(input.taskId),
       copyDstDir: input.copyToOpenlist === true ? (input.copyDstDir ?? "/local") : null,
       copyAfterCopy: "keep",
+      // 和真服务一样：引擎是添加时核对配置用的那一家
+      copyEngine: input.copyToOpenlist === true ? (settings.openlistCopy?.engine === "cd2" ? "cd2" : "openlist") : null,
       copyBlocked: null,
       results: [{ url: "magnet:?xt=urn:btih:aaa", ok: true, infoHash: "h" }, { url: "magnet:?xt=urn:btih:bbb", ok: false, message: "任务已存在" }] };
   },
@@ -379,6 +381,28 @@ test("贴磁力链接：配置了 OpenList 复制才多一个目的地按钮，�
 
   await handleUpdate(bot, cb(go.callback_data));
   assert.equal(calls.length, 1, "提交后 token 已取走，再点不会重复提交");
+});
+
+test("贴磁力链接：复制引擎选的是 CloudDrive2 时按钮和回话都说 CloudDrive2，配没配看 CD2 那一份", async () => {
+  settings.telegram!.allowOfflineAdd = true;
+  // OpenList 那份齐全也不算：引擎选了 CD2，按钮出不出只看设置页「网盘挂载」里 CloudDrive2 的账号和路径
+  settings.openlistCopy = { engine: "cd2", account: "ol", dstDir: "/hdd/media", mounts: { "115": "/115" } };
+  await handleUpdate(bot, msg("magnet:?xt=urn:btih:aaa"));
+  assert.equal(findButton("复制走"), undefined, "CD2 还没选账号就不给按钮");
+
+  settings.cd2 = { account: "nas-cd2", mounts: { "115": "/115open" } };
+  olDirTree = { "/hdd/media": [] };
+  sent.length = 0;
+  await handleUpdate(bot, msg("magnet:?xt=urn:btih:aaa"));
+  assert.equal(findButton("OpenList 复制走"), undefined);
+  const btn = findButton("CloudDrive2 复制走")!;
+  assert.match(btn.text, /115 默认目录，下完让 CloudDrive2 复制走/);
+
+  await handleUpdate(bot, cb(btn.callback_data));
+  assert.match(edited[0].text, /115 下完后，CloudDrive2 复制到：<b>\/hdd\/media<\/b>/);
+  const go = edited[0].buttons!.flat().find((b) => b.text.includes("就复制到这里"))!;
+  await handleUpdate(bot, cb(go.callback_data));
+  assert.match(edited[1].text, /目录：115 默认目录，下完让 CloudDrive2 复制到 \/hdd\/media/);
 });
 
 test("浏览：翻页不重新列目录，返回上一级重列，列目录失败原地重试", async () => {
@@ -846,7 +870,7 @@ test("云下载回话按实际登记上的回执说：只登记了「下完只�
       calls.push({ fn: "addOffline", args: input });
       return {
         account: "115", dirId: "9", dirPath: "tv", added: 0, failed: 1, invalid: [],
-        followup: true, strmFollowup: false, copyDstDir: "/local/tv", copyAfterCopy: "keep", copyBlocked: null,
+        followup: true, strmFollowup: false, copyDstDir: "/local/tv", copyAfterCopy: "keep", copyEngine: "openlist", copyBlocked: null,
         results: [{ url: "magnet:?xt=urn:btih:aaa", ok: false, infoHash: "h", message: "任务已存在" }],
       };
     },
@@ -858,6 +882,27 @@ test("云下载回话按实际登记上的回执说：只登记了「下完只�
   const text = edited.at(-1)!.text;
   assert.match(text, /目录：tv，下完让 OpenList 复制到 \/local\/tv/);
   assert.doesNotMatch(text, /生成 strm/);
+});
+
+test("云下载回话说的引擎按回包里添加时核对用的那一家，不另读设置（添加和回话之间设置被改了也不说错）", async () => {
+  settings.telegram!.allowOfflineAdd = true;
+  setCommandDeps({
+    ...deps,
+    addOffline: async (input) => {
+      calls.push({ fn: "addOffline", args: input });
+      // 添加时按 CloudDrive2 核对的；回包回来时设置里的引擎已经是 OpenList（默认）了
+      return {
+        account: "115", dirId: "9", dirPath: "tv", added: 1, failed: 0, invalid: [],
+        followup: true, strmFollowup: true, copyDstDir: "/hdd/tv", copyAfterCopy: "keep", copyEngine: "cd2", copyBlocked: null,
+        results: [{ url: "magnet:?xt=urn:btih:aaa", ok: true, infoHash: "h" }],
+      };
+    },
+  });
+  await handleUpdate(bot, msg("magnet:?xt=urn:btih:aaa"));
+  await handleUpdate(bot, cb(findButton("tv")!.callback_data));
+  const go = edited[0].buttons!.flat().find((b) => b.text.includes("就放这里"))!;
+  await handleUpdate(bot, cb(go.callback_data));
+  assert.match(edited.at(-1)!.text, /下完让 CloudDrive2 复制到 \/hdd\/tv/);
 });
 
 test("/tasks 太长被截断时，标签照样成对、没有半个实体（路径里带 & 和 <>）", async () => {

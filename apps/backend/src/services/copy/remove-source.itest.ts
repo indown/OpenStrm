@@ -297,7 +297,7 @@ test("删源之后让 OpenList 刷新源目录连同上级：经 OpenList 挂载
     await copyThrough({ path: "/tv/某剧/S01/E01.mkv" });
     assert.match(listCopies()[0].detail, /网盘上那份已删/);
     await flushMountRefresh();
-    assert.deepEqual(listed, ["/115/tv/某剧/S01"], "只刷源文件所在的目录；挂载根来自设置页的「复制到 OpenList」");
+    assert.deepEqual(listed, ["/115/tv/某剧/S01"], "只刷源文件所在的目录；挂载根来自设置页「网盘挂载」里的 OpenList");
   } finally {
     stopMountRefresh();
     setMountRefreshDeps(null);

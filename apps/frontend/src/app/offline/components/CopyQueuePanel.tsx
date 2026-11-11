@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Archive, Loader2, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AddCopyDialog } from "@/components/AddCopyDialog";
-import { AFTER_COPY_LABEL } from "@/lib/openlist-copy";
+import { AFTER_COPY_LABEL, copyLayer, copyLayerUsable } from "@/lib/openlist-copy";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -20,6 +20,9 @@ import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { api, type CopyAfterOutcome, type CopyItem } from "@/lib/api";
 import { usePolling } from "@/hooks/use-polling";
 import { apiErrorMessage } from "@/lib/axios";
+
+/** 队列空闲时多久看一眼有没有别处排进来的复制 */
+const IDLE_POLL_MS = 20_000;
 
 const STATUS_META: Record<CopyItem["status"], { tone: StatusTone; label: string; pulse?: boolean }> = {
   pending: { tone: "info", label: "复制中", pulse: true },
@@ -63,14 +66,16 @@ export function CopyQueuePanel() {
   const [error, setError] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<CopyItem | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<CopyItem | null>(null);
-  /** 设置页选了 OpenList 账号、至少给一个网盘填了挂载根：队列空着也给「新建复制」的入口 */
+  /**
+   * 复制用的那一家（OpenList 或 CD2，看引擎）选了账号、这个账号还在、至少给一个网盘填了路径：队列空着也给「新建复制」的入口。
+   * 账号表读不到就只看设置（后端提交时还会核对）
+   */
   const [configured, setConfigured] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
 
   useEffect(() => {
-    api.settings
-      .get()
-      .then((s) => setConfigured(Boolean(s.openlistCopy?.account) && Object.values(s.openlistCopy?.mounts ?? {}).some((m) => m?.trim())))
+    Promise.all([api.settings.get(), api.accounts.list().catch(() => null)])
+      .then(([s, accounts]) => setConfigured(copyLayerUsable(copyLayer(s.openlistCopy, s.cd2), accounts)))
       .catch(() => {});
   }, []);
 
@@ -92,8 +97,11 @@ export function CopyQueuePanel() {
     void load();
   }, [load]);
 
-  // 有在跑的就盯着，跑完自己停
-  usePolling(load, 5000, { enabled: pending > 0 });
+  // 有在跑的每 5 秒盯着。空闲时也隔一会儿看一眼：转存、追更、监控、云下载回执随时会往队列里排新的，
+  // 只在有在跑的时候轮询的话，空闲时排进来的不刷新页面就一直看不到（真机上云下载完成、已经在复制了，面板还是空的）。
+  // 没配复制、队列又空着的不看——那种时候面板本来就不显示
+  const idle = pending === 0;
+  usePolling(load, idle ? IDLE_POLL_MS : 5000, { enabled: !idle || configured || (items?.length ?? 0) > 0 });
 
   const act = async (id: string, what: "retry" | "remove" | "archive") => {
     setWorking((prev) => new Set(prev).add(id));
@@ -136,7 +144,7 @@ export function CopyQueuePanel() {
           </StatusBadge>
         )}
         {error && <span className="break-all text-xs text-destructive">{error}</span>}
-        <Button variant="outline" size="sm" className="ml-auto" onClick={() => setAddOpen(true)} disabled={!configured} title={configured ? undefined : "先到设置页配好 OpenList 账号和挂载根"}>
+        <Button variant="outline" size="sm" className="ml-auto" onClick={() => setAddOpen(true)} disabled={!configured} title={configured ? undefined : "先到设置页「网盘挂载」里给复制用的那一家选好账号、填好网盘的路径"}>
           <Plus className="size-4" />
           新建复制
         </Button>

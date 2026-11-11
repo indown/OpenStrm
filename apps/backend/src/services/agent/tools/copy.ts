@@ -37,7 +37,7 @@ import { fmtTime, openInUi, page } from "../format.js";
 import { JOB_RETENTION_MS, startJob, viewJob, waitForJob } from "../jobs.js";
 import { resolveTask, taskBrief } from "../resolve.js";
 
-/** 界面上的复制队列：云下载页的「复制到 OpenList」那一块 */
+/** 界面上的复制队列：云下载页的「复制到 OpenList / CD2」那一块 */
 const COPY_UI = "/offline#copy-queue";
 
 /**
@@ -57,7 +57,7 @@ const STATUS_TEXT: Record<CopyStatus, string> = { pending: "复制中", done: "�
  * 挂载根是按网盘账号各填各的，哪个账号能复制看 mounts
  */
 export function copyConfigState(settings: AppSettings = readAppSettings()): { configured: boolean; problem?: string; mounts: Record<string, string> } {
-  // 挂载映射按引擎取：选了 CloudDrive2 看它那一节的，不然看「复制到 OpenList」的
+  // 挂载映射按引擎取：选了 CloudDrive2 看 cd2 那一份，不然看 openlistCopy 里 OpenList 的（都在设置页「网盘挂载」）
   const engine = copyEngineOf(settings);
   const mounts: Record<string, string> = {};
   for (const [name, path] of Object.entries((engine === "cd2" ? settings.cd2?.mounts : settings.openlistCopy?.mounts) ?? {})) {
@@ -89,8 +89,8 @@ export function copyProblemFor(account: string, dstDir: string | undefined, sett
 export function copyAlwaysOn(): ToolError {
   return new ToolError(
     "COPY_ALWAYS_ON",
-    "这个任务开着「复制到 OpenList」，这次没法不复制：网盘监控也会把新落进任务目录的文件交给复制，界面上的勾选框同样是锁住的",
-    "要不复制，得请用户先在任务设置里关掉「复制到 OpenList」；不然就别传 copy: false。",
+    "这个任务开着「复制到 OpenList / CD2」，这次没法不复制：网盘监控也会把新落进任务目录的文件交给复制，界面上的勾选框同样是锁住的",
+    "要不复制，得请用户先在任务设置里关掉「复制到 OpenList / CD2」；不然就别传 copy: false。",
   );
 }
 
@@ -99,7 +99,7 @@ export function copyNotReady(why: string): ToolError {
   return new ToolError(
     "COPY_NOT_READY",
     `没法复制到 OpenList：${why}`,
-    "只能由用户到设置页的「复制到 OpenList」里配好；或者这次不复制（copy 不传或传 false）。",
+    "只能由用户到设置页的「网盘挂载」「复制」两节里配好；或者这次不复制（copy 不传或传 false）。",
   );
 }
 
@@ -124,7 +124,7 @@ const afterCopyFields = (afterCopy: CopyAfterCopy) => ({ afterCopy, afterCopyTex
  * 令牌没开这一组（追更检查是另一组的工具）就不叫它去调 copy_list
  */
 export function copyOutcomeView(o: CopyOutcome, token: Pick<AgentToken, "toolsets">): Record<string, unknown> {
-  const progress = hasToolset(token, "transfer") ? "用 copy_list 看进度" : "进度在 OpenStrm 云下载页的「复制到 OpenList」里看";
+  const progress = hasToolset(token, "transfer") ? "用 copy_list 看进度" : "进度在 OpenStrm 云下载页的「复制到 OpenList / CD2」里看";
   const after = afterCopyNote(o.afterCopy);
   if (o.queued === 0) {
     const reason = o.reason ?? "没有可排的条目";
@@ -145,7 +145,7 @@ export function copyOutcomeView(o: CopyOutcome, token: Pick<AgentToken, "toolset
       queued: 0,
       ...afterCopyFields("keep"),
       reason,
-      note: "这次没有复制到 OpenList，原因见 reason；设置上的问题只能由用户到设置页的「复制到 OpenList」里处理。",
+      note: "这次没有复制，原因见 reason；设置上的问题只能由用户到设置页的「网盘挂载」「复制」两节里处理。",
     };
   }
   const where = `已排进复制队列，复制到 ${o.dstDir} 下（按任务目录的层级摆）`;
@@ -265,10 +265,10 @@ export const copyListTool = defineTool({
       hints.push(
         ctx.token.scopes.includes("write")
           ? "失败的先看 detail 找原因，canRetry 为 true 的可以用 copy_retry 重新排队（先告诉用户）；跳过的是目标里已经有同名的，要用户先删掉目标里那份再重试。"
-          : "失败的请用户在 OpenStrm 云下载页的「复制到 OpenList」里重试（这个令牌没有「改网盘」权限）。",
+          : "失败的请用户在 OpenStrm 云下载页的「复制到 OpenList / CD2」里重试（这个令牌没有「改网盘」权限）。",
       );
     }
-    if (config.configured === false) hints.push("设置没配好，只能由用户到设置页的「复制到 OpenList」里配。");
+    if (config.configured === false) hints.push("设置没配好，只能由用户到设置页的「网盘挂载」「复制」两节里配。");
     if (ctx.token.scopes.includes("write") && items.some(canAfterCopy)) {
       hints.push("canAfterCopy 为 true 的已复制记录，网盘上的源文件还在原处：用户想收起来的话可以用 copy_after 归档（可逆）或删除（要「删除」档），先告诉用户。");
     }
@@ -303,7 +303,7 @@ const ITEM_OUTCOME_TEXT: Record<ManualCopyItem["outcome"], string> = {
 
 /** copy_add 的结果：按这次的 items 说话（不能套 copyOutcomeView：那边把「一条没排、带目标根」一律当成「都排着了」） */
 function manualCopyView(task: TaskDefinition, r: ManualCopyResult, token: Pick<AgentToken, "toolsets">): Record<string, unknown> {
-  const progress = hasToolset(token, "transfer") ? "用 copy_list 看进度" : "进度在 OpenStrm 云下载页的「复制到 OpenList」里看";
+  const progress = hasToolset(token, "transfer") ? "用 copy_list 看进度" : "进度在 OpenStrm 云下载页的「复制到 OpenList / CD2」里看";
   const after = afterCopyNote(r.afterCopy);
   let note: string;
   if (r.queued > 0) note = `已排进复制队列，复制到 ${r.dstDir} 下（按任务目录的层级摆）${after ? `；${after}` : ""}。${progress}。`;
@@ -420,7 +420,7 @@ const AFTER_OUTCOME_TEXT: Record<AfterCopyItemOutcome, string> = {
 
 /** copy_after 的结果：逐条说下场，外加一句总结和下一步 */
 function afterCopyView(r: AfterCopyResult, token: Pick<AgentToken, "toolsets">): Record<string, unknown> {
-  const progress = hasToolset(token, "transfer") ? "用 copy_list 看" : "在 OpenStrm 云下载页的「复制到 OpenList」里看";
+  const progress = hasToolset(token, "transfer") ? "用 copy_list 看" : "在 OpenStrm 云下载页的「复制到 OpenList / CD2」里看";
   const count = (o: AfterCopyItemOutcome) => r.items.filter((i) => i.outcome === o).length;
   const verb = r.afterCopy === "delete" ? "删了" : "归档了";
   const parts = [

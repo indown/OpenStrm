@@ -11,7 +11,7 @@
  * 把目录本身也报上来（整理的 mkdir 项、转存建出来的目录、监控的目录事件），它的父目录才会刷；
  * 不往上一路刷到根——根和 /tv 这种几千条的目录每批都重列一遍太贵（115 有限流）。浅的先刷：父目录缓存里没有的
  * 子目录直接刷会 object not found（drive-notes）。
- * 网盘路径 → 挂载层路径用各目标自己的挂载根换算（OpenList 复用「复制到 OpenList」的，CD2 用它那一节的）；
+ * 网盘路径 → 挂载层路径用各目标自己的挂载根换算（都在设置页「网盘挂载」：OpenList 的存在 openlistCopy 里，CD2 的在 cd2 里）；
  * 没配的目标跳过。是顺手的事：不阻塞调用方，失败只记日志。
  */
 import type { TaskDefinition } from "@openstrm/shared";

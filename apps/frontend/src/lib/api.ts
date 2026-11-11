@@ -18,6 +18,7 @@ import type {
   AgentToolset,
   AppSettings,
   CopyAfterCopy,
+  CopyEngine,
   LibrarySearchResult,
   LibraryShareHealth,
   LibraryUnit,
@@ -99,6 +100,11 @@ export type TaskRow = TaskDefinition & {
   nextRunAt: string | null;
   /** 要复制到 OpenList 的话卡在哪（比如这个账号没填挂载根）；null = 能复制。后端按真干活时的同一套条件算 */
   copyBlocked?: string | null;
+  /**
+   * 卡住的那一项去设置页哪儿改：openlist / cd2 是「网盘挂载」里那一家的面板，copy 是「复制」一节；
+   * null 是不在设置页（挂载层账号的任务，得在任务里把复制关掉）
+   */
+  copyBlockedAt?: CopyEngine | "copy" | null;
 };
 /** 表单提交的任务字段；必填项由后端 schema 把关，这里只描述形状 */
 export type TaskInput = Partial<Omit<TaskDefinition, "id">> & { strmType?: string };

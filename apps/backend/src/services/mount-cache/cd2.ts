@@ -1,5 +1,5 @@
 /**
- * CloudDrive2 这个挂载层：用哪个 CD2 账号、挂载映射来自设置页「CloudDrive2」一节，刷新就是 GetSubFiles 带 forceRefresh。
+ * CloudDrive2 这个挂载层：用哪个 CD2 账号、挂载映射来自设置页「网盘挂载」里的 CloudDrive2，刷新就是 GetSubFiles 带 forceRefresh。
  */
 import { cd2RefreshDir, isCd2Missing } from "../cd2/client.js";
 import { cd2ConfigIfReady } from "../cd2/config.js";

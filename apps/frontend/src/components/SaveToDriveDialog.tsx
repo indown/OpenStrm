@@ -373,16 +373,16 @@ export function SaveToDriveDialog({
               className="mt-0.5"
             />
             <div>
-              <div className="text-sm font-medium">转存后复制到 OpenList</div>
+              <div className="text-sm font-medium">转存后复制走（OpenList / CD2）</div>
               {copyBlocked && taskWantsCopy ? (
                 <div className="text-xs text-warning">
-                  这个任务开着「复制到 OpenList」，可是{copyBlocked}，这次不会复制。到设置页的「复制到 OpenList」里补上就好。
+                  这个任务开着「复制到 OpenList / CD2」，可是{copyBlocked}，这次不会复制。到设置页的「网盘挂载」「复制」两节里补上就好。
                 </div>
               ) : (
                 <div className="text-xs text-muted-foreground">
                   {taskCopies
-                    ? "这个任务开着「复制到 OpenList」，转存完会自动复制，不用勾。"
-                    : `转存完让 OpenList 把这些条目复制到另一个存储（比如挂载的本地磁盘）。${copyBlocked ? `现在勾不了：${copyBlocked}。` : ""}`}
+                    ? "这个任务开着「复制到 OpenList / CD2」，转存完会自动复制，不用勾。"
+                    : `转存完让 OpenList 或 CloudDrive2（设置页「复制」里选的）把这些条目复制到另一个存储（比如挂载的本地磁盘）。${copyBlocked ? `现在勾不了：${copyBlocked}。` : ""}`}
                 </div>
               )}
             </div>

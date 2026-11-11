@@ -25,7 +25,7 @@ import {
   listOfflineTasks,
   type AddOfflineResponse,
 } from "../offline/service.js";
-import { copyConfigured, resolveCopyConfig } from "../copy/paths.js";
+import { copyConfigured, copyEngineLabel, copyEngineOf, resolveCopyConfig } from "../copy/paths.js";
 import { listOpenlistEntries } from "../copy/service.js";
 import { getLifeMonitorStatus } from "../life/monitor.js";
 import { normalizeOfflineUrls } from "../cloud-115/offline.js";
@@ -114,7 +114,7 @@ export interface CommandDeps {
     copyToOpenlist?: boolean;
     copyDstDir?: string;
   }): Promise<AddOfflineResponse>;
-  /** OpenList 目的地浏览：path 下的子目录名（用「复制到 OpenList」配置的账号） */
+  /** 复制目的地浏览：path 下的子目录名（用复制引擎那一家的账号：OpenList 账号或设置页选的 CD2 账号） */
   listOpenlistDirs(path: string): Promise<string[]>;
   listOffline(): Promise<{ tasks: OfflineRow[]; count: number; quota: number | null; total: number | null }>;
   offlinePending(): number;
@@ -600,7 +600,7 @@ async function beginOffline(bot: BotLike, chatId: string, userId: number, urls: 
     .map((t) => [{ text: `📁 ${shortName(t.originPath, 40)}`, callback_data: `ofl:${token}:${t.id}` }]);
   buttons.push([{ text: "☁️ 115 默认目录（不生成 strm）", callback_data: `ofl:${token}:default` }]);
   if (openlistCopyReady(settings)) {
-    buttons.push([{ text: "☁️ 115 默认目录，下完让 OpenList 复制走", callback_data: `ofl:${token}:defcopy` }]);
+    buttons.push([{ text: `☁️ 115 默认目录，下完让 ${copyEngineLabel(copyEngineOf(settings))} 复制走`, callback_data: `ofl:${token}:defcopy` }]);
   }
   buttons.push([{ text: "取消", callback_data: `drop:${token}` }]);
   const preview = urls.slice(0, 5).map((u) => `• ${esc(shortName(u, 60))}`);
@@ -609,7 +609,7 @@ async function beginOffline(bot: BotLike, chatId: string, userId: number, urls: 
 }
 
 /**
- * 「复制到 OpenList」配好了、而且这个 115 账号填了挂载根，才给这个目的地按钮；
+ * 复制配好了（按设置页选的引擎）、而且这个 115 账号在那一家里填了路径，才给这个目的地按钮；
  * 账号本身好不好使留到提交时报错
  */
 function openlistCopyReady(settings: AppSettings): boolean {
@@ -647,7 +647,8 @@ async function finishOffline(
     const target = task ? `${task.originPath}${subPath ? `/${subPath}` : ""}` : "";
     // 按实际登记上的回执说：followup 把「下完只复制」的也算在里面，不能拿它说会生成 strm；任务开着复制的也说一声复制到哪
     const strmNote = r.strmFollowup ? "，下完自动生成 strm" : "";
-    const copyNote = r.copyDstDir ? `，下完让 OpenList 复制到 ${esc(r.copyDstDir)}` : "";
+    // 引擎按这次添加时核对用的那一家说（回包里带着），别事后再读一遍设置
+    const copyNote = r.copyDstDir && r.copyEngine ? `，下完让 ${copyEngineLabel(r.copyEngine)} 复制到 ${esc(r.copyDstDir)}` : "";
     const lines = [`☁️ 已添加 ${r.added} 个云下载\n目录：${task ? `${esc(target)}${strmNote}` : "115 默认目录"}${copyNote}`];
     const failed = r.results.filter((x) => !x.ok);
     if (failed.length) lines.push("", `未接受 ${failed.length} 条：`, ...failed.slice(0, 5).map((x) => `• ${esc(shortName(x.url, 40))} — ${esc(x.message ?? "115 未接受")}`));
@@ -737,7 +738,7 @@ function renderBrowse(
   const page = Math.min(browse.page, pages - 1);
   const lines = [
     offline ? `☁️ ${action.urls.length} 条链接` : `📦 <b>${esc(action.name)}</b>`,
-    `${copy ? "115 下完后，OpenList 复制到" : offline ? "下载到" : "转存到"}：<b>${esc(target)}</b>`,
+    `${copy ? `115 下完后，${copyEngineLabel(copyEngineOf(deps.settings()))} 复制到` : offline ? "下载到" : "转存到"}：<b>${esc(target)}</b>`,
     browse.dirs.length === 0
       ? "这一层没有子文件夹。"
       : `子文件夹 ${browse.dirs.length} 个${pages > 1 ? `（第 ${page + 1}/${pages} 页）` : ""}，点进去，或者就放这一层：`,
@@ -1144,7 +1145,7 @@ async function handleCallback(bot: BotLike, q: TelegramCallbackQuery): Promise<v
         if (kind === "offline" && dest === "defcopy") {
           // 先从设置页的 dstDir 出发选「这次复制到哪」，选完（就复制到这里）才提交
           if (!openlistCopyReady(settings)) {
-            await bot.answerCallback(q.id, "「复制到 OpenList」的配置不完整，去设置页看看", { alert: true });
+            await bot.answerCallback(q.id, "复制的配置不完整，去设置页的「网盘挂载」「复制」两节看看", { alert: true });
             return;
           }
           await bot.answerCallback(q.id, "读取目录…");

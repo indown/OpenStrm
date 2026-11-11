@@ -13,7 +13,7 @@
  *     失败 → 记下 115 的说法；列表里连续几轮找不到 → 当作被人删了。
  *     没有待办时循环自己停掉，不白打接口。
  */
-import type { Account115, AccountInfo as SharedAccountInfo, AppSettings, CopyAfterCopy, TaskDefinition } from "@openstrm/shared";
+import type { Account115, AccountInfo as SharedAccountInfo, AppSettings, CopyAfterCopy, CopyEngine, TaskDefinition } from "@openstrm/shared";
 import { getAccount, listAccounts } from "../../db/repositories/accounts.js";
 import { getTask } from "../../db/repositories/tasks.js";
 import { readAppSettings, updateAppSetting } from "../../db/repositories/settings.js";
@@ -41,7 +41,7 @@ import {
   type OfflineTask,
 } from "../cloud-115/offline.js";
 import { enqueueCopy, type CopyEnqueueResult, type CopyRequest } from "../copy/service.js";
-import { copyDstProblem, copyMountFieldLabel, copyOptionsFor, normDir, relativeTo, resolveCopyConfig } from "../copy/paths.js";
+import { copyDstProblem, copyEngineOf, copyMountFieldLabel, copyOptionsFor, normDir, relativeTo, resolveCopyConfig } from "../copy/paths.js";
 import { scheduleEmbyRefresh } from "../media-server.js";
 import { events } from "../events.js";
 import { effectiveAutoMode } from "../organize/auto.js";
@@ -293,6 +293,11 @@ export interface AddOfflineResponse {
   copyDstDir: string | null;
   /** 复制成功后源文件的去向（冻结在回执上的那个；115 上原本就有、不在任务目录里的一律不动） */
   copyAfterCopy: CopyAfterCopy;
+  /**
+   * 这次核对复制配置时用的引擎（copyDstDir 为 null 时也是 null）。回话里说「下完让谁复制」按它，别再另读一遍设置；
+   * 真复制时按那时设置页选的引擎排队，下完之前改了引擎就换那一家
+   */
+  copyEngine: CopyEngine | null;
   /** 任务开着复制、这次却复制不了的原因（设置没配好、OpenList 账号不可用）；能复制或本来就不复制是 null */
   copyBlocked: string | null;
 }
@@ -340,11 +345,11 @@ export async function addOfflineTasks(opts: AddOfflineOptions): Promise<AddOffli
   if (forced && !copyOpts.enabled) {
     const cfg = resolveCopyConfig(settings);
     if (!cfg.mounts[account.name]) {
-      throw new HttpError(400, `账号 ${account.name} 还没填${copyMountFieldLabel(cfg.engine)}，先到设置页填上`);
+      throw new HttpError(400, `账号 ${account.name} 还没填${copyMountFieldLabel(cfg.engine)}`);
     }
     // 配置齐了却还是 false：没有任务（copyOptionsFor 认任务），或者任务上、设置页、这次都没给目标目录
     copyDst = pickedDst || cfg.dstDir;
-    if (!copyDst) throw new HttpError(400, "没有复制目标目录：任务上和设置页的「复制到 OpenList」都没填");
+    if (!copyDst) throw new HttpError(400, "没有复制目标目录：任务上和设置页「复制」里都没填");
   } else if (copyOpts.enabled) {
     // copyOptionsFor 只看设置上填没填，OpenList 账号本身（被删了、缺密码）到这里才核对：
     // 不核对的话回执照登、下完才发现排不进复制队列
@@ -443,6 +448,7 @@ export async function addOfflineTasks(opts: AddOfflineOptions): Promise<AddOffli
     // 生成 strm 的回执兼办复制时也带着 copyDstDir，所以两种回执登记上了哪一种都算
     copyDstDir: followup && copyDst ? copyDst : null,
     copyAfterCopy: followup && copyDst ? copyAfterCopy : "keep",
+    copyEngine: followup && copyDst ? copyEngineOf(settings) : null,
     copyBlocked,
   };
 }
@@ -738,7 +744,7 @@ export async function migrateLegacyCopyMount(): Promise<void> {
     log.info(`旧配置已换算成挂载根：${account.name} → ${root}`);
     return;
   }
-  log.warn(`旧的「复制到 OpenList」源目录 ${srcDir} 推不出挂载根，请到设置页手动填一下；在那之前复制不会发生`);
+  log.warn(`旧的「复制到 OpenList」源目录 ${srcDir} 推不出挂载根，请到设置页「网盘挂载」里手动填一下；在那之前复制不会发生`);
 }
 
 /**

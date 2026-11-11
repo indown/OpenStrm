@@ -4,7 +4,7 @@ import { z } from "zod";
 import { deleteTask, insertTask, listTasks, updateTask } from "../../db/repositories/tasks.js";
 import { isTaskRunning, listRunningTaskIds } from "../../services/task/registry.js";
 import { getLatestExecutions } from "../../services/task-history.js";
-import { copyBlockerFor } from "../../services/copy/paths.js";
+import { copyBlockFor } from "../../services/copy/paths.js";
 import { HttpError } from "../../lib/http-error.js";
 import { parse } from "../../lib/validate.js";
 import { taskInputSchema, taskPatchSchema } from "../../schemas/entities.js";
@@ -27,15 +27,20 @@ export default async function (fastify: FastifyInstance) {
     const running = new Set(listRunningTaskIds());
     const latest = getLatestExecutions();
     const nextRuns = new Map(fastify.cron.listJobs().map((j) => [j.taskId, j.nextRun]));
-    // 要复制的话卡在哪（null = 能复制）：开着复制却没配齐时列表上要看得出来，转存弹框的勾选框也按它
-    const copyBlocked = copyBlockerFor();
-    return listTasks().map((task) => ({
-      ...task,
-      status: running.has(task.id) ? "processing" : "pending",
-      lastRun: latest.get(task.id) ?? null,
-      nextRunAt: nextRuns.get(task.id) ?? null,
-      copyBlocked: copyBlocked(task),
-    }));
+    // 要复制的话卡在哪（null = 能复制）：开着复制却没配齐时列表上要看得出来，转存弹框的勾选框也按它；
+    // copyBlockedAt 是去设置页哪儿改（「网盘挂载」里那一家的面板、「复制」一节，null = 不在设置页），徽标按它跳
+    const copyBlock = copyBlockFor();
+    return listTasks().map((task) => {
+      const block = copyBlock(task);
+      return {
+        ...task,
+        status: running.has(task.id) ? "processing" : "pending",
+        lastRun: latest.get(task.id) ?? null,
+        nextRunAt: nextRuns.get(task.id) ?? null,
+        copyBlocked: block?.reason ?? null,
+        copyBlockedAt: block?.spot ?? null,
+      };
+    });
   });
 
   fastify.post("/api/task", { preHandler: [fastify.authenticate] }, async (request, reply) => {

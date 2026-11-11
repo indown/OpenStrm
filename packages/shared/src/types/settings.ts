@@ -200,14 +200,15 @@ export type UpdateSettings = {
 };
 
 /**
- * 「复制到 OpenList」：新落到网盘上的文件，让 OpenList 复制到另一个存储（如挂载的本地磁盘）。
+ * 「复制到 OpenList / CD2」：新落到网盘上的文件，让 OpenList 或 CloudDrive2 复制到另一个存储（如挂载的本地磁盘）。
  *
- * account + dstDir + 这个网盘账号的挂载根，三样齐了这个账号才复制得了。
+ * 设置页分两节填：engine / dstDir 在「复制」，OpenList 的 account / mounts 在「网盘挂载」（OpenList 的目录缓存刷新也用这两样）。
+ * 名字还叫 openlistCopy 是为了不迁移老配置。
  */
 export type CopyEngine = "openlist" | "cd2";
 
 export type OpenlistCopySettings = {
-  /** 用哪个挂载层来复制：OpenList（默认）或 CloudDrive2。选 CD2 时用哪个 CD2 账号、挂载映射都来自 CloudDrive2 那一节 */
+  /** 用哪个挂载层来复制：OpenList（默认）或 CloudDrive2。选 CD2 时用哪个 CD2 账号、挂载映射都来自 cd2 那一份 */
   engine?: CopyEngine;
   /** 用哪个 openlist 账号调 API（「账户」页里的账号名） */
   account?: string;
@@ -240,7 +241,7 @@ export type Cd2Settings = {
 /** CD2 的 API 令牌按用途要哪些权限：浏览目录 / 同步 / 整理 / 当复制引擎 */
 export type Cd2TokenUse = "browse" | "sync" | "organize" | "copy";
 
-/** 「检查连接」的结果（账户弹框、设置页「CloudDrive2」一节共用）：各段各自成败 */
+/** 「检查连接」的结果（账户弹框、设置页「网盘挂载」「复制」两节共用）：各段各自成败 */
 export type Cd2CheckResult = {
   system: { ok: boolean; message: string; loggedIn?: boolean; userName?: string };
   auth: { ok: boolean; message: string };

@@ -128,16 +128,21 @@ test("GET /api/task：copyBlocked 说这个任务要复制卡在哪，同类型�
   insertTask({ ...base, id: "cb-b", account: "115-b", copyToOpenlist: { enabled: true } });
   insertTask({ ...base, id: "cb-ol", account: "ol", copyToOpenlist: { enabled: true } });
   try {
-    const rows = (await call("GET", "/api/task")).json() as Array<{ id: string; copyBlocked: string | null }>;
+    const rows = (await call("GET", "/api/task")).json() as Array<{ id: string; copyBlocked: string | null; copyBlockedAt: string | null }>;
     const blocked = (id: string) => rows.find((t) => t.id === id)?.copyBlocked;
+    const at = (id: string) => rows.find((t) => t.id === id)?.copyBlockedAt;
     assert.equal(blocked("cb-a"), null, "填了挂载根的能复制");
+    assert.equal(at("cb-a"), null);
     assert.match(blocked("cb-b") ?? "", /账号 115-b 还没填「在 OpenList 里的挂载根」/, "另一个 115 没填，要看得出来");
+    assert.equal(at("cb-b"), "openlist", "挂载根缺了：徽标跳到「网盘挂载」里的 OpenList 面板，不是「复制」一节");
     assert.match(blocked("cb-ol") ?? "", /OpenList \/ CloudDrive2 账号的任务用不着复制/);
+    assert.equal(at("cb-ol"), null, "挂载层账号的任务不在设置页改");
 
     // 设置页的默认目标目录是 /（以前存进去的）：等于没填，说清楚是 / 不算
     patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/", mounts: { "115-a": "/115" } } });
-    const root = (await call("GET", "/api/task")).json() as Array<{ id: string; copyBlocked: string | null }>;
+    const root = (await call("GET", "/api/task")).json() as Array<{ id: string; copyBlocked: string | null; copyBlockedAt: string | null }>;
     assert.equal(root.find((t) => t.id === "cb-a")?.copyBlocked, "没有目标目录：设置页填的是根 /，等于没填");
+    assert.equal(root.find((t) => t.id === "cb-a")?.copyBlockedAt, "copy", "目标目录的事去「复制」一节");
     patchAppSettings({ openlistCopy: { account: "ol", dstDir: "/local", mounts: { "115-a": "/115" } } });
 
     // 设置上看着都齐，OpenList 账号却被删了：照样复制不了
@@ -148,7 +153,7 @@ test("GET /api/task：copyBlocked 说这个任务要复制卡在哪，同类型�
     // 压根没配「复制到 OpenList」：每个任务都说一句短的
     patchAppSettings({ openlistCopy: undefined });
     const none = (await call("GET", "/api/task")).json() as Array<{ id: string; copyBlocked: string | null }>;
-    assert.equal(none.find((t) => t.id === "cb-a")?.copyBlocked, "设置页还没选 OpenList 账号");
+    assert.equal(none.find((t) => t.id === "cb-a")?.copyBlocked, "设置页「网盘挂载」里还没选 OpenList 账号");
   } finally {
     for (const id of ids) deleteTask(id);
     replaceAccounts(before.accounts);

@@ -25,7 +25,8 @@ import { api, type DirectoryNode, type OfflineAddResult, type TaskRow } from "@/
 import { apiErrorBody, apiErrorMessage } from "@/lib/axios";
 import { DirectoryPickerDialog } from "@/components/DirectoryPickerDialog";
 import { splitOfflineLinks } from "@/lib/offline";
-import { normTargetDir } from "@/lib/openlist-copy";
+import { layerAccountStatus } from "@/lib/mount-layer";
+import { copyLayer, normTargetDir } from "@/lib/openlist-copy";
 
 type Mode = "task" | "dir";
 
@@ -72,8 +73,8 @@ export function AddOfflineTaskDialog({ open, onOpenChange, account: defaultAccou
   const [results, setResults] = useState<OfflineAddResult[] | null>(null);
   const [invalid, setInvalid] = useState<string[]>([]);
   const [copyToOpenlist, setCopyToOpenlist] = useState(false);
-  /** 设置页的「复制到 OpenList」配齐了才显示勾选框；null = 没配置或还没查到 */
-  const [openlistCopy, setOpenlistCopy] = useState<{ account: string; dstDir: string } | null>(null);
+  /** 复制用的那一家（OpenList 或 CD2）选了账号、这个 115 在它里面填了路径才显示勾选框：它的账号和默认目标目录；null = 没配置或还没查到 */
+  const [copySetup, setCopySetup] = useState<{ account: string; dstDir: string } | null>(null);
   /** 相对设置页 dstDir 已进入的子目录段：这次复制到 dstDir/…segments */
   const [copySegments, setCopySegments] = useState<string[]>([]);
   const [copySubdirs, setCopySubdirs] = useState<DirectoryNode[]>([]);
@@ -105,15 +106,16 @@ export function AddOfflineTaskDialog({ open, onOpenChange, account: defaultAccou
     setGenerateStrm(true);
     setCopyToOpenlist(false);
     setCopySegments([]);
-    setOpenlistCopy(null);
-    api.settings
-      .get()
-      .then((s) => {
+    setCopySetup(null);
+    Promise.all([api.settings.get(), api.accounts.list().catch(() => null)])
+      .then(([s, accountList]) => {
         if (cancelled) return;
-        const c = s.openlistCopy;
-        // 这个 115 账号得有挂载根，后端才算得出产物在 OpenList 里的位置；默认目标目录可以空着（任务上可能填了）
-        if (!c?.account || !c.mounts?.[account]?.trim()) return;
-        setOpenlistCopy({ account: c.account, dstDir: normTargetDir(c.dstDir) });
+        // 复制用的那一家（引擎是 CD2 就是 CD2 账号和它那份路径）：选的账号得还在账户页里（删了的话勾上也复制不了，
+        // 选子目录还会列个空），这个 115 账号得在它里面填了路径，后端才算得出产物在挂载层里的位置；
+        // 默认目标目录可以空着（任务上可能填了）。账号表读不到就只看设置，提交时后端还会核对
+        const layer = copyLayer(s.openlistCopy, s.cd2);
+        if (!layerAccountStatus(accountList, layer.engine, layer.account).usable || !layer.mounts[account]?.trim()) return;
+        setCopySetup({ account: layer.account, dstDir: normTargetDir(s.openlistCopy?.dstDir) });
       })
       .catch(() => {});
     setTasksLoading(true);
@@ -155,8 +157,8 @@ export function AddOfflineTaskDialog({ open, onOpenChange, account: defaultAccou
   const taskCopy = mode === "task" ? selectedTask?.copyToOpenlist : undefined;
   const taskCopies = taskCopy?.enabled === true;
   // OpenList 根 / 算没填（和后端同一条规则）
-  const copyBase = (mode === "task" ? normTargetDir(taskCopy?.dstDir) : "") || (openlistCopy?.dstDir ?? "");
-  const copying = Boolean(openlistCopy) && (taskCopies || copyToOpenlist);
+  const copyBase = (mode === "task" ? normTargetDir(taskCopy?.dstDir) : "") || (copySetup?.dstDir ?? "");
+  const copying = Boolean(copySetup) && (taskCopies || copyToOpenlist);
   const copyTarget = [copyBase, ...copySegments].join("/");
   // 子目录请求只跟任务 id 和路径走，不跟任务对象的引用走（和 SaveToDriveDialog 一个道理）
   const taskAccount = selectedTask?.account;
@@ -183,8 +185,8 @@ export function AddOfflineTaskDialog({ open, onOpenChange, account: defaultAccou
     };
   }, [open, mode, taskId, taskAccount, taskOriginPath, subSegments]);
 
-  // OpenList 目的地浏览：要复制时从上面算好的目标目录出发列子目录
-  const copyAccount = openlistCopy?.account;
+  // 复制目的地浏览：要复制时从上面算好的目标目录出发，在复制用的那一家（OpenList / CD2 账号）里列子目录
+  const copyAccount = copySetup?.account;
   useEffect(() => {
     if (!open || !copying || !copyBase || !copyAccount) return;
     let cancelled = false;
@@ -478,7 +480,7 @@ export function AddOfflineTaskDialog({ open, onOpenChange, account: defaultAccou
             </div>
           </div>
 
-          {openlistCopy && (
+          {copySetup && (
             <div className="space-y-2">
               <label className="text-sm font-medium">下载完之后</label>
               <div className="space-y-2">

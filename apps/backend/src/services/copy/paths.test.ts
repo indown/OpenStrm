@@ -12,6 +12,7 @@ import {
   baseName,
   checkCopyDstDir,
   copyBlockerFor,
+  copyBlockFor,
   copyDstProblem,
   copyOptionsFor,
   copySettingsGap,
@@ -108,7 +109,7 @@ test("copySettingsGap：按设置页从上到下说缺哪样；同类型的两�
   assert.match(copySettingsGap("115-a", withCopy(undefined)) ?? "", /还没选 OpenList 账号/);
   const s = withCopy({ account: "ol", dstDir: "/local", mounts: { "115-a": "/115", "115-b": "  " } });
   assert.equal(copySettingsGap("115-a", s), null);
-  assert.match(copySettingsGap("115-b", s) ?? "", /账号 115-b 还没填「在 OpenList 里的挂载根」/, "只填了空白等于没填");
+  assert.match(copySettingsGap("115-b", s) ?? "", /账号 115-b 还没填「在 OpenList 里的挂载根」（设置页「网盘挂载」）/, "只填了空白等于没填；说得出去哪一节填");
   assert.match(copySettingsGap("夸克", s) ?? "", /账号 夸克 还没填/);
   const noDst = withCopy({ account: "ol", mounts: { "115-a": "/115" } });
   assert.match(copySettingsGap("115-a", noDst) ?? "", /没有目标目录/);
@@ -186,10 +187,10 @@ test("引擎选 CloudDrive2：缺什么看 CD2 那一节选的账号，不要 Op
       { accountType: "openlist", name: "ol", account: "a", password: "p", url: "http://ol" },
     ]);
     const base = withCopy({ engine: "cd2", dstDir: "/hdd/media" });
-    assert.match(copySettingsGap("115-a", base) ?? "", /CloudDrive2 一节还没选 CD2 账号/);
+    assert.match(copySettingsGap("115-a", base) ?? "", /设置页「网盘挂载」里还没选 CloudDrive2 账号/);
     const ok: AppSettings = { ...base, cd2: { account: "nas-cd2", mounts: { "115-a": "/115/" } } };
     assert.equal(copySettingsGap("115-a", ok), null, "OpenList 账号一个都没选也行");
-    assert.match(copySettingsGap("夸克", ok) ?? "", /账号 夸克 还没填「在 CD2 里的路径」/);
+    assert.match(copySettingsGap("夸克", ok) ?? "", /账号 夸克 还没填「在 CD2 里的路径」（设置页「网盘挂载」）/);
     const cfg = resolveCopyConfig(ok);
     assert.equal(cfg.engine, "cd2");
     assert.equal(cfg.account, null);
@@ -207,7 +208,7 @@ test("引擎选 CloudDrive2：缺什么看 CD2 那一节选的账号，不要 Op
         return err instanceof HttpError ? err.message : String(err);
       }
     };
-    assert.equal(why(base), "「复制」选了 CloudDrive2，但设置页的 CloudDrive2 一节还没选 CD2 账号");
+    assert.equal(why(base), "「复制」选了 CloudDrive2，但设置页「网盘挂载」里还没选 CloudDrive2 账号");
     assert.equal(why(pick("gone")), "CloudDrive2 账号不存在：gone");
     assert.equal(why(pick("ol")), "ol 不是 CloudDrive2 账号");
     assert.equal(why(pick("half")), "CloudDrive2 账号 half 缺少地址或凭据");
@@ -216,7 +217,7 @@ test("引擎选 CloudDrive2：缺什么看 CD2 那一节选的账号，不要 Op
     assert.equal(copyBlockerFor(ok)({ account: "115-a" }), null);
     assert.equal(copyBlockerFor(pick("gone"))({ account: "115-a" }), "CloudDrive2 账号不存在：gone");
     assert.equal(copyBlockerFor(pick("half"))({ account: "115-a" }), "CloudDrive2 账号 half 缺少地址或凭据");
-    assert.equal(copyBlockerFor(base)({ account: "115-a" }), "复制选了 CloudDrive2，设置页的 CloudDrive2 一节还没选 CD2 账号");
+    assert.equal(copyBlockerFor(base)({ account: "115-a" }), "复制选了 CloudDrive2，设置页「网盘挂载」里还没选 CloudDrive2 账号");
     // 挂载层账号（OpenList / CD2）的任务用不着复制，两种引擎下都一样
     for (const settings of [ok, withCopy({ account: "ol", dstDir: "/local", mounts: { "nas-cd2": "/x" } })]) {
       assert.match(copyBlockerFor(settings)({ account: "nas-cd2" }) ?? "", /OpenList \/ CloudDrive2 账号的任务用不着复制/);
@@ -227,4 +228,36 @@ test("引擎选 CloudDrive2：缺什么看 CD2 那一节选的账号，不要 Op
   }
   // 没选引擎 = OpenList，照旧要账号
   assert.match(copySettingsGap("115-a", withCopy({ dstDir: "/local" })) ?? "", /还没选 OpenList 账号/);
+});
+
+test("copyBlockFor：卡在哪的同时说去设置页哪儿改——挂载层的账号和路径去「网盘挂载」里那一家的面板，目标目录去「复制」，挂载层账号的任务不在设置页", () => {
+  const baseline = listAccounts();
+  try {
+    replaceAccounts([
+      { accountType: "cd2", name: "nas-cd2", url: "http://cd2.local:19798", apiToken: "tok" },
+      { accountType: "openlist", name: "ol", account: "a", password: "p", url: "http://ol" },
+    ]);
+    const spot = (s: AppSettings, account = "115-a", dstDir?: string) => copyBlockFor(s)({ account, copyToOpenlist: { dstDir } })?.spot;
+    // OpenList 引擎：没选账号、这个网盘没填挂载根 → OpenList 面板；账号被删了也是
+    assert.equal(spot(withCopy({ dstDir: "/local" })), "openlist");
+    assert.equal(spot(withCopy({ account: "ol", dstDir: "/local", mounts: { "115-b": "/115" } })), "openlist");
+    assert.equal(spot(withCopy({ account: "gone", dstDir: "/local", mounts: { "115-a": "/115" } })), "openlist");
+    // 目标目录哪儿都没填 → 「复制」一节；任务上填了就没事
+    assert.equal(spot(withCopy({ account: "ol", mounts: { "115-a": "/115" } })), "copy");
+    assert.equal(copyBlockFor(withCopy({ account: "ol", mounts: { "115-a": "/115" } }))({ account: "115-a", copyToOpenlist: { dstDir: "/local/tv" } }), null);
+    // CD2 引擎：没选 CD2 账号、没填路径、选的账号被删 → CD2 面板
+    const cd2 = (cd2Cfg: AppSettings["cd2"]): AppSettings => ({ ...withCopy({ engine: "cd2", dstDir: "/hdd" }), cd2: cd2Cfg });
+    assert.equal(spot(cd2(undefined)), "cd2");
+    assert.equal(spot(cd2({ account: "nas-cd2", mounts: {} })), "cd2");
+    assert.equal(spot(cd2({ account: "gone", mounts: { "115-a": "/115" } })), "cd2");
+    // 挂载层账号的任务：不在设置页改
+    const mountTask = copyBlockFor(cd2({ account: "nas-cd2", mounts: { "115-a": "/115" } }))({ account: "ol" });
+    assert.equal(mountTask?.spot, null);
+    assert.match(mountTask?.reason ?? "", /用不着复制/);
+    // 话和 copyBlockerFor 给的一字不差
+    const s = withCopy({ account: "ol", dstDir: "/local", mounts: { "115-b": "/115" } });
+    assert.equal(copyBlockFor(s)({ account: "115-a" })?.reason, copyBlockerFor(s)({ account: "115-a" }));
+  } finally {
+    replaceAccounts(baseline);
+  }
 });

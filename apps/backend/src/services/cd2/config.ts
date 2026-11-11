@@ -1,5 +1,5 @@
 /**
- * 设置页「CloudDrive2」一节 → 能用的配置。挂载层只有一个 CD2：设置里选的那个 CloudDrive2 账号（地址和凭据在账户页），
+ * 设置页「网盘挂载」里的 CloudDrive2 → 能用的配置。挂载层只有一个 CD2：设置里选的那个 CloudDrive2 账号（地址和凭据在账户页），
  * 加上各网盘账号在它里面的路径。账号和映射都齐了才算配好，缺哪样都当没配：这是顺手刷缓存的事，不该因为没配而报错。
  */
 import type { AccountCd2, AppSettings, Cd2Settings } from "@openstrm/shared";
@@ -35,7 +35,7 @@ export function cd2AccountProblem(state: Cd2AccountState): string | null {
   if (state.ok) return null;
   switch (state.reason) {
     case "unset":
-      return "设置页的 CloudDrive2 一节还没选 CD2 账号";
+      return "设置页「网盘挂载」里还没选 CloudDrive2 账号";
     case "missing":
       return `CloudDrive2 账号不存在：${state.name}`;
     case "wrong-type":

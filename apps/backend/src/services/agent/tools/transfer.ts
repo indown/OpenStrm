@@ -594,11 +594,11 @@ function duplicateResult(prev: PreviousSave, args: { copy?: boolean; copyDstDir?
     jobId: job.id,
     ...(copy ? { copy } : {}),
     ...(args.copy === false && prevCopied(prev)
-      ? { copyNote: "上次那次已经排进了复制队列，这次的 copy: false 管不了它；要撤回，得请用户在 OpenStrm 云下载页的「复制到 OpenList」里把那几条去掉。" }
+      ? { copyNote: "上次那次已经排进了复制队列，这次的 copy: false 管不了它；要撤回，得请用户在 OpenStrm 云下载页的「复制到 OpenList / CD2」里把那几条去掉。" }
       : {}),
     // 这次换了复制目标、却没有再排复制（extra.copy 是补上了复制才有的）：上次那次复制到哪已经定了，不能悄悄当成办成了
     ...(args.copyDstDir?.trim() && extra.copy === undefined
-      ? { copyDstDirNote: "这次的 copyDstDir 没用上：同样的内容刚转存过，上次那次复制到哪已经定了（见 copy）。要换地方，得请用户在 OpenStrm 云下载页的「复制到 OpenList」里把那几条去掉，再用 copy_add 带 dstDir 重新排。" }
+      ? { copyDstDirNote: "这次的 copyDstDir 没用上：同样的内容刚转存过，上次那次复制到哪已经定了（见 copy）。要换地方，得请用户在 OpenStrm 云下载页的「复制到 OpenList / CD2」里把那几条去掉，再用 copy_add 带 dstDir 重新排。" }
       : {}),
   };
   if (job.status === "running") {
@@ -717,7 +717,7 @@ function copyDstDirArg(task: TaskDefinition | null, copy: boolean | undefined, c
             ? "要复制就传 copy: true；不复制就别传 copyDstDir。"
             : "不给 task 时要复制得传 copy: true；不复制就别传 copyDstDir。"
           : code === "COPY_ALWAYS_ON"
-            ? "要不复制，得请用户先在任务设置里关掉「复制到 OpenList」；要指定这次复制到哪就别传 copy: false。"
+            ? "要不复制，得请用户先在任务设置里关掉「复制到 OpenList / CD2」；要指定这次复制到哪就别传 copy: false。"
             : "填 OpenList 里的完整路径，比如 /local/media/tv。";
     throw new ToolError(code, err.message, hint);
   }
@@ -975,7 +975,7 @@ export const shareSaveTool = defineTool({
           ...(follow.followError ? { followError: follow.followError } : {}),
           // 一次性的 copy / copyDstDir 不进追更订阅：之后的新增按任务上的开关和目标目录来，别让模型以为追更也会复制到同一处
           ...(follow.follow && (args.copy === true || copyDstDir)
-            ? { copyFollowNote: "copy / copyDstDir 只管这一次转存：追更之后转存的新增按任务上的「复制到 OpenList」开关和目标目录来。想让追更也复制到同一处，请用户在任务上开开关 / 填目标目录。" }
+            ? { copyFollowNote: "copy / copyDstDir 只管这一次转存：追更之后转存的新增按任务上的「复制到 OpenList / CD2」开关和目标目录来。想让追更也复制到同一处，请用户在任务上开开关 / 填目标目录。" }
             : {}),
         };
       },
@@ -1110,7 +1110,7 @@ function offlineCopyView(
     };
   }
   return res.copyBlocked
-    ? { reason: res.copyBlocked, note: "任务开着复制，但现在复制不了（原因见 reason），这次下完不会复制；只能由用户到设置页的「复制到 OpenList」里处理。" }
+    ? { reason: res.copyBlocked, note: "任务开着复制，但现在复制不了（原因见 reason），这次下完不会复制；只能由用户到设置页的「网盘挂载」「复制」两节里处理。" }
     : undefined;
 }
 

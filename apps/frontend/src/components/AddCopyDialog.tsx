@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { FolderOpen, Loader2, X } from "lucide-react";
 import { toast } from "sonner";
-import type { CopyAfterCopy, OpenlistCopySettings } from "@openstrm/shared";
+import type { Cd2Settings, CopyAfterCopy, OpenlistCopySettings } from "@openstrm/shared";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -22,7 +22,8 @@ import { StatusBadge, type StatusTone } from "@/components/status-badge";
 import { TreeSelectDialog } from "@/components/TreeSelectDialog";
 import { api, type CopyAddOutcome, type CopyAddResult, type TaskRow } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/axios";
-import { AFTER_COPY_LABEL, normTargetDir, STAGING_DIRS, taskAfterCopy } from "@/lib/openlist-copy";
+import { isMountLayerKind } from "@/lib/drive";
+import { AFTER_COPY_LABEL, COPY_ENGINE_LABEL, copyLayer, normTargetDir, STAGING_DIRS, taskAfterCopy } from "@/lib/openlist-copy";
 
 /** 从别处（strm 管理页）带进来的预填：哪个任务、哪些路径（相对任务网盘目录） */
 export interface CopyPreset {
@@ -56,7 +57,7 @@ const OUTCOME_META: Record<CopyAddOutcome, { label: string; tone: StatusTone }> 
 const stripSlashes = (p: string): string => p.replace(/^\/+|\/+$/g, "");
 
 /**
- * 手动发起「复制到 OpenList」：选任务 → 在它的网盘目录里勾目录 / 文件 → 复制到哪、复制完源文件怎么办 → 提交。
+ * 手动发起「复制到 OpenList / CD2」：选任务 → 在它的网盘目录里勾目录 / 文件 → 复制到哪、复制完源文件怎么办 → 提交。
  * 转存时没勾复制、后来才开了复制、看片卡顿想把某部片放到本地磁盘，都从这里补。
  * 目标里已经有同名目录的，后端只补缺的文件；提交后每条路径的结果留在框里看。
  */
@@ -64,6 +65,8 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [settings, setSettings] = useState<OpenlistCopySettings | null>(null);
+  /** 设置里的 cd2 那一份：复制引擎选了 CloudDrive2 时，选目标子目录要列 CD2 账号 */
+  const [cd2Settings, setCd2Settings] = useState<Cd2Settings | null>(null);
   const [taskId, setTaskId] = useState("");
   const [paths, setPaths] = useState<string[]>([]);
   /** 在目标根下面选的子目录（相对目标根）；空串 = 就放目标根 */
@@ -100,10 +103,16 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
     api.settings
       .get()
       .then((s) => {
-        if (!cancelled) setSettings(s.openlistCopy ?? {});
+        if (!cancelled) {
+          setSettings(s.openlistCopy ?? {});
+          setCd2Settings(s.cd2 ?? {});
+        }
       })
       .catch(() => {
-        if (!cancelled) setSettings({});
+        if (!cancelled) {
+          setSettings({});
+          setCd2Settings({});
+        }
       });
     return () => {
       cancelled = true;
@@ -113,7 +122,11 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
   const task = tasks.find((t) => t.id === taskId);
   const account = task?.account ?? "";
   const originPath = stripSlashes(task?.originPath ?? "");
-  const olAccount = settings?.account ?? "";
+  /** 复制用的那一家（引擎是 CD2 就是设置页「网盘挂载」里选的 CD2 账号）：选目标子目录从它里面列 */
+  const layer = copyLayer(settings ?? undefined, cd2Settings ?? undefined);
+  const layerAccount = layer.account;
+  /** 设置还没读到时两家都说上，免得先闪一下 OpenList */
+  const engineName = settings ? COPY_ENGINE_LABEL[layer.engine] : "OpenList / CloudDrive2";
   // OpenList 根 / 算没填（和后端同一条规则）
   const base = normTargetDir(task?.copyToOpenlist?.dstDir) || normTargetDir(settings?.dstDir);
   const dstDir = dstSub ? `${base}/${dstSub}` : base;
@@ -130,7 +143,7 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
     },
     [account, originPath],
   );
-  const loadDst = useCallback((p: string) => api.directory.remote(olAccount, [base, p].filter(Boolean).join("/")), [olAccount, base]);
+  const loadDst = useCallback((p: string) => api.directory.remote(layerAccount, [base, p].filter(Boolean).join("/")), [layerAccount, base]);
 
   const submit = async () => {
     if (!task || paths.length === 0 || blocked) return;
@@ -164,9 +177,9 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>新建复制到 OpenList</DialogTitle>
+            <DialogTitle>新建复制</DialogTitle>
             <DialogDescription>
-              把任务网盘目录里已经有的目录 / 文件交给 OpenList，复制到另一个存储（比如挂载的本地磁盘）。目标里已经有同名目录的只补缺的文件。
+              把任务网盘目录里已经有的目录 / 文件交给 {engineName}，复制到另一个存储（比如挂载的本地磁盘）。目标里已经有同名目录的只补缺的文件。
             </DialogDescription>
           </DialogHeader>
 
@@ -192,7 +205,7 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
                 })}
               </ul>
               {result.queued > 0 && (
-                <p className="text-xs text-muted-foreground">复制在后台跑，大约 30 秒推进一轮；进度在云下载页的「复制到 OpenList」里看。</p>
+                <p className="text-xs text-muted-foreground">复制在后台跑，大约 30 秒推进一轮；进度在云下载页的「复制到 OpenList / CD2」里看。</p>
               )}
             </div>
           ) : (
@@ -221,7 +234,11 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
                     ))}
                   </SelectContent>
                 </Select>
-                {blocked && <p className="text-xs text-warning">{blocked}。到设置页的「复制到 OpenList」里补上就好。</p>}
+                {blocked && (
+                  <p className="text-xs text-warning">
+                    {blocked}。{isMountLayerKind(task?.accountType) ? "" : "到设置页的「网盘挂载」「复制」两节里补上就好。"}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -251,7 +268,7 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label>复制到哪</Label>
-                  <Button type="button" variant="outline" size="sm" disabled={!task || !base || !olAccount} onClick={() => setDstOpen(true)}>
+                  <Button type="button" variant="outline" size="sm" disabled={!task || !base || !layerAccount} onClick={() => setDstOpen(true)}>
                     <FolderOpen className="size-4" />
                     选子目录
                   </Button>
@@ -310,12 +327,16 @@ export function AddCopyDialog({ open, onOpenChange, preset, onQueued }: AddCopyD
           onConfirmMany={(picked) => setPaths((prev) => [...prev, ...picked.filter((p) => !prev.includes(p))])}
         />
       )}
-      {task && base && olAccount && (
+      {task && base && layerAccount && (
         <TreeSelectDialog
           open={dstOpen}
           onOpenChange={setDstOpen}
           title="复制到哪"
-          description={<>在 {base} 下面选一个目录（OpenList 账号 {olAccount}）</>}
+          description={
+            <>
+              在 {base} 下面选一个目录（{engineName} 账号 {layerAccount}）
+            </>
+          }
           load={loadDst}
           onConfirm={(p) => setDstSub(p)}
         />

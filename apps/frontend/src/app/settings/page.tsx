@@ -20,9 +20,10 @@ import { downloadBackupWithToast } from "@/lib/backup";
 import { useModKey } from "@/hooks/use-mod-key";
 import { apiErrorMessage } from "@/lib/axios";
 import { FEATURES } from "@/lib/features";
-import type { AppSettings, Cd2Settings, OpenlistCopySettings, OrganizeSettings, ResourceStatus, UpdateSettings } from "@openstrm/shared";
-import { OpenlistCopySection } from "./components/OpenlistCopySection";
-import { Cd2Section } from "./components/Cd2Section";
+import type { AccountInfo, AppSettings, Cd2Settings, OpenlistCopySettings, OrganizeSettings, ResourceStatus, UpdateSettings } from "@openstrm/shared";
+import { MountSection } from "./components/MountSection";
+import { CopySection } from "./components/CopySection";
+import { tidyMounts } from "@/lib/mount-layer";
 import { OrganizeSection } from "./components/OrganizeSection";
 import { UpdateSection } from "./components/UpdateSection";
 import { TmdbCacheButton } from "./components/TmdbCacheButton";
@@ -41,8 +42,8 @@ const SECTIONS: Section[] = [
   { id: "pansou", title: "资源搜索" },
   { id: "library", title: "收藏夹" },
   ...(FEATURES.hdhiveSearch ? [{ id: "hdhive", title: "HDHive" }] : []),
-  { id: "openlist-copy", title: "复制到 OpenList / CD2" },
-  { id: "cd2", title: "CloudDrive2" },
+  { id: "mount", title: "网盘挂载" },
+  { id: "openlist-copy", title: "复制" },
   { id: "organize", title: "整理与命名" },
   { id: "agent", title: "智能体接入" },
 ];
@@ -341,8 +342,13 @@ function toSettings(v: SettingsValues): AppSettings {
     pansou: v.pansou,
     hdhive: v.hdhive,
     library: v.library,
-    openlistCopy: v.openlistCopy,
-    cd2: v.cd2,
+    // 路径输入打字时原样留着（不然中间的空格打不进去），这里统一去两头空白：⌘S 不失焦就保存的也存不进空白
+    openlistCopy: {
+      ...v.openlistCopy,
+      ...(v.openlistCopy.mounts ? { mounts: tidyMounts(v.openlistCopy.mounts) } : {}),
+      ...(v.openlistCopy.dstDir !== undefined ? { dstDir: v.openlistCopy.dstDir.trim() } : {}),
+    },
+    cd2: { ...v.cd2, ...(v.cd2.mounts ? { mounts: tidyMounts(v.cd2.mounts) } : {}) },
     organize: v.organize,
     update: v.update,
     agent: v.agent,
@@ -434,6 +440,29 @@ export default function SettingsPage() {
       .catch((err) => toast.error(apiErrorMessage(err, "加载设置失败")))
       .finally(() => setLoading(false));
   }, [resetForm]);
+
+  /**
+   * 「网盘挂载」「复制」两节都写 openlistCopy：每次都按表单里的当前值改，不按哪一节渲染时拿到的那份合并——
+   * 拿旧快照合并的话，一节改的会被另一节晚到的回调（比如目录弹框选完）整份覆盖掉
+   */
+  const updateOpenlistCopy = useCallback(
+    (fn: (cur: OpenlistCopySettings) => OpenlistCopySettings) => form.setValue("openlistCopy", fn(form.getValues("openlistCopy") ?? {}), { shouldDirty: true }),
+    [form],
+  );
+  const updateCd2 = useCallback(
+    (fn: (cur: Cd2Settings) => Cd2Settings) => form.setValue("cd2", fn(form.getValues("cd2") ?? {}), { shouldDirty: true }),
+    [form],
+  );
+
+  /** 「网盘挂载」「复制」两节都要账户页的账号：读一次分给它们；null = 还在读 */
+  const [accounts, setAccounts] = useState<AccountInfo[] | null>(null);
+  const [accountsFailed, setAccountsFailed] = useState(false);
+  useEffect(() => {
+    api.accounts
+      .list()
+      .then(setAccounts)
+      .catch(() => setAccountsFailed(true));
+  }, []);
 
   const onSave = useCallback(
     async (v: SettingsValues) => {
@@ -1017,13 +1046,23 @@ export default function SettingsPage() {
               </section>
             )}
 
-            <FormField
-              control={form.control}
-              name="openlistCopy"
-              render={({ field }) => <OpenlistCopySection value={field.value ?? {}} onChange={field.onChange} cd2={form.watch("cd2")} />}
+            {/* 两节写的是同一份 openlistCopy（「网盘挂载」改 OpenList 的账号和挂载根，「复制」改引擎和目标目录），所以不各占一个 FormField */}
+            <MountSection
+              openlist={values.openlistCopy ?? {}}
+              updateOpenlist={updateOpenlistCopy}
+              cd2={values.cd2 ?? {}}
+              updateCd2={updateCd2}
+              accounts={accounts}
+              accountsFailed={accountsFailed}
             />
 
-            <FormField control={form.control} name="cd2" render={({ field }) => <Cd2Section value={field.value ?? {}} onChange={field.onChange} />} />
+            <CopySection
+              value={values.openlistCopy ?? {}}
+              update={updateOpenlistCopy}
+              cd2={values.cd2 ?? {}}
+              accounts={accounts}
+              accountsFailed={accountsFailed}
+            />
 
             <FormField
               control={form.control}

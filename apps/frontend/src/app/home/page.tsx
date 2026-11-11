@@ -58,6 +58,7 @@ import { api, type TaskRow } from "@/lib/api";
 import { usePolling } from "@/hooks/use-polling";
 import { startTaskWithToast } from "@/lib/task-start";
 import { apiErrorBody, apiErrorMessage } from "@/lib/axios";
+import { LAYER_META } from "@/lib/mount-layer";
 import { normTargetDir } from "@/lib/openlist-copy";
 import { AddTaskDialog } from "./components/AddTaskDialog";
 
@@ -392,8 +393,16 @@ function HomeContent() {
 
   /**
    * 开着「复制到 OpenList」的任务：一个「复制」标，队列里有在跑 / 失败的再各给一个，点开是云下载页的复制队列。
-   * 开着却复制不了（比如这个账号在设置页没填挂载根）换成警示色的「复制没生效」，点开是设置页那一节
+   * 开着却复制不了（比如这个账号在设置页没填挂载根）换成警示色的「复制没生效」，点开去改的地方：
+   * 后端说的 copyBlockedAt——挂载层的账号和路径在「网盘挂载」里那一家的面板，目标目录在「复制」一节；
+   * 挂载层账号的任务不在设置页改，打开任务设置把复制关掉
    */
+  const copyFixHref = (task: TaskRow): string | null => {
+    const at = task.copyBlockedAt;
+    if (at === null) return null;
+    if (at === "openlist" || at === "cd2") return `/settings#${LAYER_META[at].anchor}`;
+    return "/settings#openlist-copy";
+  };
   const copyBadges = (task: TaskRow) => {
     const stat = copyStats.get(task.id);
     if (!task.copyToOpenlist?.enabled && !stat) return null;
@@ -402,7 +411,15 @@ function HomeContent() {
       <>
         {task.copyToOpenlist?.enabled &&
           (task.copyBlocked ? (
-            <button type="button" onClick={() => router.push("/settings#openlist-copy")} title={`${task.copyBlocked}。开着也不会复制，点这里去设置页`}>
+            <button
+              type="button"
+              onClick={() => {
+                const href = copyFixHref(task);
+                if (href) router.push(href);
+                else openEditor(task);
+              }}
+              title={`${task.copyBlocked}。开着也不会复制，${copyFixHref(task) ? "点这里去设置页" : "点这里打开任务设置"}`}
+            >
               <StatusBadge tone="warning">复制没生效</StatusBadge>
             </button>
           ) : (

@@ -1,5 +1,5 @@
 /**
- * CloudDrive2 的「检查连接」：账户弹框按还没保存的草稿验（带 url），设置页「CloudDrive2」一节按选中的账号验（只带 account 和映射）。
+ * CloudDrive2 的「检查连接」：账户弹框按还没保存的草稿验（带 url），设置页「网盘挂载」「复制」两节按选中的账号验（只带 account，映射在页面上逐行查）。
  * 怎么验、各段说什么在 services/cd2/check.ts。
  */
 import type { FastifyInstance } from "fastify";

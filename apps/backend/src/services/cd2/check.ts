@@ -1,6 +1,6 @@
 /**
  * 「检查连接」：对着一个 CloudDrive2 连一次，各段各自成败——地址通不通、凭据对不对、令牌的权限够不够、
- * 每个挂载映射在 CD2 里列不列得出来。账户弹框（还没保存的草稿）和设置页「CloudDrive2」一节（已保存的账号）共用。不回任何令牌。
+ * 每个挂载映射在 CD2 里列不列得出来。账户弹框（还没保存的草稿）和设置页「网盘挂载」「复制」两节（已保存的账号）共用。不回任何令牌。
  */
 import type { Cd2CheckResult, Cd2TokenUse } from "@openstrm/shared";
 import { getAccount } from "../../db/repositories/accounts.js";
@@ -18,7 +18,7 @@ export interface Cd2CheckInput {
   apiToken?: string;
   username?: string;
   password?: string;
-  /** 网盘账号名 → 它在 CD2 里的路径；设置页检查映射时带 */
+  /** 网盘账号名 → 它在 CD2 里的路径；带了就逐个列一下。设置页不带：映射在「网盘挂载」里逐行经目录浏览接口查（还核对任务目录） */
   mounts?: Record<string, string>;
 }
 

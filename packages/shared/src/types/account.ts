@@ -24,7 +24,7 @@ export interface AccountQuark {
 
 /**
  * CloudDrive2（CD2）：gRPC 地址 + API 令牌（推荐）或用户名口令。和 OpenList 账号一样能建同步任务、浏览目录、整理；
- * 设置页「CloudDrive2」一节选中的那个账号还负责目录缓存刷新和复制引擎
+ * 设置页「网盘挂载」里 CloudDrive2 那块选中的那个账号还负责目录缓存刷新和复制引擎
  */
 export interface AccountCd2 {
   accountType: "cd2";
