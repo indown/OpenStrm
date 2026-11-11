@@ -75,6 +75,7 @@
 - `/d/` 直链免签名要把 `sign_all` 设成 false；guest 列目录仍 401，Emby 只需要 `/d/`。
 - 上传测试文件 `PUT /api/fs/put`（`File-Path` 头要 URL 编码、`As-Task: false`）；删实验目录 `POST /api/fs/remove {dir, names}`（115 进回收站）。
 - 容器的库里存着挂进去的网盘 cookie，用完 `docker rm -f` 连数据目录一起删。
+- v4.2.9（2026-11-11）首次启动不再自动建 admin：库里只有 guest，`./openlist admin set` 什么都不说就退了（命令行的日志默认只写 `data/log/log.log`，加 `--log-std` 才看得到「failed get admin user: record not found」），登录一直 401。起容器时带 `-e OPENLIST_ADMIN_PASSWORD=<口令>` 才会建 admin。
 
 ## Emby 与播放
 
@@ -100,6 +101,7 @@
 - API 令牌按权限勾：「读」才能列目录 / forceRefresh；复制引擎要「复制」+「查看传输任务」，少了后者 `GetCopyTasks` 回 `PERMISSION_DENIED 7（get transfer tasks permission required）`，队列会改按目标目录核对；`GetAllCloudApis` 又是另一项权限，没勾就读不到事件监听状态。
 - CD2 对 115 开放平台自己会跟外部改动（撤销 11 秒后不刷新也列到了原名，多半是它的云盘事件监听），我们的 forceRefresh 对这种云盘多余但无害；对没有事件监听的云盘才有用，这次验不了。
 - 复制时目标目录里先是 `<名字>.clfstmp` + `.progress`，最终名出现才算完；单文件任务的 uploadedFiles 只有 0 / 1，进度没有中间值。115 开放平台直链下到 NAS 二十多 MB/s。
+- 2026-11-11：本机 Docker Desktop（Apple 芯片，镜像有 arm64）也能起：`-p 127.0.0.1:19798:19798 -e CLOUDDRIVE_HOME=/Config`，只挂 `/Config` 和一个当本地文件夹用的目录，不用 `--privileged`、不挂 FUSE。登录、115 开放平台扫码、本地文件夹、API 令牌、复制都正常；lab 后端在宿主机上，账号地址填 `http://127.0.0.1:19798`。
 
 ### CD2 的 gRPC 接口在真机上的表现（2026-11-10，lab 实例，115 开放平台和本地文件夹存储都试过，两边一样）
 
