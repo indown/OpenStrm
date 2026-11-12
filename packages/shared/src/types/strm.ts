@@ -178,6 +178,13 @@ export interface StrmPosterResult {
   posters: Record<string, StrmPoster>;
   /** 有线索的目录（本地图 / id 标签 / nfo / 整理记录），不管最后拿没拿到图；strm 页拿它数「认出来几个」 */
   known: string[];
+  /**
+   * 还值得联网问一遍的目录：有 id 线索、离线的几级没问到答案。没配 TMDB key 时是空的（问了也没处问）；
+   * 这一次联网问过的（有图，或者 TMDB 说没有）不再算。网格视图先发离线的一遍，再拿这份名单分批联网补
+   */
+  pending: string[];
+  /** 这一次去 TMDB 现查时连不上（不是 TMDB 说没有）：这个目录列表里剩下的别再问了，每问一批都要白等一回超时 */
+  unreachable?: true;
 }
 
 /** 全库抽出来的一张海报：带上它是哪个任务、哪个作品目录的（local 的图要拿 taskId 去取） */

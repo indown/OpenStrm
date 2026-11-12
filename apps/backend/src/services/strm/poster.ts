@@ -361,20 +361,26 @@ async function resolveOffline(lib: Library, rels: string[], opts: OfflineOptions
 /* ------------------------------- strm 页 ------------------------------- */
 
 export interface ResolvePostersOptions {
-  /** 只用离线的几级，不联网：strm 页数「多少个目录认出来了」的那几批用 */
+  /** 只用离线的几级，不联网：strm 页数「多少个目录认出来了」的那几批、网格视图的第一遍用 */
   offline?: boolean;
+  /**
+   * 本地图太大（超过 WALL_LIMITS.LOCAL_MAX_BYTES）、离线又有外链小图的，换成小图，本地那张留作后备——和任务页那面墙同一条规矩。
+   * 网格视图一屏二十几张图，刮削器存的原图一张一两 MB；背景的单张糊图不带它（铺满全屏，大图反而好）
+   */
+  compact?: boolean;
 }
 
 /**
- * 一批目录（相对任务根）各自的海报，以及哪些有线索。拿不到海报的不出现在 posters 里。
+ * 一批目录（相对任务根）各自的海报，以及哪些有线索、哪些还值得联网问。拿不到海报的不出现在 posters 里。
  * 超过 POSTER_LIMITS.PATHS 的部分直接丢掉——界面一屏也放不下那么多。
  */
 export async function resolvePosters(task: TaskDefinition, rels: string[], opts: ResolvePostersOptions = {}): Promise<StrmPosterResult> {
   const wanted = [...new Set(rels)].slice(0, POSTER_LIMITS.PATHS);
   const lib = libraryOf(task, listTasks());
   const { apiKey, language } = tmdbSettings();
-  const results = await resolveOffline(lib, wanted, {}, language);
+  const results = await resolveOffline(lib, wanted, opts.compact ? { localMaxBytes: WALL_LIMITS.LOCAL_MAX_BYTES } : {}, language);
 
+  let unreachable = false;
   if (!opts.offline && apiKey) {
     const client = new TmdbClient(apiKey, language);
     const quota = { left: Number.POSITIVE_INFINITY };
@@ -384,13 +390,21 @@ export async function resolvePosters(task: TaskDefinition, rels: string[], opts:
       const got = await fetchClue(client, r.pending.clue, r.pending.kinds, quota);
       if (got.poster) r.poster = got.poster;
       // 连不上：别让剩下的每一个都再等一回超时
-      if (got.failed) break;
+      if (got.failed) {
+        unreachable = true;
+        break;
+      }
+      // 问到了答案（有图，或者 TMDB 说没有，都记进了缓存）：不用再问
+      r.pending = undefined;
     }
   }
 
   return {
     posters: Object.fromEntries(results.flatMap((r) => (r.poster ? [[r.rel, r.poster] as const] : []))),
     known: results.filter((r) => r.known).map((r) => r.rel),
+    // 没配 key 的问了也没处问，不报
+    pending: apiKey ? results.filter((r) => r.pending).map((r) => r.rel) : [],
+    ...(unreachable ? { unreachable: true as const } : {}),
   };
 }
 

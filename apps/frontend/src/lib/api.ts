@@ -946,8 +946,11 @@ export const api = {
       data(axiosInstance.post<StrmRegenerateResult>("/api/strm/regenerate", { taskId, path, mode }, { timeout: 330_000 })),
     rewrite: (taskId: string, path: string, dryRun: boolean) =>
       data(axiosInstance.post<StrmRewriteResult>("/api/strm/rewrite", { taskId, path, dryRun }, { timeout: 120_000 })),
-    /** 背景海报：一批目录各拿一张，拿不到的不在结果里；known 是有线索的目录。offline 只用离线的几级、不去 TMDB 现查 */
-    posters: (taskId: string, paths: string[], opts: { offline?: boolean } = {}) =>
+    /**
+     * 海报（背景墙、网格视图的片架）：一批目录各拿一张，拿不到的不在结果里；known 是有线索的目录，pending 是还值得联网问的。
+     * offline 只用离线的几级、不去 TMDB 现查；compact 把太大的本地图换成外链小图（本地那张放进 fallback）
+     */
+    posters: (taskId: string, paths: string[], opts: { offline?: boolean; compact?: boolean } = {}) =>
       data(axiosInstance.post<StrmPosterResult>("/api/strm/posters", { taskId, paths, ...opts })),
     /** 任务页背景：所有任务的本地目录里抽一批作品海报，新的在前。头一回要把整个库走一遍，给宽一点 */
     allPosters: () => data(axiosInstance.get<StrmAllPostersResult>("/api/strm/posters/all", { timeout: 60_000 })),

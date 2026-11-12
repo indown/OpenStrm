@@ -418,6 +418,8 @@ test("海报：本地图片 / 目录名 id 标签 / 整理记录三级都能拿�
       ["Local Show", "Named Movie (2025)", "Organized Show", "Suffixed Season", "Tagged Show (2024) [tmdbid=77]"].sort(),
       "Thumbed Season / Plain Show 没有任何线索，不算认出来",
     );
+    assert.deepEqual(res.json<StrmPosterResult>().pending, [], "没配 TMDB key：没有值得联网问的");
+    assert.equal(res.json<StrmPosterResult>().unreachable, undefined);
   } finally {
     deleteRun("run-poster");
   }
@@ -484,19 +486,27 @@ test("海报：strm 页离线的几级全试过才联网，offline 不联网，4
     assert.deepEqual(tmdb.asked, [], "offline 一个都不问");
     assert.deepEqual([...off.known].sort(), [...dirs].sort(), "带 id 标签就算认出来了，拿没拿到图不要紧");
     assert.equal(off.posters[dirs[2]]?.source, "run", "整理记录和 id 标签说的是同一部：离线就有图");
+    assert.deepEqual([...off.pending].sort(), [dirs[0], dirs[1]].sort(), "有 id、离线没问到答案的值得联网问；整理记录顶得上的不算");
+    assert.equal(off.unreachable, undefined, "offline 没去连，谈不上连不上");
 
     const on = (await post("/api/strm/posters", { taskId: "r-poster", paths: dirs })).json<StrmPosterResult>();
     assert.equal(on.posters[dirs[0]]?.url, "https://image.tmdb.org/t/p/w500/a.jpg");
     assert.equal(on.posters[dirs[1]], undefined, "两种类型 TMDB 都说没有");
     assert.equal(on.posters[dirs[2]]?.source, "run");
     assert.deepEqual(tmdb.asked, ["movie/9001", "movie/9002", "tv/9002"], "没有子目录先当电影问，404 再问剧；有整理记录的不问");
+    assert.deepEqual(on.pending, [], "这一次问到了答案（有图 / TMDB 说没有）的不再算");
+    assert.equal(on.unreachable, undefined);
 
     tmdb.asked.length = 0;
+    const again = (await post("/api/strm/posters", { taskId: "r-poster", paths: dirs, offline: true })).json<StrmPosterResult>();
+    assert.deepEqual(again.pending, [], "问过的记在缓存里：离线那一遍也不再报");
     await post("/api/strm/posters", { taskId: "r-poster", paths: dirs });
     assert.deepEqual(tmdb.asked, [], "有图的、404 的都记在缓存里，不再问");
 
-    await post("/api/strm/posters", { taskId: "r-poster", paths: down });
+    const lost = (await post("/api/strm/posters", { taskId: "r-poster", paths: down })).json<StrmPosterResult>();
     assert.deepEqual(tmdb.asked, ["movie/9005"], "连不上：第一个失败就停，剩下的不再一个个等超时");
+    assert.equal(lost.unreachable, true, "连不上要说出来，网格视图据此不再一批批问");
+    assert.deepEqual([...lost.pending].sort(), [...down].sort(), "没问成的和没轮到的都还等着");
   } finally {
     tmdb.stop();
     useTmdbKey(false);
@@ -706,6 +716,15 @@ test("全库海报：本地图太大，离线有小图就换小图、本地那�
     const res = (await post("/api/strm/posters", { taskId: lib.task.id, paths: [withAlt, huge] })).json<StrmPosterResult>();
     assert.equal(res.posters[withAlt]?.source, "local", "strm 页不按大小换");
     assert.equal(res.posters[huge]?.source, "tmdb", "太大的在 strm 页一样当没有");
+
+    // 网格视图带 compact：和墙同一条规矩
+    const compact = (await post("/api/strm/posters", { taskId: lib.task.id, paths: [withAlt, "Big Alone"], compact: true })).json<StrmPosterResult>();
+    assert.deepEqual(
+      { url: compact.posters[withAlt]?.url, fallback: compact.posters[withAlt]?.fallback },
+      { url: "https://image.tmdb.org/t/p/w500/small.jpg", fallback: `${withAlt}/poster.jpg` },
+      "compact：大图换成外链小图，本地那张留作后备",
+    );
+    assert.deepEqual(compact.posters["Big Alone"], { source: "local", url: "Big Alone/poster.jpg" }, "compact：离线没有别的图，还是用本地大图");
   } finally {
     lib.cleanup();
   }

@@ -11,15 +11,16 @@
  *
  * stream 态顺带数一下「子目录里有几个认出来了」（页头那句 N 个目录 · M 已识别）：这个手机上也要，
  * 所以问接口不看屏幕宽窄，只有下载图片看——窄屏上墙不画。
+ *
+ * 网格视图（wall: false）下漂移的那面墙不画——前景已经是一面海报墙了：这时只数、不下图，问接口也只用离线的几级。
+ * 进到作品里的那张糊图照旧。
  */
 import { useEffect, useState } from "react";
 import type { StrmPosterResult } from "@openstrm/shared";
 import { useBackdropWide, type BackdropPoster } from "@/components/poster-backdrop";
 import { api } from "@/lib/api";
 import { NO_POSTERS, toBackdropPosters, type ShownPosters } from "@/lib/poster-images";
-
-/** 和后端 organize/identify.ts 的 RE_ID_TAG 同一条规则：Emby `[tmdbid=1]`、Jellyfin `[tmdbid-1]`、Plex `{tmdb-1}` */
-const ID_TAG = /[[{]\s*(?:tmdbid|tmdb)\s*[=-]\s*\d+\s*[\]}]/i;
+import { workRootOf } from "@/lib/strm-entries";
 
 /** 一屏也放不下更多，多了只是白拉图 */
 const MAX_TILES = 24;
@@ -39,15 +40,6 @@ interface Shown {
 }
 
 const NOTHING: Shown = { mode: "stream", set: NO_POSTERS };
-
-/** 当前路径里最靠后的那个带 id 标签的段——进到作品里了就返回作品目录 */
-function workRootOf(path: string): string | null {
-  const segs = path.split("/").filter(Boolean);
-  for (let i = segs.length - 1; i >= 0; i--) {
-    if (ID_TAG.test(segs[i])) return segs.slice(0, i + 1).join("/");
-  }
-  return null;
-}
 
 const parentOf = (path: string): string => path.split("/").filter(Boolean).slice(0, -1).join("/");
 const under = (path: string, name: string): string => (path ? `${path}/${name}` : name);
@@ -76,8 +68,15 @@ async function countKnown(taskId: string, path: string, dirs: string[], first: S
   return known;
 }
 
-export function useDirPosters(opts: { taskId: string; path: string; dirs: string[]; enabled: boolean }): DirBackdrop {
-  const { taskId, path, enabled } = opts;
+export function useDirPosters(opts: {
+  taskId: string;
+  path: string;
+  dirs: string[];
+  enabled: boolean;
+  /** 漂移的那面墙要不要画（网格视图不要）；默认要 */
+  wall?: boolean;
+}): DirBackdrop {
+  const { taskId, path, enabled, wall = true } = opts;
   const wide = useBackdropWide();
   const dirsKey = JSON.stringify(opts.dirs);
   const [shown, setShown] = useState<Shown>(NOTHING);
@@ -99,11 +98,14 @@ export function useDirPosters(opts: { taskId: string; path: string; dirs: string
       setRecognized(null);
       return;
     }
+    // 要不要图：窄屏不画墙；网格视图只留单作品那一张
+    const images = wide && (mode === "single" || wall);
     let alive = true;
     void (async () => {
       let first: StrmPosterResult;
       try {
-        first = await api.strm.posters(taskId, paths);
+        // 不要图就不用为了图去 TMDB 现查：数线索离线的几级就够
+        first = await api.strm.posters(taskId, paths, images ? {} : { offline: true });
       } catch {
         // 背景图而已，拿不到就当没有
         if (alive) {
@@ -115,7 +117,7 @@ export function useDirPosters(opts: { taskId: string; path: string; dirs: string
       if (!alive) return;
       const items = paths.flatMap((p) => (Object.hasOwn(first.posters, p) ? [{ key: p, taskId, poster: first.posters[p] }] : []));
       const [set, count] = await Promise.all([
-        wide ? toBackdropPosters(items, () => alive) : Promise.resolve(NO_POSTERS),
+        images ? toBackdropPosters(items, () => alive) : Promise.resolve(NO_POSTERS),
         mode === "stream" ? countKnown(taskId, path, dirs, first, () => alive) : Promise.resolve(null),
       ]);
       if (!alive) {
@@ -129,7 +131,7 @@ export function useDirPosters(opts: { taskId: string; path: string; dirs: string
     return () => {
       alive = false;
     };
-  }, [taskId, path, dirsKey, enabled, wide]);
+  }, [taskId, path, dirsKey, enabled, wide, wall]);
 
   return { mode: shown.mode, posters: shown.set.posters, recognized };
 }

@@ -39,8 +39,10 @@ const verifyBody = z.object({ taskId, path: optionalPath });
 const postersBody = z.object({
   taskId,
   paths: z.array(z.string().max(4096)).min(1, "paths is required").max(POSTER_LIMITS.PATHS),
-  /** 只用离线的几级、不去 TMDB 现查：只想数「认出来几个」的时候用 */
+  /** 只用离线的几级、不去 TMDB 现查：只想数「认出来几个」的时候、网格视图的第一遍用 */
   offline: z.boolean().default(false),
+  /** 本地图太大、离线又有外链小图的换成小图（本地那张放进 fallback）：网格视图一屏几十张，不拉原图 */
+  compact: z.boolean().default(false),
 });
 
 function loadTask(id: string): TaskDefinition {
@@ -69,10 +71,13 @@ export default async function (fastify: FastifyInstance) {
     return mediaOf(loadTask(body.taskId), body.paths);
   });
 
-  /** 背景海报：一批目录各拿一张，拿不到的不在结果里；known 是有线索的目录。纯装饰，任何一步失败都只是没有海报 */
+  /**
+   * 海报（背景墙、网格视图的片架）：一批目录各拿一张，拿不到的不在结果里；known 是有线索的目录，pending 是还值得联网问的。
+   * 任何一步失败都只是没有海报
+   */
   fastify.post("/api/strm/posters", auth, async (request) => {
     const body = parse(postersBody, request.body);
-    return resolvePosters(loadTask(body.taskId), body.paths, { offline: body.offline });
+    return resolvePosters(loadTask(body.taskId), body.paths, { offline: body.offline, compact: body.compact });
   });
 
   /** 任务页背景：所有任务的本地目录里抽一批作品海报，新的在前。只用离线的几级，缺的后台补；结果在内存里留几分钟 */
