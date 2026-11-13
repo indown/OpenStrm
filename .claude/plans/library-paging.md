@@ -62,7 +62,7 @@
 - [x] 浏览器冒烟（2026-11-12，合成库）
 - [x] typecheck / lint / 全量测试 / 生产构建（2026-11-12，后端 1824 / 前端 42）
 - [x] 「回到顶部」按钮：实现 + 浏览器冒烟 + typecheck / lint / 前端测试 / 生产构建（2026-11-13，见末节）
-- [ ] 提交 / 发版：2026-11-13 用户：「发个正式版吧」，随 v2.28.0 一起提交，发完在「发布」一节补记录
+- [x] 提交 / 发版：v2.28.0 正式版（2026-11-13，见「发布」）
 
 ## 实施记录（2026-11-12）
 
@@ -169,3 +169,37 @@ Chrome 里量的 `window.scrollTo({ top: 0, behavior: "smooth" })`：900px 0.73 
 **没验的**：Safari / Firefox（sticky、容器查询、先跳再滑都只在 Chrome 里看了；别家的平滑滚动时长也没量）；真手机——触屏下按钮高 40px 那条规则在样式表里，没在触屏上看；键盘 Tab 的先后顺序没专门走（它在页面内容的最后）。
 
 **收尾**：lab 后端、假图服务、dev 进程都停了，浏览器里的临时令牌清了、标签页关了，lab 目录（库、令牌、假图）已删；造数据和起假图服务的脚本留在本次会话的 scratchpad。没碰 `config/openstrm.db`，没碰任何网盘。
+
+## 发布（2026-11-13）
+
+用户：「发个正式版吧」。没走 rc，直接发正式版；没做评审（用户没叫）。这一版带的是 strm 网格视图（方案 `strm-grid-view.md`）和这份方案里的两样。
+
+- 提交（`v2.27.0..v2.28.0`）：
+  - `f89db4b docs(plans): record the v2.27.0 release`
+  - `6c947b6 feat(strm): add a grid view and browse all tasks by default`
+  - `e547197 docs(plans): record the strm grid view and the all-tasks default`
+  - `049bf91 feat(library): load more works and search hits while scrolling`
+  - `b0870c6 feat(library): add a back-to-top button to the favourites page`
+  - `da525b7 docs(plans): record the favourites auto-loading and the back-to-top button`
+  - `dde2b98 chore(release): v2.28.0`（只改三个 `package.json` 的版本号）
+- 自动加载和「回到顶部」分成了两个提交：两批改动不在同一批文件里（前者是 `LibraryWorks.tsx` / `LibraryHits.tsx` / `use-near-viewport.ts`，后者是 `back-to-top.tsx` / `app/library/page.tsx`），拆开不费事。
+- tag `v2.28.0`（注释 `v2.28.0`），指向 dde2b98。
+- 发版前在改好版本号的这份代码上跑了根目录 typecheck / lint / test 和前端生产构建：后端 1824 / 1824（302 秒），前端 42 / 42。
+- 推送前又用生产拓扑在 lab 上走了一遍（后端带 `FRONTEND_DIR` 直接发 `apps/frontend/out`，页面和接口同源、中间没有 dev 反代；数据还是 scratch 库 + 假片库 + 合成收藏夹）：
+  - strm 页：不带参数打开是全部任务、网格，三个任务各一组；往下滚海报照常懒加载（44 张全部加载完）；切到列表再切回来，选择记在 `openstrm.strm.view`；点一格进作品目录，面包屑和文件格子都对。
+  - 收藏夹：作品墙 60 → 120 → … → 360，每次一页、没有重复；按钮在顶上不可见、滚深了居中出现（产物的样式表里容器查询生效）；从 12181 回顶 0.64 秒。搜索结果 30 → 120，按钮底下没有别的按钮。
+  - 侧栏版本号显示 v2.28.0；两页的控制台都没有任何消息。
+- 23:00 UTC `git push origin v2 v2.28.0`，main 从 0112463 快进到 dde2b98（main == v2 == v2.28.0）。
+- 23:13 UTC 全部核对完：
+  - Release 四个作业 + CI@v2 + CI@main 全绿；
+  - Docker Hub `v2.28.0` 和 `latest` 同为 fc836f81f105（amd64 + arm64）；
+  - GitHub Release 不是 prerelease，是仓库最新。
+- 迁移：没有。设置键：没有新的。接口：`POST /api/strm/posters` 入参多了 `compact`，回包多了 `pending` / `unreachable`（都是加的）。浏览器本地多一个键 `openstrm.strm.view`（strm 页用列表还是网格）。
+- 升级说明交用户手动贴，要点：
+  - strm 管理页多了网格视图，而且是默认视图；右上角能切回列表，选择按浏览器记住；
+  - strm 管理页不带任务打开时默认列出全部任务（按任务分组），不再自动进第一个任务；只有一个任务时照旧直接进；
+  - 收藏夹的作品墙和搜索结果往下滚自动加载，失败有「重试」；
+  - 修掉了作品墙展开超过 200 部以后不再更新的问题；
+  - 收藏夹页多了「回到顶部」按钮；
+  - 没有迁移，不用改配置。
+- 发出去的时候还没验的：真实的大收藏夹、真手机、Safari / Firefox（上面各节「没验的」里列着）。
