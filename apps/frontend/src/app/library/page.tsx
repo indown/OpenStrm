@@ -36,6 +36,7 @@ import { StatusBadge, TONE_CLASS, type StatusTone } from "@/components/status-ba
 import { ProgressBar } from "@/components/progress-bar";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
+import { BackToTop } from "@/components/back-to-top";
 import { TableSkeleton } from "@/components/loading";
 import { LibraryHits, ShareHealthBadge } from "@/components/LibraryHits";
 import {
@@ -92,16 +93,20 @@ type View = "all" | "indexing" | "expired" | "locked";
 
 export default function LibraryPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="space-y-6">
-          <PageHeader icon={Bookmark} title="收藏夹" description={DESCRIPTION} />
-          <TableSkeleton rows={5} />
-        </div>
-      }
-    >
-      <LibraryContent />
-    </Suspense>
+    <>
+      <Suspense
+        fallback={
+          <div className="space-y-6">
+            <PageHeader icon={Bookmark} title="收藏夹" description={DESCRIPTION} />
+            <TableSkeleton rows={5} />
+          </div>
+        }
+      >
+        <LibraryContent />
+      </Suspense>
+      {/* 作品墙和搜索结果是往下滚自动接页的，滚深了靠它回到顶上的筛选栏和搜索框；「分享」列表长了也用得上。要放在内容最后 */}
+      <BackToTop />
+    </>
   );
 }
 
