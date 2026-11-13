@@ -16,6 +16,7 @@ import {
 import { StatusBadge } from "@/components/status-badge";
 import { ShareDetailDialog } from "@/components/ShareDetailDialog";
 import { SaveToDriveDialog, type SaveToTaskChoice } from "@/components/SaveToDriveDialog";
+import { isNearViewport, useNearViewport } from "@/hooks/use-near-viewport";
 import { useShareDetail } from "@/hooks/use-share-detail";
 import { api } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/axios";
@@ -218,9 +219,20 @@ export interface LibraryHitsSummary {
   error: string | null;
 }
 
+/** 搜索接口一次最多给这么多条（后端 routes/library/index.ts 的 searchSchema）：重搜已经展开的那一截要按它分块 */
+const SEARCH_MAX_LIMIT = 100;
+
+const hitKey = (h: LibraryHit): string => `${h.sourceId}:${h.nodeId}`;
+
+/** 接在后面，已经列出来的不要第二条 */
+function appendHits(have: LibraryHit[], more: LibraryHit[]): LibraryHit[] {
+  const seen = new Set(have.map(hitKey));
+  return [...have, ...more.filter((h) => !seen.has(hitKey(h)))];
+}
+
 interface Props {
   query: string;
-  /** embedded：首页搜索顶上那一块，只列几条 + 「在影库里看全部」；page：影库页整页，能往下加载 */
+  /** embedded：首页搜索顶上那一块，只列几条 + 「在影库里看全部」；page：影库页整页，往下滚自动接着加载 */
   variant?: "embedded" | "page";
   pageSize?: number;
   onSummary?: (s: LibraryHitsSummary) => void;
@@ -237,6 +249,12 @@ export function LibraryHits({ query, variant = "page", pageSize = 20, onSummary 
   const [result, setResult] = useState<LibrarySearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  /** 接下一页没接上的原因：有它就停住不再自动试，等人点「重试」 */
+  const [moreError, setMoreError] = useState<string | null>(null);
+  /** 已经展开到第几条：下一页从这里接（接页时按条目去重，列出来的条数可能少） */
+  const [shown, setShown] = useState(pageSize);
+  const shownRef = useRef(pageSize);
+  const loadingMoreRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<Record<string, LibraryShareHealth>>({});
   const [showExpired, setShowExpired] = useState(false);
@@ -255,10 +273,26 @@ export function LibraryHits({ query, variant = "page", pageSize = 20, onSummary 
         setLoading(false);
         return;
       }
-      if (!silent) setLoading(true);
+      if (!silent) {
+        setLoading(true);
+        setMoreError(null);
+        shownRef.current = pageSize;
+      }
+      // 静默重搜（查出有分享失效、打开 / 转存失败之后）拉回已经展开的那么多条：只拉第一页的话下面展开的几页会缩回去
+      const count = Math.max(pageSize, shownRef.current);
       try {
-        const r = await api.library.search({ q, limit: pageSize });
+        let r = await api.library.search({ q, limit: Math.min(count, SEARCH_MAX_LIMIT) });
         if (my !== seq.current) return;
+        let got = r.hits.length;
+        while (got > 0 && got < Math.min(count, r.total)) {
+          const more = await api.library.search({ q, limit: Math.min(SEARCH_MAX_LIMIT, count - got), offset: got });
+          if (my !== seq.current) return;
+          if (more.hits.length === 0) break;
+          r = { ...r, hits: appendHits(r.hits, more.hits), total: more.total };
+          got += more.hits.length;
+        }
+        shownRef.current = got;
+        setShown(got);
         setResult(r);
         setError(null);
       } catch (err) {
@@ -286,13 +320,15 @@ export function LibraryHits({ query, variant = "page", pageSize = 20, onSummary 
   const checkedFor = useRef("");
   useEffect(() => {
     if (!result || result.hits.length === 0) return;
-    const key = `${q}\n${result.hits.map((h) => h.shareCode).join(",")}`;
+    // 只看第一页的：往下接页不该每接一页就再问一遍网盘（重搜以后第一页变了才会再问）
+    const head = result.hits.slice(0, pageSize);
+    const key = `${q}\n${head.map((h) => h.shareCode).join(",")}`;
     if (checkedFor.current === key) return;
     checkedFor.current = key;
     const now = Date.now();
     const codes = [
       ...new Set(
-        result.hits
+        head
           .filter((h) => h.health.status !== "expired" && (!h.health.checkedAt || now - h.health.checkedAt * 1000 > STALE_MS))
           .map((h) => h.shareCode),
       ),
@@ -310,20 +346,52 @@ export function LibraryHits({ query, variant = "page", pageSize = 20, onSummary 
     return () => {
       alive = false;
     };
-  }, [result, q, run]);
+  }, [result, q, run, pageSize]);
 
-  const loadMore = async () => {
-    if (!result) return;
+  /* ---- 接下一页：往下滚自动接；出错了停住等人点重试 ---- */
+  const hasMore = variant === "page" && result !== null && shown < result.total;
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current) return;
+    // 换了关键词 / 重搜过：回来的这一页对不上号，丢掉
+    const my = seq.current;
+    const offset = shownRef.current;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
+    setMoreError(null);
     try {
-      const r = await api.library.search({ q, limit: pageSize, offset: result.hits.length });
-      setResult((prev) => (prev ? { ...prev, hits: [...prev.hits, ...r.hits], total: r.total } : r));
+      const r = await api.library.search({ q, limit: pageSize, offset });
+      if (my !== seq.current) return;
+      // 一条都没回来：后面没有了，别原地打转
+      const next = r.hits.length > 0 ? offset + r.hits.length : Math.max(offset, r.total);
+      shownRef.current = next;
+      setShown(next);
+      setResult((prev) => (prev ? { ...prev, hits: appendHits(prev.hits, r.hits), total: r.total } : prev));
     } catch (err) {
-      toast.error(apiErrorMessage(err, "加载更多失败"));
+      if (my === seq.current) setMoreError(apiErrorMessage(err, "网络或服务出了问题"));
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  };
+  }, [q, pageSize]);
+
+  // 浏览器没有 IntersectionObserver 的（很老的）退回按钮：那种情况下哨兵永远算「在附近」，自动接会一口气全拉完
+  const [auto] = useState(() => typeof IntersectionObserver !== "undefined");
+  const [observeTail, nearEnd] = useNearViewport<HTMLDivElement>();
+  const tailEl = useRef<HTMLDivElement | null>(null);
+  const tailRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      tailEl.current = el;
+      observeTail(el);
+    },
+    [observeTail],
+  );
+  useEffect(() => {
+    // result 在依赖里：一页接完以后哨兵还在附近（屏幕高、一页没填满）就接着接
+    if (!auto || !nearEnd || !hasMore || loading || loadingMore || moreError) return;
+    // nearEnd 是观察者上一回说的，刚接完一页时还没改口：现量一下，不然每次都多接一页
+    if (tailEl.current && !isNearViewport(tailEl.current)) return;
+    void loadMore();
+  }, [auto, nearEnd, hasMore, loading, loadingMore, moreError, loadMore, result]);
 
   const toggleExpired = async () => {
     const next = !showExpired;
@@ -340,8 +408,7 @@ export function LibraryHits({ query, variant = "page", pageSize = 20, onSummary 
 
   const onOpen = useCallback(
     async (hit: LibraryHit) => {
-      const key = `${hit.sourceId}:${hit.nodeId}`;
-      setOpeningKey(key);
+      setOpeningKey(hitKey(hit));
       try {
         const root = hit.nodeId === "0";
         const r = await share.load(hit.shareUrl, {
@@ -447,11 +514,11 @@ export function LibraryHits({ query, variant = "page", pageSize = 20, onSummary 
           <div className="divide-y">
             {visible.map((hit) => (
               <LibraryHitRow
-                key={`${hit.sourceId}:${hit.nodeId}`}
+                key={hitKey(hit)}
                 hit={hit}
                 keyword={q}
                 health={healthOf(hit)}
-                opening={openingKey === `${hit.sourceId}:${hit.nodeId}`}
+                opening={openingKey === hitKey(hit)}
                 onOpen={(h) => void onOpen(h)}
                 onSave={onSave}
                 onFindAlt={onFindAlt}
@@ -460,13 +527,33 @@ export function LibraryHits({ query, variant = "page", pageSize = 20, onSummary 
             ))}
           </div>
         )}
-        {variant === "page" && result && result.hits.length < result.total && (
-          <div className="border-t px-4 py-2.5 text-center">
-            <Button variant="ghost" size="sm" onClick={() => void loadMore()} disabled={loadingMore}>
-              {loadingMore && <Loader2 className="animate-spin" />}
-              再加载 {Math.min(pageSize, result.total - result.hits.length)} 条（共 {result.total} 条）
-            </Button>
-          </div>
+        {hasMore && result ? (
+          moreError ? (
+            <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t px-4 py-2.5 text-xs text-destructive" role="alert">
+              <span>后面的没加载出来：{moreError}</span>
+              <Button variant="outline" size="sm" onClick={() => void loadMore()} disabled={loadingMore}>
+                重试
+              </Button>
+            </div>
+          ) : auto ? (
+            // 哨兵：这一行进到视口附近就接下一页
+            <div ref={tailRef} className="flex items-center justify-center gap-2 border-t px-4 py-2.5 text-xs text-muted-foreground" role="status">
+              <Loader2 className="size-3.5 animate-spin" />
+              正在加载后面的 {result.total - shown} 条…
+            </div>
+          ) : (
+            <div className="border-t px-4 py-2.5 text-center">
+              <Button variant="ghost" size="sm" onClick={() => void loadMore()} disabled={loadingMore}>
+                {loadingMore && <Loader2 className="animate-spin" />}
+                再加载 {Math.min(pageSize, result.total - shown)} 条（共 {result.total} 条）
+              </Button>
+            </div>
+          )
+        ) : (
+          // 一页就装下的不用说；往下接过页的，到底了说一声
+          variant === "page" && result && shown > pageSize && (
+            <div className="border-t px-4 py-2.5 text-center text-xs text-muted-foreground tabular-nums">共 {result.total} 条，都在这儿了</div>
+          )
         )}
         {variant === "embedded" && result && result.total > visible.length && visible.length > 0 && (
           <div className="border-t px-4 py-2 text-right">
